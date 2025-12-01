@@ -1,22 +1,23 @@
 # Investment Strategy with Alpaca and Google Cloud Functions
 
-This project contains a set of Python Cloud Functions for managing a multi-strategy portfolio using Alpaca's trading API. The portfolio consists of six distinct investment strategies: **High-Frequency Equity Allocation (HFEA)**, **Golden HFEA Lite**, **S&P 500 with 200-SMA**, **9-Sig Strategy (Jason Kelly Methodology)**, **Dual Momentum Strategy (Gary Antonacci)**, and **Sector Momentum Rotation Strategy**.
+This project contains a set of Python Cloud Functions for managing a multi-strategy portfolio using Alpaca's trading API. The portfolio consists of seven distinct investment strategies: **Hedgefundie's Excellent Adventure (HFEA)**, **Golden HFEA Lite**, **RSSB/WTIP Strategy (Structural Alpha)**, **S&P 500 with 200-SMA**, **9-Sig Strategy (Jason Kelly Methodology)**, **Dual Momentum Strategy (Gary Antonacci)**, and **Sector Momentum Rotation Strategy**.
 
 ## Portfolio Allocation
 
-The current portfolio is allocated across six strategies:
-- **HFEA Strategy**: 18.75%
-- **Golden HFEA Lite Strategy**: 18.75%
-- **SPXL SMA Strategy**: 37.5%
+The current portfolio is allocated across seven strategies:
+- **HFEA Strategy**: 17.5%
+- **Golden HFEA Lite Strategy**: 17.5%
+- **SPXL SMA Strategy**: 35%
+- **RSSB/WTIP Strategy**: 5%
 - **9-Sig Strategy**: 5%
 - **Dual Momentum Strategy**: 10%
 - **Sector Momentum Strategy**: 10%
 
 ## Overview of the Strategies
 
-The project is based on six distinct investment strategies, each designed to maximize returns by leveraging specific market behaviors and signals.
+The project is based on seven distinct investment strategies, each designed to maximize returns by leveraging specific market behaviors and signals.
 
-### 1. High-Frequency Equity Allocation (HFEA) Strategy
+### 1. Hedgefundie's Excellent Adventure (HFEA) Strategy
 
 #### **Strategy Overview:**
 The HFEA strategy is an aggressive investment approach that involves leveraging a portfolio composed of three leveraged ETFs: 
@@ -168,7 +169,122 @@ Composite Score = (0.40 × 1M_return) + (0.20 × 3M_return) +
 - **Equal Weighting**: 33.33% allocation per sector prevents over-concentration
 - **Bond Safety**: Automatic switch to SCHZ during bear markets preserves capital
 
-### 5. S&P 500 with 200-SMA Strategy
+### 5. RSSB/WTIP Strategy (Structural Alpha)
+
+#### **Strategy Overview:**
+The RSSB/WTIP strategy moves from **Active/Tactical Management** (scripts, signals, rebalancing) to **Structural/Strategic Management** (asset allocation and leverage). Instead of trying to *time* the market or pick the best sectors, you are *stacking* diversified return streams to win in all economic environments.
+
+**Allocation:** 80% **RSSB** / 20% **WTIP**
+
+This strategy provides complete economic coverage through a combination of:
+- **RSSB** (Return Stacked U.S. Stocks & Bonds): Provides exposure to global equities and U.S. Treasuries through futures-based leverage
+- **WTIP** (WisdomTree International Efficient Core Fund): Provides exposure to TIPS (inflation bonds), managed futures (trend), and hard assets (gold/BTC)
+
+#### **What You Actually Own (The Look-Through):**
+
+For every $10,000 invested, your effective exposure is roughly **$19,700 (1.97x Leverage)**, broken down as follows:
+
+| Asset Class | Effective Exposure | Role |
+| :--- | :--- | :--- |
+| **Global Equities** | **80%** | The Growth Engine (Bull Markets) |
+| **US Treasuries** | **80%** | The Deflation Hedge (Recessions) |
+| **TIPS (Inflation Bonds)** | **~17%** | The Cost-of-Living Shield |
+| **Managed Futures (Trend)** | **~16%** | The Crisis/Volatility Hedge |
+| **Hard Assets (Gold/BTC)** | **~4%** | The Debasement Hedge |
+
+#### **Why This Strategy? (The Investment Thesis)**
+
+**1. Complete Economic Coverage**
+
+Your previous portfolio relied heavily on **Growth** (HFEA, 9-Sig, SPXL) and **Momentum** (Dual/Sector). It was vulnerable to a "Choppy Stagflation" environment where trends fail to materialize and stocks/bonds fall together (like 2022).
+
+* **RSSB** covers **High Growth** (Stocks) and **Deflation** (Bonds).
+* **WTIP** covers **Inflation** (TIPS) and **Stagflation** (Trend/Gold).
+
+You no longer need a script to "switch" assets; you own the assets that win in every scenario simultaneously.
+
+**2. Institutional "Return Stacking"**
+
+You are utilizing **Capital Efficiency**. By using futures (inside the ETFs), you obtain nearly 200% exposure without the risks of "Volatility Decay" inherent in daily reset 3x ETFs (like UPRO/TQQQ in your HFEA/9-Sig strategies). You are getting $2 of assets working for every $1 you put in, but with cleaner institutional execution.
+
+**3. Operational "Set and Forget"**
+
+You are eliminating "Execution Risk." Your previous setup relied on:
+* Cloud Functions not timing out.
+* Alpaca/FRED APIs being online.
+* Complex logic (SMA crosses, momentum calcs) firing correctly.
+* **You** not interfering emotionally during a drawdown.
+
+The 80/20 strategy requires zero code, zero API keys, and zero maintenance other than occasional rebalancing.
+
+#### **Approach in the Script:**
+- **Monthly Buys**: The script uses the same sophisticated underweight-based allocation system as HFEA. It calculates which assets are underweight relative to their target allocations (80% RSSB, 20% WTIP) and allocates the monthly investment proportionally to bring the portfolio back towards target. This approach automatically rebalances during monthly contributions.
+  
+- **Quarterly Rebalancing**: The script includes a quarterly rebalancing function that ensures the portfolio remains aligned with the 80/20 target allocation. Rebalancing involves selling portions of over-performing ETFs and buying under-performing ones through a series of paired trades, ensuring the portfolio stays on track with the strategy's risk and return profile.
+
+#### **Comparison: 80/20 vs. Your "Cloud Function" Portfolio**
+
+Here is how the new strategy specifically replaces or improves upon your existing six sub-strategies.
+
+**1. vs. HFEA & Golden HFEA Lite (35% of old portfolio)**
+
+* **Old Way:** Leveraged 3x ETFs ($UPRO/$TMF). High volatility decay. If the market moves sideways with high volatility, you lose money.
+* **New Way:** **RSSB**. It provides similar Stock/Bond stacking but uses **Futures** rather than daily leveraged ETFs.
+* **Benefit:** Lower cost of leverage, less drag from volatility, and tax efficiency (no monthly rebalancing trades triggering tax events).
+
+**2. vs. SPXL 200-SMA Strategy (35% of old portfolio)**
+
+* **Old Way:** Binary Market Timing. If SPY < 200SMA, you go to cash.
+* **Risk:** "Whipsaw Risk." If the market dips to 199SMA and bounces to 205SMA, your script sells low and buys high. You miss the initial rebound.
+* **New Way:** **WTIP (Trend Component)**. Instead of *you* timing the S&P 500, the Managed Futures inside WTIP automatically go long/short on hundreds of markets (commodities, currencies, rates). It captures the trend without you risking your entire equity position on a single SMA line.
+
+**3. vs. 9-Sig & Dual Momentum (15% of old portfolio)**
+
+* **Old Way:** Aggressive tactical shifts based on relative strength or quarterly signals to chase the "hot hand."
+* **New Way:** **Diversification**. Instead of chasing the winner, you hold the 80% Global Stock allocation (RSSB) which naturally captures winners (like Nvidia or Apple) as they grow in the index, while the Trend component (WTIP) captures momentum in non-equity markets (like Oil or the Dollar).
+
+**4. vs. Sector Momentum (10% of old portfolio)**
+
+* **Old Way:** Rotating into Tech/Energy/Financials based on 6-month returns.
+* **Risk:** Sector rotation often lags; you buy Energy after it has already rallied.
+* **New Way:** **Global Equities (RSSB)**. You own all sectors. If Tech dominates, RSSB owns it. If Energy dominates, WTIP (Commodities) and RSSB (Energy stocks) own it.
+
+#### **Market Conditions Analysis**
+
+| Market Environment | **Old "Python/Alpaca" Portfolio** Performance | **New "80/20 RSSB/WTIP"** Performance |
+| :--- | :--- | :--- |
+| **Raging Bull Market** (e.g., 2021, 2023) | **Winner.** 3x Leverage (TQQQ/UPRO) allows you to outperform everything. | **Good, but lower.** You "only" have ~80% equity exposure compared to 100-300% in the old portfolio. |
+| **Flash Crash / Correction** (e.g., COVID 2020) | **High Risk.** SMA triggers might lag; HFEA draws down 60%+. | **Resilient.** Treasuries (RSSB) usually spike in value to offset stock losses. |
+| **Inflationary Bear** (e.g., 2022) | **Catastrophic.** Stocks and Bonds fall together. HFEA gets crushed. SMA strategy goes to cash (saving some money, but losing to inflation). | **Winner.** This is where WTIP shines. TIPS hold value, and Trend strategies short the falling market, offsetting RSSB losses. |
+| **Sideways / Choppy** (e.g., 2015) | **Poor.** Whipsaws in SMA strategy and Volatility Decay in HFEA eat up capital. | **Steady.** Futures leverage doesn't suffer daily decay. Dividends and yield carry the portfolio. |
+
+#### **Pros & Cons Summary**
+
+**✅ Pros of the New Strategy**
+
+1. **Robustness:** No "single point of failure" (like a bug in `main.py` or a broken API connection).
+2. **Psychology:** Easier to stick with. You aren't watching "Margin Gates" or "Signal Lines" every month.
+3. **Efficiency:** Better tax treatment and lower transaction costs (no bid/ask spread slippage from monthly trading).
+4. **Macro-Aware:** Explicitly hedges Inflation and Debasement (Gold/BTC) which your old portfolio only lightly touched via Golden HFEA.
+
+**❌ Cons (What you are giving up)**
+
+1. **The "Jackpot" Potential:** In a insane bull run (like the late 90s), 3x Leverage (HFEA/9-Sig) is unbeatable. The 80/20 strategy is more conservative (approx 2x leverage).
+2. **Control:** You can no longer "tweak" the algorithm. You are relying on the fund managers (Return Stacked / WisdomTree) to execute their mandate.
+3. **The Fun Factor:** If you enjoyed coding the bot and watching the Telegram alerts (`🚀 URTH Alert`), you might find this boring. (Though "boring" is usually profitable in investing).
+
+#### **Expected Returns:**
+- The RSSB/WTIP strategy aims to provide strong risk-adjusted returns through structural diversification across all economic environments.
+- **Historical Performance**: The strategy's "set and forget" approach with futures-based leverage has shown strong risk-adjusted returns with reduced correlation to traditional equity strategies.
+- **Risk Management**: The combination of equities, bonds, TIPS, managed futures, and hard assets provides natural hedging across market cycles.
+
+#### **Final Verdict**
+
+Your previous portfolio was a brilliant engineering feat of **Tactical Alpha**—trying to outsmart the market using speed, leverage, and rules.
+
+The **80/20 RSSB/WTIP** portfolio is a feat of **Structural Alpha**—accepting that we cannot predict the future, so we build a vessel that can float on any ocean. It is less work, lower stress, and historically offers a higher Sharpe Ratio (risk-adjusted return).
+
+### 7. S&P 500 with 200-SMA Strategy
 
 #### **Strategy Overview:**
 The S&P 500 with 200-SMA strategy is a trend-following investment approach that uses the 200-day Simple Moving Average (SMA) as a signal for entering or exiting the market. The 200-SMA is a widely-used technical indicator that smooths out daily price fluctuations and highlights the underlying trend of the market.
@@ -185,7 +301,7 @@ The basic premise of this strategy is that when the S&P 500 index is above its 2
 #### **Expected Returns:**
 - The S&P 500 with 200-SMA strategy aims to enhance returns through trend-following and risk management. By avoiding major market drawdowns through strategic exits during downtrends, the strategy seeks to capture the majority of market upside while protecting capital during bear markets. The use of 3x leverage (SPXL) amplifies returns during bullish periods while the 200-SMA timing mechanism provides downside protection. Historical backtests of similar strategies have shown improved risk-adjusted returns compared to buy-and-hold approaches.
 
-### 6. 9-Sig Strategy (Jason Kelly Methodology)
+### 8. 9-Sig Strategy (Jason Kelly Methodology)
 
 #### **Strategy Overview:**
 The 9-Sig strategy is based on Jason Kelly's methodology from his book "The 3% Signal". It's a systematic approach to managing a TQQQ (3x leveraged NASDAQ-100) and AGG (iShares Core U.S. Aggregate Bond ETF) portfolio with built-in crash protection. The strategy aims for 9% quarterly growth while maintaining an 80/20 allocation between TQQQ and AGG.
@@ -338,9 +454,12 @@ Consider a loan with a duration of 6 to 8 years (50k to 100k) at around 4.5% int
 
 - `main.py`: The main Python script containing all strategy logic:
   - **HFEA strategy**: Three-asset portfolio (UPRO/TMF/KMLM at 45/25/30) with monthly underweight-based buys and quarterly rebalancing
+  - **Golden HFEA Lite strategy**: Three-asset portfolio (SSO/ZROZ/GLD at 50/25/25) with monthly underweight-based buys and quarterly rebalancing
+  - **RSSB/WTIP strategy**: Two-asset portfolio (RSSB/WTIP at 80/20) with monthly underweight-based buys and quarterly rebalancing
   - **SPXL SMA strategy**: Trend-following with 200-day SMA (monthly buys and daily trading)
   - **9-Sig strategy**: Jason Kelly methodology with monthly AGG contributions and quarterly TQQQ/AGG signals with crash protection
   - **Dual Momentum strategy**: Tactical allocation between SPUU/EFO/BND using 12-month relative and absolute momentum
+  - **Sector Momentum strategy**: Multi-period momentum rotation across top 3 sector ETFs with SPY 200-SMA trend filtering
   - **Unified index alert system**: Monitors multiple indices for ATH drops and SMA crossings
   - **Firestore integration**: Persistent storage for strategy balances, 9-Sig quarterly data, Dual Momentum position tracking, and unified market data cache
   - **Alpaca integration**: All market data fetched from Alpaca IEX feed (no yfinance dependency)
@@ -349,11 +468,13 @@ Consider a loan with a duration of 6 to 8 years (50k to 100k) at around 4.5% int
 - `README.md`: Comprehensive documentation of all strategies and setup instructions.
 
 ### **Cloud Functions Deployed:**
-- `monthly_invest_all`: **Orchestrator function (RECOMMENDED)** - Runs all six monthly strategies with coordinated budget calculations
+- `monthly_invest_all`: **Orchestrator function (RECOMMENDED)** - Runs all seven monthly strategies with coordinated budget calculations
 - `monthly_buy_hfea`: HFEA monthly investment function (individual execution)
 - `rebalance_hfea`: HFEA quarterly rebalancing function
 - `monthly_buy_golden_hfea_lite`: Golden HFEA Lite monthly investment function (individual execution)
 - `rebalance_golden_hfea_lite`: Golden HFEA Lite quarterly rebalancing function
+- `monthly_buy_rssb_wtip`: RSSB/WTIP monthly investment function (individual execution)
+- `rebalance_rssb_wtip`: RSSB/WTIP quarterly rebalancing function
 - `monthly_buy_spxl`: SPXL SMA monthly investment function (individual execution)
 - `daily_trade_spxl_200sma`: SPXL SMA daily trading function
 - `monthly_nine_sig_contributions`: 9-Sig monthly contributions function (individual execution)
@@ -363,16 +484,16 @@ Consider a loan with a duration of 6 to 8 years (50k to 100k) at around 4.5% int
 - `index_alert`: Unified index alert system
 
 ### **Cloud Scheduler Jobs:**
-- **Monthly orchestrator**: First trading day of each month at 12:00 PM ET (`monthly_invest_all` - runs all six monthly strategies with coordinated budgets)
-- **Quarterly functions**: First trading day of each quarter at specified times (`rebalance_hfea` at 2:00 PM ET, `rebalance_golden_hfea_lite` at 2:00 PM ET, `quarterly_nine_sig_signal` at 1:00 PM ET)
+- **Monthly orchestrator**: First trading day of each month at 12:00 PM ET (`monthly_invest_all` - runs all seven monthly strategies with coordinated budgets)
+- **Quarterly functions**: First trading day of each quarter at specified times (`rebalance_hfea` at 2:00 PM ET, `rebalance_golden_hfea_lite` at 2:00 PM ET, `rebalance_rssb_wtip` at 2:00 PM ET, `quarterly_nine_sig_signal` at 1:00 PM ET)
 - **Index alerts**: Hourly during trading hours (9:15 AM - 3:15 PM for SMA alerts, 9:30 AM - 3:30 PM for ATH drop alerts)
 - **Daily SMA functions**: 3:56 PM ET on weekdays (`daily_trade_spxl_200sma`)
 
-**Note**: Individual monthly functions (`monthly_buy_hfea`, `monthly_buy_golden_hfea_lite`, `monthly_buy_spxl`, `monthly_nine_sig_contributions`, `monthly_dual_momentum`, `monthly_sector_momentum`) are deployed but not scheduled. They remain available for manual execution and debugging purposes. The `monthly_invest_all` orchestrator is used for production to ensure coordinated budget allocation and prevent over-spending.
+**Note**: Individual monthly functions (`monthly_buy_hfea`, `monthly_buy_golden_hfea_lite`, `monthly_buy_rssb_wtip`, `monthly_buy_spxl`, `monthly_nine_sig_contributions`, `monthly_dual_momentum`, `monthly_sector_momentum`) are deployed but not scheduled. They remain available for manual execution and debugging purposes. The `monthly_invest_all` orchestrator is used for production to ensure coordinated budget allocation and prevent over-spending.
 
 ## Monthly Investment Orchestrator
 
-The `monthly_invest_all` orchestrator is a coordinated execution system that manages all six monthly investment strategies (HFEA, Golden HFEA Lite, SPXL SMA, 9-Sig, Dual Momentum, and Sector Momentum) in a single unified process.
+The `monthly_invest_all` orchestrator is a coordinated execution system that manages all seven monthly investment strategies (HFEA, Golden HFEA Lite, RSSB/WTIP, SPXL SMA, 9-Sig, Dual Momentum, and Sector Momentum) in a single unified process.
 
 ### **Why Use an Orchestrator?**
 
@@ -390,9 +511,10 @@ The orchestrator (`monthly_invest_all_strategies()` function):
 
 1. **Calculates budgets once**: Checks margin conditions and calculates total available buying power a single time
 2. **Distributes precisely**: Splits the total amount according to strategy allocations:
-   - HFEA: 18.75%
-   - Golden HFEA Lite: 18.75%
-   - SPXL SMA: 37.5%
+   - HFEA: 17.5%
+   - Golden HFEA Lite: 17.5%
+   - SPXL SMA: 35%
+   - RSSB/WTIP: 5%
    - 9-Sig: 5%
    - Dual Momentum: 10%
    - Sector Momentum: 10%
@@ -575,7 +697,7 @@ margin_control_config = {
 
 ### **Data Storage:**
 - **Firestore Collections:**
-  - `strategy-balances-live` / `strategy-balances-paper`: Tracks invested amounts and position details for each strategy (including Dual Momentum position tracking)
+  - `strategy-balances-live` / `strategy-balances-paper`: Tracks invested amounts and position details for each strategy (including Dual Momentum and RSSB/WTIP position tracking)
   - `nine-sig-quarters`: Historical quarterly data for 9-Sig signal calculations
   - `nine-sig-monthly-contributions`: Tracks actual monthly 9-Sig contributions for accurate quarterly signal calculation
   - `market-data`: Unified collection caching market prices, SMA values (200-day, 255-day), crossing states, and alert timestamps (5-minute cache expiry) - single source of truth for all market data
@@ -642,7 +764,7 @@ python3 main.py --action monthly_dual_momentum --env paper --force
 
 **Why use the orchestrator (`monthly_invest_all`)?**
 - Calculates budgets once and distributes them to all strategies
-- Ensures exact percentage splits (42.5% HFEA, 42.5% SPXL SMA, 5% 9-Sig, 10% Dual Momentum)
+- Ensures exact percentage splits (17.5% HFEA, 17.5% Golden HFEA Lite, 35% SPXL SMA, 5% RSSB/WTIP, 5% 9-Sig, 10% Dual Momentum, 10% Sector Momentum)
 - Prevents over-spending by coordinating margin and cash allocation
 - Recommended for production use to maintain portfolio balance
 

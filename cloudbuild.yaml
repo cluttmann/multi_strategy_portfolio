@@ -143,6 +143,38 @@ steps:
     - --set-env-vars=GOOGLE_CLOUD_PROJECT=1098661711782,GOOGLE_CLOUD_PROJECT_ID=trading-436516
     waitFor: ['-'] # start in parallel and actually needs to be set, otherwise deployment is sequential
 
+  # Step 4e: Deploy the monthly_buy_rssb_wtip function
+  - name: 'gcr.io/cloud-builders/gcloud'
+    args:
+    - functions
+    - deploy
+    - monthly_buy_rssb_wtip  # RSSB/WTIP Strategy monthly investment function
+    - --source=.
+    - --trigger-http
+    - --region=europe-west3
+    - --runtime=python310
+    - --timeout=540s
+    - --entry-point=monthly_buy_rssb_wtip  # Entry point function in your Python code
+    - --memory=512MB
+    - --set-env-vars=GOOGLE_CLOUD_PROJECT=1098661711782,GOOGLE_CLOUD_PROJECT_ID=trading-436516
+    waitFor: ['-'] # start in parallel and actually needs to be set, otherwise deployment is sequential
+
+  # Step 4f: Deploy the rebalance_rssb_wtip function
+  - name: 'gcr.io/cloud-builders/gcloud'
+    args:
+    - functions
+    - deploy
+    - rebalance_rssb_wtip  # RSSB/WTIP Strategy quarterly rebalancing function
+    - --source=.
+    - --trigger-http
+    - --region=europe-west3
+    - --runtime=python310
+    - --timeout=540s
+    - --entry-point=rebalance_rssb_wtip  # Entry point function in your Python code
+    - --memory=512MB
+    - --set-env-vars=GOOGLE_CLOUD_PROJECT=1098661711782,GOOGLE_CLOUD_PROJECT_ID=trading-436516
+    waitFor: ['-'] # start in parallel and actually needs to be set, otherwise deployment is sequential
+
   # Step 5: Deploy the quarterly_nine_sig_signal
   - name: 'gcr.io/cloud-builders/gcloud'
     args:
@@ -245,6 +277,31 @@ steps:
           gcloud scheduler jobs create http rebalance_golden_hfea_lite \
             --schedule='0 14 1-7 1,4,7,10 *' \
             --uri='https://europe-west3-trading-436516.cloudfunctions.net/rebalance_golden_hfea_lite' \
+            --http-method='POST' \
+            --time-zone='America/New_York' \
+            --location='europe-west3' \
+            --oidc-service-account-email='1098661711782-compute@developer.gserviceaccount.com'
+        fi
+    waitFor: ['-'] # start in parallel and actually needs to be set, otherwise deployment is sequential
+
+  # Create Cloud Scheduler job for 'rebalance_rssb_wtip' function (try update first, then create if needed)
+  - name: 'gcr.io/cloud-builders/gcloud'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        if gcloud scheduler jobs describe rebalance_rssb_wtip --location=europe-west3 >/dev/null 2>&1; then
+          gcloud scheduler jobs update http rebalance_rssb_wtip \
+            --schedule='0 14 1-7 1,4,7,10 *' \
+            --uri='https://europe-west3-trading-436516.cloudfunctions.net/rebalance_rssb_wtip' \
+            --http-method='POST' \
+            --time-zone='America/New_York' \
+            --location='europe-west3' \
+            --oidc-service-account-email='1098661711782-compute@developer.gserviceaccount.com'
+        else
+          gcloud scheduler jobs create http rebalance_rssb_wtip \
+            --schedule='0 14 1-7 1,4,7,10 *' \
+            --uri='https://europe-west3-trading-436516.cloudfunctions.net/rebalance_rssb_wtip' \
             --http-method='POST' \
             --time-zone='America/New_York' \
             --location='europe-west3' \
