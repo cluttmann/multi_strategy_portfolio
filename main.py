@@ -124,9 +124,9 @@ def get_firestore_client():
     """
     global _db_client
     if _db_client is None:
-        # Ensure .env is loaded for local development
+        # Ensure .env is loaded for local development (override=True ensures .env takes precedence)
         if not is_running_in_cloud():
-            load_dotenv()
+            load_dotenv(override=True)
         
         project_id = os.getenv("GOOGLE_CLOUD_PROJECT_ID")
         if not project_id:
@@ -456,8 +456,8 @@ def set_alpaca_environment(env, use_secret_manager=True):
             SECRET_KEY = get_secret("ALPACA_SECRET_KEY_PAPER")
             BASE_URL = "https://paper-api.alpaca.markets"
     else:
-        # Running locally, use .env file
-        load_dotenv()
+        # Running locally, use .env file (override=True ensures .env takes precedence)
+        load_dotenv(override=True)
         if env == "live":
             API_KEY = os.getenv("ALPACA_API_KEY_LIVE")
             SECRET_KEY = os.getenv("ALPACA_SECRET_KEY_LIVE")
@@ -476,7 +476,7 @@ def get_telegram_secrets():
         telegram_key = get_secret("TELEGRAM_KEY")
         chat_id = get_secret("TELEGRAM_CHAT_ID")
     else:
-        load_dotenv()
+        load_dotenv(override=True)
         telegram_key = os.getenv("TELEGRAM_KEY")
         chat_id = os.getenv("TELEGRAM_CHAT_ID")
 
@@ -495,7 +495,7 @@ def get_fred_rate():
         if is_running_in_cloud():
             fred_key = get_secret("FREDKEY")
         else:
-            load_dotenv()
+            load_dotenv(override=True)
             fred_key = os.getenv("FREDKEY")
         
         if not fred_key:
@@ -1540,16 +1540,18 @@ def make_monthly_buys(api, force_execute=False, investment_calc=None, margin_res
     # Check projected leverage after investment to ensure we don't exceed 1.14x
     if target_margin > 0:  # Only check if margin is enabled
         portfolio_value = metrics.get("portfolio_value", 0)
-        current_equity = metrics.get("equity", 0)
         current_cash = metrics.get("cash", 0)
+        # Calculate actual equity: Equity = Portfolio Value + Cash (cash can be negative when using margin)
+        # This is more accurate than using Alpaca's equity field directly when margin is involved
+        current_equity = portfolio_value + current_cash
         
         if portfolio_value > 0 and current_equity > 0:
             # Calculate projected values after investment
-            # When investing, regardless of cash/margin:
+            # When investing using margin:
             # - Portfolio value increases by investment amount (new positions purchased)
-            # - Cash decreases by investment amount (may become more negative if using margin)
-            # - Equity remains unchanged immediately after purchase
-            #   (Equity = Portfolio Value + Cash; both change by same amount: +investment -investment = 0)
+            # - Cash decreases by investment amount (becomes more negative)
+            # - Equity = Portfolio Value + Cash remains unchanged immediately after purchase
+            #   (Both portfolio_value and cash change by same amount: +investment -investment = 0)
             
             # IMPORTANT: Reserved cash (from bearish strategies) is still physically in Alpaca
             # - Alpaca's portfolio_value and equity include ALL cash (reserved + available)
@@ -1558,7 +1560,8 @@ def make_monthly_buys(api, force_execute=False, investment_calc=None, margin_res
             # - The investment_amount already accounts for reserved cash (via available_cash)
             
             projected_portfolio_value = portfolio_value + investment_amount
-            projected_equity = current_equity  # Unchanged immediately after purchase
+            projected_cash = current_cash - investment_amount
+            projected_equity = projected_portfolio_value + projected_cash  # Should equal current_equity
             
             # Calculate projected leverage: Portfolio Value / Equity
             if projected_equity > 0:
@@ -1569,11 +1572,14 @@ def make_monthly_buys(api, force_execute=False, investment_calc=None, margin_res
                 
                 # Debug output showing actual values used
                 print(f"Leverage projection details:")
-                print(f"  Portfolio Value: ${portfolio_value:.2f}, Equity: ${current_equity:.2f}, Cash: ${current_cash:.2f}")
+                print(f"  Portfolio Value: ${portfolio_value:.2f}, Cash: ${current_cash:.2f}")
+                print(f"  Calculated Equity (Portfolio Value + Cash): ${current_equity:.2f}")
                 if total_reserved > 0:
                     print(f"  Reserved Cash (Firestore): ${total_reserved:.2f} (still in Alpaca account)")
                 print(f"  Investment Amount: ${investment_amount:.2f} (from available cash + margin)")
                 print(f"  Projected Portfolio Value: ${projected_portfolio_value:.2f}")
+                print(f"  Projected Cash: ${projected_cash:.2f}")
+                print(f"  Projected Equity: ${projected_equity:.2f}")
                 print(f"  Projected Leverage: {projected_leverage:.3f}x")
                 
                 if projected_leverage >= margin_control_config["max_leverage"]:
@@ -3468,14 +3474,14 @@ def get_sector_momentum_positions(api):
     Get current sector ETF positions from Alpaca account.
     
     Args:
-        api: Alpaca API credentials
+        api: Alpaca API credentials dict
     
     Returns:
         dict: Dictionary with ticker -> shares held for sector ETFs only
     """
     try:
-        # Get all positions
-        positions = api.list_positions()
+        # Get all positions using the list_positions function
+        positions = list_positions(api)
         
         # Filter for sector ETFs only
         sector_positions = {}
@@ -3485,10 +3491,12 @@ def get_sector_momentum_positions(api):
         # Include both sector ETFs and bond ETF
         allowed_tickers = sector_etfs + [bond_etf]
         
+        # positions is a list of dicts from Alpaca API
         for position in positions:
-            ticker = position.symbol
-            if ticker in allowed_tickers and float(position.qty) > 0:
-                sector_positions[ticker] = float(position.qty)
+            ticker = position.get("symbol")
+            qty = float(position.get("qty", 0))
+            if ticker in allowed_tickers and qty > 0:
+                sector_positions[ticker] = qty
         
         print(f"Current sector momentum positions: {sector_positions}")
         return sector_positions
@@ -3849,7 +3857,10 @@ def monthly_sector_momentum_strategy(api, force_execute=False, investment_calc=N
         send_telegram_message(f"Sector Momentum Error: {error_msg}")
         return error_msg
     
-    # Calculate current strategy value
+    # Get actual current positions from Alpaca (not just Firestore)
+    actual_positions = get_sector_momentum_positions(api)
+    
+    # Calculate current strategy value from actual Alpaca positions
     current_value_data = get_sector_momentum_value(api)
     current_value = current_value_data["total_value"]
     total_to_allocate = current_value + investment_amount
@@ -3879,12 +3890,11 @@ def monthly_sector_momentum_strategy(api, force_execute=False, investment_calc=N
         # Calculate target allocation per sector (33.33% each)
         target_allocation_per_sector = total_to_allocate * sector_momentum_config["target_allocation_per_sector"]
         
-        # Sell sectors not in top 3
-        current_positions_list = list(current_positions.keys())
-        sectors_to_sell = [ticker for ticker in current_positions_list if ticker not in top_3_sectors]
+        # Sell sectors not in top 3 (use actual positions from Alpaca)
+        sectors_to_sell = [ticker for ticker in actual_positions.keys() if ticker not in top_3_sectors]
         
         for ticker in sectors_to_sell:
-            shares_to_sell = current_positions[ticker]
+            shares_to_sell = actual_positions[ticker]
             if shares_to_sell > 0:
                 try:
                     sell_order = submit_order(api, ticker, shares_to_sell, "sell")
@@ -3898,11 +3908,12 @@ def monthly_sector_momentum_strategy(api, force_execute=False, investment_calc=N
                     send_telegram_message(f"Sector Momentum Error: {error_msg}")
                     return error_msg
         
-        # Rebalance to target allocations for top 3 sectors
+        # Rebalance to target allocations for top 3 sectors (use actual positions from Alpaca)
         for ticker in top_3_sectors:
             try:
                 current_price = float(get_latest_trade(api, ticker))
-                current_shares = current_positions.get(ticker, 0)
+                # Use actual shares from Alpaca, fallback to Firestore if not found
+                current_shares = actual_positions.get(ticker, current_positions.get(ticker, 0))
                 
                 # Calculate target shares
                 target_shares = target_allocation_per_sector / current_price
