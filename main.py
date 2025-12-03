@@ -1406,10 +1406,17 @@ def make_monthly_buys_rssb_wtip(api, force_execute=False, investment_calc=None, 
     # Get current prices for RSSB and WTIP
     rssb_price = float(get_latest_trade(api, "RSSB"))
     wtip_price = float(get_latest_trade(api, "WTIP"))
-
+    
     # Calculate number of shares to buy
     rssb_shares_to_buy = rssb_amount / rssb_price
-    wtip_shares_to_buy = wtip_amount / wtip_price
+    # WTIP doesn't support fractional shares on Alpaca - round to whole shares
+    wtip_shares_to_buy = round(wtip_amount / wtip_price)
+    
+    # Skip WTIP if amount is too small to buy at least 1 share
+    if wtip_shares_to_buy < 1:
+        print(f"Warning: WTIP investment amount ${wtip_amount:.2f} is too small to buy whole shares (price: ${wtip_price:.2f}). Skipping WTIP.")
+        wtip_shares_to_buy = 0
+        wtip_amount = 0
 
     # Load current strategy state from Firestore
     balances = load_balances(env)
@@ -3296,7 +3303,7 @@ def get_dual_momentum_position_value(api):
     Get current value and position details for dual momentum strategy.
     
     Args:
-        api: Alpaca API credentials
+        api: Alpaca API credentials dict
     
     Returns:
         dict: {
@@ -3307,20 +3314,24 @@ def get_dual_momentum_position_value(api):
         }
     """
     try:
-        positions = api.list_positions()
+        # Get positions using the list_positions function
+        positions = list_positions(api)
         dual_momentum_symbols = ["SPUU", "EFO", "BND"]
         
         total_value = 0
         current_position = None
         shares_held = 0
         
+        # positions is a list of dicts from Alpaca API
         for position in positions:
-            if position.symbol in dual_momentum_symbols:
-                position_value = float(position.market_value)
+            ticker = position.get("symbol")
+            if ticker in dual_momentum_symbols:
+                position_value = float(position.get("market_value", 0))
+                qty = float(position.get("qty", 0))
                 total_value += position_value
                 if position_value > 0:
-                    current_position = position.symbol
-                    shares_held = float(position.qty)
+                    current_position = ticker
+                    shares_held = qty
         
         return {
             "total_value": total_value,
@@ -3897,11 +3908,20 @@ def monthly_sector_momentum_strategy(api, force_execute=False, investment_calc=N
             shares_to_sell = actual_positions[ticker]
             if shares_to_sell > 0:
                 try:
-                    sell_order = submit_order(api, ticker, shares_to_sell, "sell")
-                    if not skip_order_wait:
-                        wait_for_order_fill(api, sell_order["id"])
-                    trades_executed.append(f"Sold {shares_to_sell:.4f} shares of {ticker} (dropped from top 3)")
-                    print(f"Sold {shares_to_sell:.4f} shares of {ticker}")
+                    # Round down to whole shares (Alpaca doesn't allow fractional short sales)
+                    whole_shares_to_sell = int(shares_to_sell)
+                    if whole_shares_to_sell > 0:
+                        sell_order = submit_order(api, ticker, whole_shares_to_sell, "sell")
+                        if not skip_order_wait:
+                            wait_for_order_fill(api, sell_order["id"])
+                        if whole_shares_to_sell < shares_to_sell:
+                            trades_executed.append(f"Sold {whole_shares_to_sell:.0f} shares of {ticker} (dropped from top 3, rounded down from {shares_to_sell:.4f})")
+                            print(f"Sold {whole_shares_to_sell:.0f} shares of {ticker} (rounded down from {shares_to_sell:.4f})")
+                        else:
+                            trades_executed.append(f"Sold {whole_shares_to_sell:.0f} shares of {ticker} (dropped from top 3)")
+                            print(f"Sold {whole_shares_to_sell:.0f} shares of {ticker}")
+                    else:
+                        print(f"Skipping sell of {ticker}: {shares_to_sell:.4f} shares is less than 1 whole share")
                 except Exception as e:
                     error_msg = f"Failed to sell {ticker}: {e}"
                     print(error_msg)
@@ -3928,12 +3948,17 @@ def monthly_sector_momentum_strategy(api, force_execute=False, investment_calc=N
                         trades_executed.append(f"Bought {shares_delta:.4f} shares of {ticker} (rebalancing to 33.33%)")
                         print(f"Bought {shares_delta:.4f} shares of {ticker}")
                     else:
-                        # Sell shares
-                        sell_order = submit_order(api, ticker, abs(shares_delta), "sell")
-                        if not skip_order_wait:
-                            wait_for_order_fill(api, sell_order["id"])
-                        trades_executed.append(f"Sold {abs(shares_delta):.4f} shares of {ticker} (rebalancing to 33.33%)")
-                        print(f"Sold {abs(shares_delta):.4f} shares of {ticker}")
+                        # Sell shares - round down to whole shares (Alpaca doesn't allow fractional short sales)
+                        shares_to_sell = abs(shares_delta)
+                        whole_shares_to_sell = int(shares_to_sell)  # Round down to whole shares
+                        if whole_shares_to_sell > 0:
+                            sell_order = submit_order(api, ticker, whole_shares_to_sell, "sell")
+                            if not skip_order_wait:
+                                wait_for_order_fill(api, sell_order["id"])
+                            trades_executed.append(f"Sold {whole_shares_to_sell:.0f} shares of {ticker} (rebalancing to 33.33%, rounded down from {shares_to_sell:.4f})")
+                            print(f"Sold {whole_shares_to_sell:.0f} shares of {ticker}")
+                        else:
+                            print(f"Skipping sell of {ticker}: {shares_to_sell:.4f} shares is less than 1 whole share")
                 
             except Exception as e:
                 error_msg = f"Failed to rebalance {ticker}: {e}"
