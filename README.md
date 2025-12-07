@@ -5,10 +5,10 @@ This project contains a set of Python Cloud Functions for managing a multi-strat
 ## Portfolio Allocation
 
 The current portfolio is allocated across seven strategies:
-- **HFEA Strategy**: 17.5%
-- **Golden HFEA Lite Strategy**: 17.5%
-- **SPXL SMA Strategy**: 35%
-- **RSSB/WTIP Strategy**: 5%
+- **HFEA Strategy**: 16.25%
+- **Golden HFEA Lite Strategy**: 16.25%
+- **SPXL SMA Strategy**: 32.5%
+- **RSSB/WTIP Strategy**: 10%
 - **9-Sig Strategy**: 5%
 - **Dual Momentum Strategy**: 10%
 - **Sector Momentum Strategy**: 10%
@@ -110,19 +110,19 @@ This implementation is based on Gary Antonacci's research and community discussi
 - [r/LETFs: Combining Dual Momentum with LETFs](https://www.reddit.com/r/LETFs/comments/rwcoxk/combining_dual_momentum_with_the_principles_of/)
 - [r/LETFs: Leveraged Dual Momentum Backtest](https://www.reddit.com/r/LETFs/comments/1jj4tad/leveraged_dual_momentum_backtest/)
 
-### 4. Sector Momentum Rotation Strategy
+### 4. Leveraged Sector Momentum Rotation Strategy
 
 #### **Strategy Overview:**
-The Sector Momentum Rotation Strategy exploits the documented persistence of sector-level momentum driven by economic cycles, investor flows, and fundamental factors. Research shows sector leadership persists for 3-6 months, providing tradable opportunities. Studies by Faber and O'Shaughnessy demonstrate that momentum strategies outperformed buy-and-hold approximately 70% of the time across 80+ years of data.
+The Leveraged Sector Momentum Rotation Strategy exploits the documented persistence of sector-level momentum driven by economic cycles, investor flows, and fundamental factors. Research shows sector leadership persists for 3-6 months, providing tradable opportunities. Studies by Faber and O'Shaughnessy demonstrate that momentum strategies outperformed buy-and-hold approximately 70% of the time across 80+ years of data.
 
-This strategy invests in the top 3 performing sector ETFs based on multi-period momentum, with SPY 200-SMA trend filtering for risk management.
+This leveraged strategy invests in the top 3 performing 2x leveraged sector ETFs based on multi-period momentum, amplifying returns through leverage while maintaining SPY 200-SMA trend filtering for risk management. The use of 2x leveraged ETFs provides enhanced exposure to sector momentum, potentially doubling the returns of sector rotation cycles while requiring careful risk management.
 
 #### **Asset Universe:**
-The strategy uses 11 Sector SPDR ETFs:
-- **XLK** (Technology), **XLF** (Financials), **XLE** (Energy)
-- **XLV** (Healthcare), **XLI** (Industrials), **XLP** (Consumer Staples)
-- **XLY** (Consumer Discretionary), **XLU** (Utilities), **XLB** (Materials)
-- **XLRE** (Real Estate), **XLC** (Communication Services)
+The strategy uses 11 ProShares 2x Leveraged Sector ETFs:
+- **ROM** (Technology - ProShares Ultra Technology), **UYG** (Financials - ProShares Ultra Financials), **DIG** (Energy - ProShares Ultra Energy)
+- **RXL** (Healthcare - ProShares Ultra Health Care), **UXI** (Industrials - ProShares Ultra Industrials), **UGE** (Consumer Staples - ProShares Ultra Consumer Staples)
+- **UCC** (Consumer Discretionary - ProShares Ultra Cons. Discretionary), **UPW** (Utilities - ProShares Ultra Utilities), **UYM** (Materials - ProShares Ultra Materials)
+- **URE** (Real Estate - ProShares Ultra Real Estate), **LTL** (Communication Services - ProShares Ultra Comm. Services)
 - **SCHZ** (Schwab U.S. Aggregate Bond ETF) - Safety asset during bearish periods
 
 #### **Multi-Period Momentum Calculation:**
@@ -158,16 +158,18 @@ Composite Score = (0.40 × 1M_return) + (0.20 × 3M_return) +
   - Tracks all invested capital vs. current market value for performance calculation
 
 #### **Expected Returns:**
-- The Sector Momentum strategy aims to capture sector rotation cycles and outperform broad market indices through tactical allocation to the strongest-performing sectors.
-- **Historical Performance**: Sector momentum strategies have shown strong risk-adjusted returns with reduced correlation to traditional equity strategies.
-- **Behavioral Edge**: The strategy exploits persistent sector momentum anomalies driven by institutional flows, economic cycles, and behavioral biases that cause sector trends to persist for 3-6 months.
-- **Diversification Benefits**: Provides exposure to sector-specific opportunities while maintaining broad market diversification through rotation.
+- The Leveraged Sector Momentum strategy aims to capture and amplify sector rotation cycles through 2x leveraged ETFs, potentially delivering enhanced returns compared to unleveraged sector rotation strategies.
+- **Leverage Amplification**: By using 2x leveraged sector ETFs, the strategy seeks to double the returns of sector momentum cycles, providing significant upside potential during trending periods.
+- **Historical Performance**: Sector momentum strategies have shown strong risk-adjusted returns with reduced correlation to traditional equity strategies. The addition of leverage amplifies these returns while maintaining the same momentum signals.
+- **Behavioral Edge**: The strategy exploits persistent sector momentum anomalies driven by institutional flows, economic cycles, and behavioral biases that cause sector trends to persist for 3-6 months, with leverage amplifying these effects.
+- **Diversification Benefits**: Provides leveraged exposure to sector-specific opportunities while maintaining broad market diversification through rotation across 11 different sectors.
 
 #### **Risk Management:**
-- **Trend Filtering**: SPY 200-SMA filter provides systematic downside protection
-- **Position Limits**: Maximum 3-sector concentration reduces single-sector risk
-- **Equal Weighting**: 33.33% allocation per sector prevents over-concentration
-- **Bond Safety**: Automatic switch to SCHZ during bear markets preserves capital
+- **Leverage Risk Awareness**: 2x leveraged ETFs amplify both gains and losses, requiring careful monitoring and disciplined risk management. Leveraged ETFs are designed for daily returns and may experience decay during volatile or sideways markets.
+- **Trend Filtering**: SPY 200-SMA filter provides systematic downside protection, automatically switching to bonds when market conditions deteriorate, which is especially important for leveraged positions.
+- **Position Limits**: Maximum 3-sector concentration reduces single-sector risk while maintaining focused exposure to the strongest momentum sectors.
+- **Equal Weighting**: 33.33% allocation per sector prevents over-concentration and ensures balanced exposure across selected sectors.
+- **Bond Safety**: Automatic switch to SCHZ during bear markets preserves capital and protects against leveraged downside during market downturns.
 
 ### 5. RSSB/WTIP Strategy (Structural Alpha)
 
@@ -402,17 +404,18 @@ Result: Hold TQQQ position during market crash
 
 ## Conclusion
 
-All six strategies offer unique ways to potentially enhance returns, but they come with their own sets of risks and assumptions. The HFEA strategy seeks to maximize growth through a balanced but leveraged approach, while the Golden HFEA Lite strategy combines equity growth with bond protection and gold diversification. The S&P 500 with 200-SMA strategy aims to capture market gains while avoiding major downturns. The 9-Sig strategy provides systematic growth with built-in crash protection and systematic rebalancing. The Dual Momentum strategy combines global diversification with momentum-based timing to capture trending markets while protecting capital during downturns. The Sector Momentum strategy exploits sector rotation cycles through multi-period momentum analysis with trend filtering.
+All seven strategies offer unique ways to potentially enhance returns, but they come with their own sets of risks and assumptions. The HFEA strategy seeks to maximize growth through a balanced but leveraged approach, while the Golden HFEA Lite strategy combines equity growth with bond protection and gold diversification. The S&P 500 with 200-SMA strategy aims to capture market gains while avoiding major downturns. The 9-Sig strategy provides systematic growth with built-in crash protection and systematic rebalancing. The Dual Momentum strategy combines global diversification with momentum-based timing to capture trending markets while protecting capital during downturns. The Leveraged Sector Momentum strategy exploits sector rotation cycles through multi-period momentum analysis with 2x leveraged ETFs and trend filtering.
 
 Together, these strategies provide a comprehensive blend of aggressive growth and risk management:
-- **HFEA (18.75%)**: Three-asset leveraged portfolio (UPRO 45%, TMF 25%, KMLM 30%) with enhanced diversification through managed futures exposure
-- **Golden HFEA Lite (18.75%)**: Classic leveraged portfolio (SSO 50%, ZROZ 25%, GLD 25%) with equity exposure, bond protection, and gold diversification
-- **SPXL SMA (37.5%)**: Trend-following with market timing using 200-day SMA signals  
+- **HFEA (16.25%)**: Three-asset leveraged portfolio (UPRO 45%, TMF 25%, KMLM 30%) with enhanced diversification through managed futures exposure
+- **Golden HFEA Lite (16.25%)**: Classic leveraged portfolio (SSO 50%, ZROZ 25%, GLD 25%) with equity exposure, bond protection, and gold diversification
+- **SPXL SMA (32.5%)**: Trend-following with market timing using 200-day SMA signals  
+- **RSSB/WTIP (10%)**: Structural alpha portfolio (80% RSSB, 20% WTIP) providing diversified return streams across all economic environments
 - **9-Sig (5%)**: Systematic TQQQ/AGG growth with crash protection following Jason Kelly's methodology
 - **Dual Momentum (10%)**: Tactical allocation between SPUU/EFO/BND using relative and absolute momentum
-- **Sector Momentum (10%)**: Multi-period momentum rotation across top 3 sector ETFs with SPY 200-SMA trend filtering
+- **Sector Momentum (10%)**: Leveraged multi-period momentum rotation across top 3 sector ETFs (2x leveraged) with SPY 200-SMA trend filtering
 
-Each strategy has been carefully selected and optimized based on historical backtests and current market research. The diversification across six different approaches—equity/bond/futures leverage, trend-following, systematic rebalancing, momentum-based tactical allocation, and sector rotation—helps reduce overall portfolio risk while maintaining strong growth potential.
+Each strategy has been carefully selected and optimized based on historical backtests and current market research. The diversification across seven different approaches—equity/bond/futures leverage, structural alpha, trend-following, systematic rebalancing, momentum-based tactical allocation, and sector rotation—helps reduce overall portfolio risk while maintaining strong growth potential.
 
 ## Index Alert System
 
