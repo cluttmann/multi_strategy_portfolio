@@ -16,10 +16,10 @@ app = Flask(__name__)
 # Strategy allocation percentages for dynamic monthly investment calculation
 # Investment amounts are calculated dynamically each month based on available cash and margin
 strategy_allocations = {
-    "hfea_allo": 0.175,      # 17.5% to HFEA (reduced from 18.75%)
-    "golden_hfea_lite_allo": 0.175,  # 17.5% to Golden HFEA Lite (reduced from 18.75%)
-    "spxl_allo": 0.35,       # 35% to SPXL SMA (reduced from 37.5%)
-    "rssb_wtip_allo": 0.05,  # 5% to RSSB/WTIP strategy
+    "hfea_allo": 0.1625,      # 16.25% to HFEA (reduced from 18.75%)
+    "golden_hfea_lite_allo": 0.1625,  # 16.25% to Golden HFEA Lite (reduced from 18.75%)
+    "spxl_allo": 0.325,       # 32.5% to SPXL SMA (reduced from 37.5%)
+    "rssb_wtip_allo": 0.10,  # 10% to RSSB/WTIP strategy
     "nine_sig_allo": 0.05,   # 5% to 9-Sig strategy
     "dual_momentum_allo": 0.10,  # 10% to Dual Momentum strategy
     "sector_momentum_allo": 0.10,  # 10% to Sector Momentum strategy
@@ -69,32 +69,33 @@ margin_control_config = {
 }
 
 # Sector Momentum Strategy configuration
+# Using 2x leveraged ETFs for enhanced returns
 sector_momentum_config = {
     "sector_etfs": [
-        "XLK",   # Technology
-        "XLF",   # Financials
-        "XLE",   # Energy
-        "XLV",   # Healthcare
-        "XLI",   # Industrials
-        "XLP",   # Consumer Staples
-        "XLY",   # Consumer Discretionary
-        "XLU",   # Utilities
-        "XLB",   # Materials
-        "XLRE",  # Real Estate
-        "XLC"    # Communication Services
+        "ROM",   # Technology (2x leveraged - ProShares Ultra Technology)
+        "UYG",   # Financials (2x leveraged - ProShares Ultra Financials)
+        "DIG",   # Energy (2x leveraged - ProShares Ultra Energy)
+        "RXL",   # Healthcare (2x leveraged - ProShares Ultra Health Care)
+        "UXI",   # Industrials (2x leveraged - ProShares Ultra Industrials)
+        "UGE",   # Consumer Staples (2x leveraged - ProShares Ultra Consumer Staples)
+        "UCC",   # Consumer Discretionary (2x leveraged - ProShares Ultra Cons. Discretionary)
+        "UPW",   # Utilities (2x leveraged - ProShares Ultra Utilities)
+        "UYM",   # Materials (2x leveraged - ProShares Ultra Materials)
+        "URE",   # Real Estate (2x leveraged - ProShares Ultra Real Estate)
+        "LTL"    # Communication Services (2x leveraged - ProShares Ultra Comm. Services)
     ],
     "sector_names": {
-        "XLK": "Technology",
-        "XLF": "Financials", 
-        "XLE": "Energy",
-        "XLV": "Healthcare",
-        "XLI": "Industrials",
-        "XLP": "Consumer Staples",
-        "XLY": "Consumer Discretionary",
-        "XLU": "Utilities",
-        "XLB": "Materials",
-        "XLRE": "Real Estate",
-        "XLC": "Communication Services"
+        "ROM": "Technology",
+        "UYG": "Financials", 
+        "DIG": "Energy",
+        "RXL": "Healthcare",
+        "UXI": "Industrials",
+        "UGE": "Consumer Staples",
+        "UCC": "Consumer Discretionary",
+        "UPW": "Utilities",
+        "UYM": "Materials",
+        "URE": "Real Estate",
+        "LTL": "Communication Services"
     },
     "bond_etf": "SCHZ",  # Bond ETF for bearish periods
     "momentum_weights": {
@@ -979,6 +980,84 @@ def count_ignored_sell_signals():
         return 0
 
 
+def get_nine_sig_positions(api):
+    """
+    Get current 9-Sig strategy positions from Alpaca account.
+    
+    Args:
+        api: Alpaca API credentials dict
+    
+    Returns:
+        dict: Dictionary with ticker -> shares held for 9-Sig symbols (TQQQ, AGG)
+    """
+    try:
+        # Get all positions using the list_positions function
+        positions = list_positions(api)
+        
+        # Filter for 9-Sig symbols only
+        nine_sig_positions = {}
+        nine_sig_symbols = ["TQQQ", "AGG"]
+        
+        # positions is a list of dicts from Alpaca API
+        for position in positions:
+            ticker = position.get("symbol")
+            qty = float(position.get("qty", 0))
+            if ticker in nine_sig_symbols and qty > 0:
+                nine_sig_positions[ticker] = qty
+        
+        print(f"Current 9-Sig positions from Alpaca: {nine_sig_positions}")
+        return nine_sig_positions
+        
+    except Exception as e:
+        print(f"Error getting 9-Sig positions: {e}")
+        return {}
+
+
+def sync_nine_sig_positions_from_alpaca(api, env="live"):
+    """
+    Sync 9-Sig positions from Alpaca to Firestore.
+    This ensures Firestore data matches actual positions in Alpaca.
+    
+    Args:
+        api: Alpaca API credentials dict
+        env: Environment ("live" or "paper") - determines Firestore collection
+    
+    Returns:
+        dict: Updated positions dictionary with current_agg_shares
+    """
+    try:
+        # Get actual positions from Alpaca
+        actual_positions = get_nine_sig_positions(api)
+        
+        if not actual_positions:
+            print("Warning: No 9-Sig positions found in Alpaca, cannot sync")
+            return {}
+        
+        # Load existing Firestore data
+        balances = load_balances(env)
+        nine_sig_data = balances.get("nine_sig", {})
+        
+        # Update positions - AGG shares is the key field for 9-Sig
+        agg_shares = actual_positions.get("AGG", 0)
+        tqqq_shares = actual_positions.get("TQQQ", 0)
+        
+        # Update Firestore data while preserving other fields
+        nine_sig_data["current_agg_shares"] = agg_shares
+        nine_sig_data["current_tqqq_shares"] = tqqq_shares
+        nine_sig_data["current_positions"] = actual_positions
+        nine_sig_data["last_sync_date"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        # Save to Firestore
+        save_balance("nine_sig", nine_sig_data, env)
+        
+        print(f"Synced 9-Sig positions from Alpaca to Firestore: AGG={agg_shares:.6f}, TQQQ={tqqq_shares:.6f}")
+        return {"AGG": agg_shares, "TQQQ": tqqq_shares}
+        
+    except Exception as e:
+        print(f"Error syncing 9-Sig positions from Alpaca: {e}")
+        return {}
+
+
 def make_monthly_nine_sig_contributions(api, force_execute=False, investment_calc=None, margin_result=None, skip_order_wait=False, env="live"):
     """
     Monthly contributions go ONLY to AGG (bonds) - Following 3Sig Rule.
@@ -1069,10 +1148,26 @@ def make_monthly_nine_sig_contributions(api, force_execute=False, investment_cal
     balances = load_balances(env)
     nine_sig_data = balances.get("nine_sig", {})
     total_invested = nine_sig_data.get("total_invested", 0)
-    current_agg_shares = nine_sig_data.get("current_agg_shares", 0)
+    stored_agg_shares = nine_sig_data.get("current_agg_shares", 0)
+    
+    # Get actual positions from Alpaca to compare with stored positions
+    actual_positions = get_nine_sig_positions(api)
+    actual_agg_shares = actual_positions.get("AGG", 0)
+    
+    # Use actual positions from Alpaca as source of truth if available
+    # This ensures we work with real data even if Firestore is out of sync
+    if actual_agg_shares > 0:
+        current_agg_shares = actual_agg_shares
+        if abs(stored_agg_shares - actual_agg_shares) > 0.0001:  # Allow for small floating point differences
+            print(f"Warning: Firestore AGG shares ({stored_agg_shares:.6f}) differ from Alpaca ({actual_agg_shares:.6f})")
+            print(f"Using actual Alpaca positions as source of truth")
+    else:
+        current_agg_shares = stored_agg_shares
+        if stored_agg_shares > 0:
+            print(f"Warning: Could not get AGG position from Alpaca, using Firestore data ({stored_agg_shares:.6f})")
     
     print(f"9-Sig Strategy - Investment: ${investment_amount:.2f}")
-    print(f"Current AGG shares: {current_agg_shares:.4f}")
+    print(f"Current AGG shares (from Alpaca): {current_agg_shares:.6f}")
     print(f"Total invested: ${total_invested:.2f}")
     
     try:
@@ -1084,9 +1179,27 @@ def make_monthly_nine_sig_contributions(api, force_execute=False, investment_cal
             if not skip_order_wait:
                 wait_for_order_fill(api, order["id"])
             
-            # Calculate new totals
-            new_total_agg_shares = current_agg_shares + agg_shares_to_buy
+            # Calculate new total invested
             new_total_invested = total_invested + investment_amount
+            
+            # Wait a moment for orders to settle, then sync positions from Alpaca
+            # This ensures we capture the actual positions after trades execute
+            print("Waiting for orders to settle before syncing positions from Alpaca...")
+            time.sleep(2)  # Give Alpaca a moment to process the orders
+            
+            # Get actual positions from Alpaca (source of truth)
+            # This ensures Firestore matches reality even if trades were executed outside this function
+            updated_positions = get_nine_sig_positions(api)
+            actual_new_agg_shares = updated_positions.get("AGG", 0)
+            
+            # Use actual positions from Alpaca, falling back to manually calculated if unavailable
+            if actual_new_agg_shares > 0:
+                new_total_agg_shares = actual_new_agg_shares
+                print(f"Synced AGG shares from Alpaca: {new_total_agg_shares:.6f}")
+            else:
+                # Fallback: manually calculate if we can't get from Alpaca
+                print("Warning: Could not get AGG position from Alpaca, using manual calculation")
+                new_total_agg_shares = current_agg_shares + agg_shares_to_buy
             
             print(f"9-Sig: Bought {agg_shares_to_buy:.6f} shares of AGG (monthly contribution)")
             
@@ -1103,7 +1216,7 @@ def make_monthly_nine_sig_contributions(api, force_execute=False, investment_cal
             telegram_msg += f"• Quarterly signals determine TQQQ/AGG allocation\n"
             telegram_msg += f"• Target allocation: 80% TQQQ, 20% AGG\n\n"
             telegram_msg += f"⚡ Trade Execution Summary:\n"
-            telegram_msg += f"• Total AGG shares: {new_total_agg_shares:.4f}\n"
+            telegram_msg += f"• Total AGG shares: {new_total_agg_shares:.6f}\n"
             telegram_msg += f"• Total invested: ${new_total_invested:.2f}\n"
             telegram_msg += f"• Monthly contribution tracked for quarterly signals"
             
@@ -1112,10 +1225,15 @@ def make_monthly_nine_sig_contributions(api, force_execute=False, investment_cal
             # Track the actual contribution amount for quarterly signal calculation
             track_nine_sig_monthly_contribution(investment_amount)
             
+            # Get TQQQ shares from Alpaca for complete position tracking
+            actual_tqqq_shares = updated_positions.get("TQQQ", 0) if updated_positions else 0
+            
             # Update Firestore with comprehensive tracking
             save_balance("nine_sig", {
                 "total_invested": new_total_invested,
                 "current_agg_shares": new_total_agg_shares,
+                "current_tqqq_shares": actual_tqqq_shares,
+                "current_positions": updated_positions if updated_positions else {"AGG": new_total_agg_shares},
                 "last_trade_date": datetime.datetime.now().strftime("%Y-%m-%d"),
                 "last_monthly_contribution": {
                     "amount": investment_amount,
@@ -1376,6 +1494,13 @@ def make_monthly_buys_rssb_wtip(api, force_execute=False, investment_calc=None, 
                 else:
                     print(f"RSSB/WTIP: Leverage check - Current {leverage:.3f}x → Projected {projected_leverage:.3f}x (limit: {margin_control_config['max_leverage']:.2f}x)")
     
+    # Load current strategy state from Firestore (before calculations)
+    balances = load_balances(env)
+    rssb_wtip_data = balances.get("rssb_wtip", {})
+    total_invested = rssb_wtip_data.get("total_invested", 0)
+    current_positions = rssb_wtip_data.get("current_positions", {})
+    pending_investments = rssb_wtip_data.get("pending_investments", {})  # Track uninvested amounts per ticker
+    
     # Get current RSSB/WTIP allocations
     (
         rssb_diff,
@@ -1407,26 +1532,34 @@ def make_monthly_buys_rssb_wtip(api, force_execute=False, investment_calc=None, 
     rssb_price = float(get_latest_trade(api, "RSSB"))
     wtip_price = float(get_latest_trade(api, "WTIP"))
     
+    # Add pending investments to allocation amounts
+    wtip_pending = pending_investments.get("WTIP", 0)
+    wtip_total_amount = wtip_amount + wtip_pending
+    
     # Calculate number of shares to buy
     rssb_shares_to_buy = rssb_amount / rssb_price
     # WTIP doesn't support fractional shares on Alpaca - round to whole shares
-    wtip_shares_to_buy = round(wtip_amount / wtip_price)
+    wtip_shares_to_buy = round(wtip_total_amount / wtip_price)
     
-    # Skip WTIP if amount is too small to buy at least 1 share
+    # Handle WTIP non-fractionable shares with pending investment accumulation
     if wtip_shares_to_buy < 1:
-        print(f"Warning: WTIP investment amount ${wtip_amount:.2f} is too small to buy whole shares (price: ${wtip_price:.2f}). Skipping WTIP.")
+        # Can't buy a whole share - accumulate in pending investments
+        uninvested_amount = wtip_total_amount
+        pending_investments["WTIP"] = uninvested_amount
+        print(f"Warning: WTIP investment amount ${wtip_total_amount:.2f} is too small to buy whole shares (price: ${wtip_price:.2f}). Accumulating ${uninvested_amount:.2f} in pending investments.")
         wtip_shares_to_buy = 0
         wtip_amount = 0
-
-    # Load current strategy state from Firestore
-    balances = load_balances(env)
-    rssb_wtip_data = balances.get("rssb_wtip", {})
-    total_invested = rssb_wtip_data.get("total_invested", 0)
-    current_positions = rssb_wtip_data.get("current_positions", {})
+    else:
+        # We can buy whole shares - clear pending investment for WTIP
+        if "WTIP" in pending_investments:
+            pending_investments["WTIP"] = 0
+        # Adjust wtip_amount to reflect actual purchase (may be more than allocation due to pending)
+        wtip_amount = wtip_shares_to_buy * wtip_price
     
     print(f"RSSB/WTIP Strategy - Investment: ${investment_amount:.2f}")
     print(f"Current positions: {current_positions}")
     print(f"Total invested: ${total_invested:.2f}")
+    print(f"Pending investments: {pending_investments}")
     
     # Execute market orders with enhanced tracking
     shares_bought = []
@@ -1461,7 +1594,8 @@ def make_monthly_buys_rssb_wtip(api, force_execute=False, investment_calc=None, 
         save_balance("rssb_wtip", {
             "total_invested": total_invested,
             "current_positions": current_positions,
-            "last_updated": datetime.datetime.utcnow().isoformat()
+            "last_updated": datetime.datetime.utcnow().isoformat(),
+            "pending_investments": pending_investments  # Track uninvested amounts for future purchases
         }, env)
         
         # Send summary message
@@ -1647,10 +1781,24 @@ def make_monthly_buys(api, force_execute=False, investment_calc=None, margin_res
     balances = load_balances(env)
     hfea_data = balances.get("hfea", {})
     total_invested = hfea_data.get("total_invested", 0)
-    current_positions = hfea_data.get("current_positions", {})
+    stored_positions = hfea_data.get("current_positions", {})
+    
+    # Get actual positions from Alpaca to compare with stored positions
+    actual_hfea_positions = get_hfea_positions(api)
+    
+    # Use actual positions from Alpaca as source of truth if available
+    # This ensures we work with real data even if Firestore is out of sync
+    if actual_hfea_positions:
+        current_positions = actual_hfea_positions
+        if stored_positions != actual_hfea_positions:
+            print(f"Warning: Firestore positions ({stored_positions}) differ from Alpaca ({actual_hfea_positions})")
+            print(f"Using actual Alpaca positions as source of truth")
+    else:
+        current_positions = stored_positions
+        print(f"Warning: Could not get positions from Alpaca, using Firestore data")
     
     print(f"HFEA Strategy - Investment: ${investment_amount:.2f}")
-    print(f"Current positions: {current_positions}")
+    print(f"Current positions (from Alpaca): {current_positions}")
     print(f"Total invested: ${total_invested:.2f}")
     
     # Execute market orders with enhanced tracking
@@ -1676,11 +1824,27 @@ def make_monthly_buys(api, force_execute=False, investment_calc=None, margin_res
     # Calculate new total invested
     new_total_invested = total_invested + investment_amount
     
-    # Update current positions (add to existing)
-    new_positions = current_positions.copy()
-    for symbol, qty in [("UPRO", upro_shares_to_buy), ("TMF", tmf_shares_to_buy), ("KMLM", kmlm_shares_to_buy)]:
-        if qty > 0:
-            new_positions[symbol] = new_positions.get(symbol, 0) + qty
+    # Wait a moment for orders to settle, then sync positions from Alpaca
+    # This ensures we capture the actual positions after trades execute
+    if len(trades_executed) > 0:
+        print("Waiting for orders to settle before syncing positions from Alpaca...")
+        time.sleep(2)  # Give Alpaca a moment to process the orders
+    
+    # Get actual positions from Alpaca (source of truth)
+    # This ensures Firestore matches reality even if trades were executed outside this function
+    actual_positions = get_hfea_positions(api)
+    
+    # Use actual positions from Alpaca, falling back to manually calculated if Alpaca data unavailable
+    if actual_positions:
+        new_positions = actual_positions
+        print(f"Synced positions from Alpaca: {new_positions}")
+    else:
+        # Fallback: manually update positions if we can't get from Alpaca
+        print("Warning: Could not get positions from Alpaca, using manual calculation")
+        new_positions = current_positions.copy()
+        for symbol, qty in [("UPRO", upro_shares_to_buy), ("TMF", tmf_shares_to_buy), ("KMLM", kmlm_shares_to_buy)]:
+            if qty > 0:
+                new_positions[symbol] = new_positions.get(symbol, 0) + qty
     
     # Enhanced Telegram message with detailed decision rationale
     telegram_msg = f"🎯 HFEA Strategy Decision\n\n"
@@ -1724,6 +1888,122 @@ def make_monthly_buys(api, force_execute=False, investment_calc=None, margin_res
     send_margin_summary_message(margin_result, "HFEA", action_taken, investment_calc)
     
     return "Monthly investment executed."
+
+
+def get_hfea_positions(api):
+    """
+    Get current HFEA positions from Alpaca account.
+    
+    Args:
+        api: Alpaca API credentials dict
+    
+    Returns:
+        dict: Dictionary with ticker -> shares held for HFEA symbols (UPRO, TMF, KMLM)
+    """
+    try:
+        # Get all positions using the list_positions function
+        positions = list_positions(api)
+        
+        # Filter for HFEA symbols only
+        hfea_positions = {}
+        hfea_symbols = ["UPRO", "TMF", "KMLM"]
+        
+        # positions is a list of dicts from Alpaca API
+        for position in positions:
+            ticker = position.get("symbol")
+            qty = float(position.get("qty", 0))
+            if ticker in hfea_symbols and qty > 0:
+                hfea_positions[ticker] = qty
+        
+        print(f"Current HFEA positions from Alpaca: {hfea_positions}")
+        return hfea_positions
+        
+    except Exception as e:
+        print(f"Error getting HFEA positions: {e}")
+        return {}
+
+
+def sync_hfea_positions_from_alpaca(api, env="live"):
+    """
+    Sync HFEA positions from Alpaca to Firestore.
+    This ensures Firestore data matches actual positions in Alpaca.
+    
+    Args:
+        api: Alpaca API credentials dict
+        env: Environment ("live" or "paper") - determines Firestore collection
+    
+    Returns:
+        dict: Updated positions dictionary
+    """
+    try:
+        # Get actual positions from Alpaca
+        actual_positions = get_hfea_positions(api)
+        
+        if not actual_positions:
+            print("Warning: No HFEA positions found in Alpaca, cannot sync")
+            return {}
+        
+        # Load existing Firestore data
+        balances = load_balances(env)
+        hfea_data = balances.get("hfea", {})
+        
+        # Update positions while preserving other data
+        hfea_data["current_positions"] = actual_positions
+        hfea_data["last_sync_date"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        # Save to Firestore
+        save_balance("hfea", hfea_data, env)
+        
+        print(f"Synced HFEA positions from Alpaca to Firestore: {actual_positions}")
+        return actual_positions
+        
+    except Exception as e:
+        print(f"Error syncing HFEA positions from Alpaca: {e}")
+        return {}
+
+
+def get_hfea_status(api, env="live"):
+    """
+    Get current HFEA strategy status using actual Alpaca positions.
+    This function always uses Alpaca as the source of truth for positions.
+    
+    Args:
+        api: Alpaca API credentials dict
+        env: Environment ("live" or "paper") - determines Firestore collection
+    
+    Returns:
+        dict: Dictionary with current_positions, last_allocation, total_invested, etc.
+    """
+    try:
+        # Get actual positions from Alpaca (source of truth)
+        actual_positions = get_hfea_positions(api)
+        
+        # Load other data from Firestore
+        balances = load_balances(env)
+        hfea_data = balances.get("hfea", {})
+        
+        # Build status dictionary with actual positions
+        status = {
+            "current_positions": actual_positions,  # Always use Alpaca data
+            "last_allocation": hfea_data.get("last_allocation", {}),
+            "total_invested": hfea_data.get("total_invested", 0),
+            "last_trade_date": hfea_data.get("last_trade_date", ""),
+            "trades_executed": hfea_data.get("trades_executed", []),
+            "last_sync_date": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        }
+        
+        return status
+        
+    except Exception as e:
+        print(f"Error getting HFEA status: {e}")
+        return {
+            "current_positions": {},
+            "last_allocation": {},
+            "total_invested": 0,
+            "last_trade_date": "",
+            "trades_executed": [],
+            "error": str(e)
+        }
 
 
 def get_hfea_allocations(api):
@@ -1958,10 +2238,16 @@ def rebalance_rssb_wtip_portfolio(api):
     """
     Rebalance RSSB/WTIP portfolio (80/20) quarterly.
     Executes on first trading day of each quarter.
+    Handles non-fractionable shares for WTIP and pending investments.
     """
     if not check_trading_day(mode="quarterly"):
         print("Not first trading day of the month in this Quarter")
         return "Not first trading day of the month in this Quarter"
+    
+    # Load pending investments from Firestore
+    balances = load_balances()
+    rssb_wtip_data = balances.get("rssb_wtip", {})
+    pending_investments = rssb_wtip_data.get("pending_investments", {})
     
     # Get RSSB and WTIP values and deviations from target allocation
     (
@@ -1985,32 +2271,56 @@ def rebalance_rssb_wtip_portfolio(api):
         send_telegram_message("No holdings to rebalance for RSSB/WTIP Strategy.")
         return "No holdings to rebalance for RSSB/WTIP Strategy."
 
+    # Get current prices
+    rssb_price = float(get_latest_trade(api, "RSSB"))
+    wtip_price = float(get_latest_trade(api, "WTIP"))
+
     # Define trade parameters for each ETF
     rebalance_actions = []
+    wtip_pending = pending_investments.get("WTIP", 0)
 
     # If RSSB is over-allocated, adjust WTIP if under-allocated
     if rssb_diff > 0:
         if wtip_diff < 0:
-            rssb_shares_to_sell = min(rssb_diff, abs(wtip_diff)) / float(get_latest_trade(api, "RSSB"))
-            wtip_shares_to_buy = (
+            rssb_shares_to_sell = min(rssb_diff, abs(wtip_diff)) / rssb_price
+            wtip_value_to_buy = (
                 rssb_shares_to_sell
-                * float(get_latest_trade(api, "RSSB"))
-                / float(get_latest_trade(api, "WTIP"))
+                * rssb_price
+                / wtip_price
             ) * fee_margin
-            rebalance_actions.append(("RSSB", rssb_shares_to_sell, "sell"))
-            rebalance_actions.append(("WTIP", wtip_shares_to_buy, "buy"))
+            
+            # Add pending investment to WTIP buy amount
+            wtip_total_value = wtip_value_to_buy + wtip_pending
+            wtip_shares_to_buy = round(wtip_total_value / wtip_price)
+            
+            # Handle non-fractionable WTIP shares
+            if wtip_shares_to_buy < 1:
+                # Can't buy a whole share - accumulate in pending investments
+                pending_investments["WTIP"] = wtip_total_value
+                print(f"Warning: WTIP rebalance amount ${wtip_total_value:.2f} is too small to buy whole shares (price: ${wtip_price:.2f}). Accumulating in pending investments.")
+            else:
+                # We can buy whole shares - clear pending investment
+                pending_investments["WTIP"] = 0
+                rebalance_actions.append(("RSSB", rssb_shares_to_sell, "sell"))
+                rebalance_actions.append(("WTIP", wtip_shares_to_buy, "buy"))
 
     # If WTIP is over-allocated, adjust RSSB if under-allocated
     if wtip_diff > 0:
         if rssb_diff < 0:
-            wtip_shares_to_sell = min(wtip_diff, abs(rssb_diff)) / float(get_latest_trade(api, "WTIP"))
-            rssb_shares_to_buy = (
-                wtip_shares_to_sell
-                * float(get_latest_trade(api, "WTIP"))
-                / float(get_latest_trade(api, "RSSB"))
-            ) * fee_margin
-            rebalance_actions.append(("WTIP", wtip_shares_to_sell, "sell"))
-            rebalance_actions.append(("RSSB", rssb_shares_to_buy, "buy"))
+            # Round down to whole shares when selling WTIP (non-fractionable)
+            wtip_value_to_sell = min(wtip_diff, abs(rssb_diff))
+            wtip_shares_to_sell = int(wtip_value_to_sell / wtip_price)  # Round down to whole shares
+            
+            if wtip_shares_to_sell > 0:
+                rssb_shares_to_buy = (
+                    wtip_shares_to_sell
+                    * wtip_price
+                    / rssb_price
+                ) * fee_margin
+                rebalance_actions.append(("WTIP", wtip_shares_to_sell, "sell"))
+                rebalance_actions.append(("RSSB", rssb_shares_to_buy, "buy"))
+            else:
+                print(f"Skipping WTIP sell: value ${wtip_value_to_sell:.2f} is less than 1 whole share (price: ${wtip_price:.2f})")
 
     # Execute rebalancing actions
     for symbol, qty, action in rebalance_actions:
@@ -2022,6 +2332,11 @@ def rebalance_rssb_wtip_portfolio(api):
             send_telegram_message(
                 f"RSSB/WTIP: {action_verb} {qty:.6f} shares of {symbol} to rebalance."
             )
+    
+    # Update Firestore with pending investments
+    if pending_investments != rssb_wtip_data.get("pending_investments", {}):
+        rssb_wtip_data["pending_investments"] = pending_investments
+        save_balance("rssb_wtip", rssb_wtip_data)
 
     # Report completion of rebalancing check
     print("RSSB/WTIP rebalance check completed.")
@@ -3836,10 +4151,12 @@ def monthly_sector_momentum_strategy(api, force_execute=False, investment_calc=N
     sector_data = balances.get("sector_momentum", {})
     total_invested = sector_data.get("total_invested", 0)
     current_positions = sector_data.get("current_positions", {})
+    pending_investments = sector_data.get("pending_investments", {})  # Track uninvested amounts per ticker
     
     print(f"Sector Momentum Strategy - Investment: ${investment_amount:.2f}")
     print(f"Current positions: {current_positions}")
     print(f"Total invested: ${total_invested:.2f}")
+    print(f"Pending investments: {pending_investments}")
     
     # Check SPY 200-SMA trend filter using cached market data
     print("Checking SPY 200-SMA trend filter...")
@@ -3904,7 +4221,16 @@ def monthly_sector_momentum_strategy(api, force_execute=False, investment_calc=N
         # Sell sectors not in top 3 (use actual positions from Alpaca)
         sectors_to_sell = [ticker for ticker in actual_positions.keys() if ticker not in top_3_sectors]
         
+        # Reallocate pending investments from dropped sectors to new top 3
+        dropped_sector_pending = 0
         for ticker in sectors_to_sell:
+            # Add any pending investment from this dropped sector to the reallocation pool
+            if ticker in pending_investments:
+                pending_amount = pending_investments[ticker]
+                dropped_sector_pending += pending_amount
+                del pending_investments[ticker]
+                print(f"Reallocating ${pending_amount:.2f} pending investment from dropped sector {ticker}")
+            
             shares_to_sell = actual_positions[ticker]
             if shares_to_sell > 0:
                 try:
@@ -3928,25 +4254,76 @@ def monthly_sector_momentum_strategy(api, force_execute=False, investment_calc=N
                     send_telegram_message(f"Sector Momentum Error: {error_msg}")
                     return error_msg
         
+        # Distribute dropped sector pending investments equally to new top 3
+        if dropped_sector_pending > 0 and len(top_3_sectors) > 0:
+            per_sector_bonus = dropped_sector_pending / len(top_3_sectors)
+            for ticker in top_3_sectors:
+                if ticker not in pending_investments:
+                    pending_investments[ticker] = 0
+                pending_investments[ticker] += per_sector_bonus
+            print(f"Distributed ${dropped_sector_pending:.2f} from dropped sectors to top 3 (${per_sector_bonus:.2f} each)")
+        
         # Rebalance to target allocations for top 3 sectors (use actual positions from Alpaca)
+        # Sector ETFs are non-fractionable (like WTIP), so we need to round to whole shares
+        sector_etfs = sector_momentum_config["sector_etfs"]
+        bond_etf = sector_momentum_config["bond_etf"]
+        
         for ticker in top_3_sectors:
             try:
                 current_price = float(get_latest_trade(api, ticker))
                 # Use actual shares from Alpaca, fallback to Firestore if not found
                 current_shares = actual_positions.get(ticker, current_positions.get(ticker, 0))
                 
+                # Calculate target allocation: base allocation + pending investment from previous months
+                pending_for_ticker = pending_investments.get(ticker, 0)
+                total_allocation_for_ticker = target_allocation_per_sector + pending_for_ticker
+                
                 # Calculate target shares
-                target_shares = target_allocation_per_sector / current_price
+                target_shares = total_allocation_for_ticker / current_price
                 shares_delta = target_shares - current_shares
+                
+                # Check if this is a non-fractionable ETF (all sector ETFs are non-fractionable)
+                is_non_fractionable = ticker in sector_etfs
                 
                 if abs(shares_delta) > 0.01:  # Only trade if difference is meaningful
                     if shares_delta > 0:
                         # Buy more shares
-                        buy_order = submit_order(api, ticker, shares_delta, "buy")
-                        if not skip_order_wait:
-                            wait_for_order_fill(api, buy_order["id"])
-                        trades_executed.append(f"Bought {shares_delta:.4f} shares of {ticker} (rebalancing to 33.33%)")
-                        print(f"Bought {shares_delta:.4f} shares of {ticker}")
+                        if is_non_fractionable:
+                            # Round to whole shares for non-fractionable ETFs
+                            whole_shares_to_buy = round(shares_delta)
+                            amount_available = total_allocation_for_ticker - (current_shares * current_price)
+                            
+                            # Check if we can afford at least 1 whole share
+                            if whole_shares_to_buy < 1 or amount_available < current_price:
+                                # Can't buy a whole share - accumulate in pending investments
+                                uninvested_amount = amount_available
+                                if ticker not in pending_investments:
+                                    pending_investments[ticker] = 0
+                                pending_investments[ticker] = uninvested_amount
+                                print(f"Warning: {ticker} investment amount ${amount_available:.2f} is too small to buy whole shares (price: ${current_price:.2f}). Accumulating ${uninvested_amount:.2f} in pending investments.")
+                                trades_executed.append(f"Accumulated ${uninvested_amount:.2f} for {ticker} (pending until enough for whole share)")
+                                continue
+                            
+                            # We can buy whole shares - clear pending investment for this ticker
+                            if ticker in pending_investments:
+                                pending_investments[ticker] = 0
+                            
+                            buy_order = submit_order(api, ticker, whole_shares_to_buy, "buy")
+                            if not skip_order_wait:
+                                wait_for_order_fill(api, buy_order["id"])
+                            trades_executed.append(f"Bought {whole_shares_to_buy:.0f} shares of {ticker} (rebalancing to 33.33%, rounded from {shares_delta:.4f})")
+                            print(f"Bought {whole_shares_to_buy:.0f} shares of {ticker} (rounded from {shares_delta:.4f})")
+                        else:
+                            # SCHZ and other fractionable ETFs can use fractional shares
+                            # Clear any pending investment since we can buy fractionally
+                            if ticker in pending_investments:
+                                pending_investments[ticker] = 0
+                            
+                            buy_order = submit_order(api, ticker, shares_delta, "buy")
+                            if not skip_order_wait:
+                                wait_for_order_fill(api, buy_order["id"])
+                            trades_executed.append(f"Bought {shares_delta:.4f} shares of {ticker} (rebalancing to 33.33%)")
+                            print(f"Bought {shares_delta:.4f} shares of {ticker}")
                     else:
                         # Sell shares - round down to whole shares (Alpaca doesn't allow fractional short sales)
                         shares_to_sell = abs(shares_delta)
@@ -3967,14 +4344,24 @@ def monthly_sector_momentum_strategy(api, force_execute=False, investment_calc=N
                 return error_msg
         
         # Update Firestore with sector positions
+        # Get actual positions after trades to store accurate whole share counts
+        updated_actual_positions = get_sector_momentum_positions(api)
         new_positions = {}
         for ticker in top_3_sectors:
-            try:
-                current_price = float(get_latest_trade(api, ticker))
-                target_shares = target_allocation_per_sector / current_price
-                new_positions[ticker] = target_shares
-            except Exception as e:
-                print(f"Error updating position for {ticker}: {e}")
+            # Use actual position from Alpaca if available, otherwise calculate target
+            if ticker in updated_actual_positions:
+                new_positions[ticker] = updated_actual_positions[ticker]
+            else:
+                try:
+                    current_price = float(get_latest_trade(api, ticker))
+                    target_shares = target_allocation_per_sector / current_price
+                    # Round to whole shares for sector ETFs (non-fractionable)
+                    if ticker in sector_etfs:
+                        new_positions[ticker] = round(target_shares)
+                    else:
+                        new_positions[ticker] = target_shares
+                except Exception as e:
+                    print(f"Error updating position for {ticker}: {e}")
         
         save_balance("sector_momentum", {
             "total_invested": total_invested + investment_amount,
@@ -3982,7 +4369,8 @@ def monthly_sector_momentum_strategy(api, force_execute=False, investment_calc=N
             "last_trade_date": datetime.datetime.now().strftime("%Y-%m-%d"),
             "top_3_sectors": top_3_sectors,
             "spy_above_sma": True,
-            "last_momentum_scores": dict(sector_rankings[:5])  # Top 5 for reference
+            "last_momentum_scores": dict(sector_rankings[:5]),  # Top 5 for reference
+            "pending_investments": pending_investments  # Track uninvested amounts for future purchases
         }, env)
         
     else:
@@ -3990,16 +4378,28 @@ def monthly_sector_momentum_strategy(api, force_execute=False, investment_calc=N
         print("SPY below 200-SMA: Switching to bond mode (SCHZ)")
         
         bond_etf = sector_momentum_config["bond_etf"]
+        sector_etfs = sector_momentum_config["sector_etfs"]
         
-        # Sell all sector positions
-        for ticker, shares in current_positions.items():
-            if shares > 0:
+        # Sell all sector positions (use actual positions from Alpaca, not Firestore)
+        # Filter to only sell sector ETFs (not SCHZ if it's already held)
+        for ticker, shares in actual_positions.items():
+            # Only sell sector ETFs, not the bond ETF
+            if ticker in sector_etfs and shares > 0:
                 try:
-                    sell_order = submit_order(api, ticker, shares, "sell")
-                    if not skip_order_wait:
-                        wait_for_order_fill(api, sell_order["id"])
-                    trades_executed.append(f"Sold {shares:.4f} shares of {ticker}")
-                    print(f"Sold {shares:.4f} shares of {ticker}")
+                    # Round down to whole shares (sector ETFs are non-fractionable)
+                    whole_shares_to_sell = int(shares)
+                    if whole_shares_to_sell > 0:
+                        sell_order = submit_order(api, ticker, whole_shares_to_sell, "sell")
+                        if not skip_order_wait:
+                            wait_for_order_fill(api, sell_order["id"])
+                        if whole_shares_to_sell < shares:
+                            trades_executed.append(f"Sold {whole_shares_to_sell:.0f} shares of {ticker} (rounded down from {shares:.4f})")
+                            print(f"Sold {whole_shares_to_sell:.0f} shares of {ticker} (rounded down from {shares:.4f})")
+                        else:
+                            trades_executed.append(f"Sold {whole_shares_to_sell:.0f} shares of {ticker}")
+                            print(f"Sold {whole_shares_to_sell:.0f} shares of {ticker}")
+                    else:
+                        print(f"Skipping sell of {ticker}: {shares:.4f} shares is less than 1 whole share")
                 except Exception as e:
                     error_msg = f"Failed to sell {ticker}: {e}"
                     print(error_msg)
@@ -4007,6 +4407,13 @@ def monthly_sector_momentum_strategy(api, force_execute=False, investment_calc=N
                     return error_msg
         
         # Invest all in SCHZ
+        # Clear pending investments when switching to bond mode (reallocate to SCHZ)
+        # SCHZ is fractionable, so we can invest all pending amounts
+        total_pending = sum(pending_investments.values())
+        if total_pending > 0:
+            print(f"Reallocating ${total_pending:.2f} from pending sector investments to SCHZ")
+            total_to_allocate += total_pending
+        
         if total_to_allocate > 0:
             try:
                 schz_price = float(get_latest_trade(api, bond_etf))
@@ -4016,8 +4423,12 @@ def monthly_sector_momentum_strategy(api, force_execute=False, investment_calc=N
                 if not skip_order_wait:
                     wait_for_order_fill(api, buy_order["id"])
                 
-                trades_executed.append(f"Bought {schz_shares:.4f} shares of {bond_etf} (bear market protection)")
-                print(f"Bought {schz_shares:.4f} shares of {bond_etf}")
+                if total_pending > 0:
+                    trades_executed.append(f"Bought {schz_shares:.4f} shares of {bond_etf} (bear market protection, includes ${total_pending:.2f} from pending investments)")
+                    print(f"Bought {schz_shares:.4f} shares of {bond_etf} (includes ${total_pending:.2f} from pending investments)")
+                else:
+                    trades_executed.append(f"Bought {schz_shares:.4f} shares of {bond_etf} (bear market protection)")
+                    print(f"Bought {schz_shares:.4f} shares of {bond_etf}")
                 
                 # Update Firestore
                 save_balance("sector_momentum", {
@@ -4026,7 +4437,8 @@ def monthly_sector_momentum_strategy(api, force_execute=False, investment_calc=N
                     "last_trade_date": datetime.datetime.now().strftime("%Y-%m-%d"),
                     "top_3_sectors": [],
                     "spy_above_sma": False,
-                    "last_momentum_scores": {}
+                    "last_momentum_scores": {},
+                    "pending_investments": {}  # Clear pending when in bond mode
                 }, env)
                 
             except Exception as e:
