@@ -61,6 +61,17 @@ spxl_sma_holding_fund = "SGOV"  # iShares 0-3 Month Treasury Bond ETF
 # - Dual Momentum: SPUU, EFO, BND
 # - Sector Momentum: ROM, UYG, DIG, RXL, UXI, UGE, UCC, UPW, UYM, URE, LTL, SCHZ, SHV (SHV is holding fund)
 
+# Strategy ticker ownership mapping for cost basis recalculation
+STRATEGY_SYMBOLS = {
+    "hfea": ["UPRO", "TMF", "KMLM"],
+    "golden_hfea_lite": ["SSO", "ZROZ", "GLD"],
+    "spxl_sma": ["SPXL", "SGOV"],
+    "rssb_wtip": ["RSSB", "WTIP", "BIL"],
+    "nine_sig": ["TQQQ", "AGG"],
+    "dual_momentum": ["SPUU", "EFO", "BND"],
+    "sector_momentum": ["ROM", "UYG", "DIG", "RXL", "UXI", "UGE", "UCC", "UPW", "UYM", "URE", "LTL", "SCHZ", "SHV"]
+}
+
 alpaca_environment = "live"
 margin = 0.01  # band around the 200sma to avoid too many trades
 
@@ -2126,6 +2137,122 @@ def get_hfea_status(api, env="live"):
         }
 
 
+def recalculate_all_strategies_cost_basis(api, env="live", silent=False):
+    """
+    Recalculate cost basis for ALL strategies from Alpaca positions and update Firestore.
+    Uses actual cost_basis from Alpaca as the source of truth.
+    
+    This ensures Firestore total_invested values stay synchronized with Alpaca's actual cost basis,
+    preventing drift from manual trades, failed trades, or data resets.
+    
+    Args:
+        api: Alpaca API credentials dict
+        env: Environment ("live" or "paper")
+        silent: If True, suppress detailed output (useful when called from orchestrator)
+    
+    Returns:
+        dict: Summary of updates with old/new values and differences
+    """
+    try:
+        if not silent:
+            print("=" * 80)
+            print("RECALCULATING COST BASIS FOR ALL STRATEGIES")
+            print("=" * 80)
+        
+        # Get all positions from Alpaca
+        positions = list_positions(api)
+        
+        results = {}
+        total_old = 0
+        total_new = 0
+        
+        # Process each strategy
+        for strategy_name, symbols in STRATEGY_SYMBOLS.items():
+            if not silent:
+                print(f"\n📊 {strategy_name.upper().replace('_', ' ')}")
+                print(f"Symbols: {', '.join(symbols)}")
+            
+            # Calculate total cost basis for this strategy's positions
+            total_cost_basis = 0
+            position_details = {}
+            
+            for position in positions:
+                symbol = position.get("symbol")
+                if symbol in symbols:
+                    cost_basis = float(position.get("cost_basis", 0))
+                    qty = float(position.get("qty", 0))
+                    market_value = float(position.get("market_value", 0))
+                    total_cost_basis += cost_basis
+                    position_details[symbol] = {
+                        "shares": qty,
+                        "cost_basis": cost_basis,
+                        "market_value": market_value
+                    }
+            
+            # Load existing Firestore data
+            balances = load_balances(env)
+            strategy_data = balances.get(strategy_name, {})
+            old_total_invested = strategy_data.get("total_invested", 0)
+            
+            # Update total_invested with actual cost basis from Alpaca
+            strategy_data["total_invested"] = total_cost_basis
+            strategy_data["cost_basis_recalculated_date"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            strategy_data["old_total_invested"] = old_total_invested  # Keep for reference
+            strategy_data["position_cost_basis"] = position_details
+            
+            # Save to Firestore
+            save_balance(strategy_name, strategy_data, env)
+            
+            difference = total_cost_basis - old_total_invested
+            total_old += old_total_invested
+            total_new += total_cost_basis
+            
+            results[strategy_name] = {
+                "old_total_invested": old_total_invested,
+                "new_total_invested": total_cost_basis,
+                "difference": difference,
+                "position_details": position_details
+            }
+            
+            if not silent:
+                print(f"Old Firestore: ${old_total_invested:10.2f}")
+                print(f"New Firestore: ${total_cost_basis:10.2f}")
+                print(f"Difference:    ${difference:10.2f}")
+            elif difference != 0:
+                # Even in silent mode, log if there was a correction
+                print(f"Cost basis sync: {strategy_name} corrected by ${difference:.2f}")
+        
+        if not silent:
+            print()
+            print("=" * 80)
+            print("SUMMARY:")
+            print("=" * 80)
+            print(f"Total old Firestore total_invested: ${total_old:.2f}")
+            print(f"Total new Firestore total_invested: ${total_new:.2f}")
+            print(f"Total difference:                   ${total_new - total_old:.2f}")
+            print("=" * 80)
+        
+        return {
+            "success": True,
+            "total_old": total_old,
+            "total_new": total_new,
+            "total_difference": total_new - total_old,
+            "strategies": results
+        }
+        
+    except Exception as e:
+        error_msg = f"Error recalculating all strategies cost basis: {e}"
+        print(error_msg)
+        return {
+            "success": False,
+            "error": error_msg,
+            "total_old": 0,
+            "total_new": 0,
+            "total_difference": 0,
+            "strategies": {}
+        }
+
+
 def get_hfea_allocations(api):
     positions = {p["symbol"]: float(p["market_value"]) for p in list_positions(api)}
     upro_value = positions.get("UPRO", 0)
@@ -2595,26 +2722,7 @@ def rebalance_rssb_wtip_portfolio(api):
     for symbol, qty, action in rebalance_actions:
         if qty > 0:
             try:
-                # Special handling for BIL - it may not support fractional shares
-                if symbol == rssb_wtip_holding_fund and action == "sell":
-                    # Try fractional first, if it fails, round to whole shares
-                    try:
-                        order = submit_order(api, symbol, qty, action)
-                    except Exception as e:
-                        if "403" in str(e) or "forbidden" in str(e).lower() or "fractional" in str(e).lower():
-                            # BIL doesn't support fractional shares - round to whole shares
-                            whole_shares = int(qty)
-                            if whole_shares > 0:
-                                print(f"RSSB/WTIP: BIL doesn't support fractional shares, rounding {qty:.6f} to {whole_shares} shares")
-                                order = submit_order(api, symbol, whole_shares, action)
-                            else:
-                                print(f"RSSB/WTIP: Cannot sell BIL - {qty:.6f} shares rounds to 0")
-                                continue
-                        else:
-                            raise  # Re-raise if it's a different error
-                else:
-                    order = submit_order(api, symbol, qty, action)
-                
+                order = submit_order(api, symbol, qty, action)
                 action_verb = "Bought" if action == "buy" else "Sold"
                 wait_for_order_fill(api, order["id"])
                 print(f"RSSB/WTIP: {action_verb} {qty:.6f} shares of {symbol} to rebalance.")
@@ -5176,9 +5284,21 @@ def monthly_invest_all_strategies(api, force_execute=False, skip_order_wait=Fals
         print("Not first trading day of the month")
         return {"error": "Not first trading day of the month"}
     
-    # Calculate margin conditions and investment amounts ONCE
+    # Step 1: Sync cost basis from Alpaca to Firestore BEFORE executing trades
+    # This ensures we start with accurate data
     print("=== Monthly Investment Orchestrator ===")
-    print("Calculating budgets for all strategies...")
+    print("Step 1: Syncing cost basis from Alpaca to Firestore...")
+    cost_basis_result = recalculate_all_strategies_cost_basis(api, env, silent=True)
+    if cost_basis_result.get("success"):
+        if cost_basis_result.get("total_difference", 0) != 0:
+            print(f"✅ Cost basis synced: ${cost_basis_result['total_difference']:.2f} correction applied")
+        else:
+            print("✅ Cost basis already in sync")
+    else:
+        print(f"⚠️  Warning: Cost basis sync had issues: {cost_basis_result.get('error', 'Unknown error')}")
+    
+    # Step 2: Calculate margin conditions and investment amounts ONCE
+    print("\nStep 2: Calculating budgets for all strategies...")
     
     margin_result = check_margin_conditions(api)
     investment_calc = calculate_monthly_investments(api, margin_result, env)
