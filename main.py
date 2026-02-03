@@ -1962,6 +1962,9 @@ def make_monthly_buys(api, force_execute=False, investment_calc=None, margin_res
             if qty > 0:
                 new_positions[symbol] = new_positions.get(symbol, 0) + qty
     
+    # Calculate current portfolio value from actual positions
+    portfolio_value = upro_value + tmf_value + kmlm_value
+    
     # Enhanced Telegram message with detailed decision rationale
     telegram_msg = f"🎯 HFEA Strategy Decision\n\n"
     telegram_msg += f"📊 Allocation Analysis:\n"
@@ -1977,8 +1980,9 @@ def make_monthly_buys(api, force_execute=False, investment_calc=None, margin_res
     for trade in trades_executed:
         telegram_msg += f"  • {trade}\n"
     telegram_msg += f"\n💰 Portfolio Summary:\n"
-    telegram_msg += f"• Investment amount: ${investment_amount:.2f}\n"
-    telegram_msg += f"• Total invested: ${new_total_invested:.2f}\n"
+    telegram_msg += f"• New investment: ${investment_amount:.2f}\n"
+    telegram_msg += f"• Portfolio value: ${portfolio_value:.2f}\n"
+    telegram_msg += f"• Cumulative contributions: ${new_total_invested:.2f}\n"
     telegram_msg += f"• Current positions: {len([k for k, v in new_positions.items() if v > 0])} assets"
     
     send_telegram_message(telegram_msg)
@@ -2572,13 +2576,17 @@ def rebalance_rssb_wtip_portfolio(api):
             # Calculate exact amount needed (with 1% buffer)
             bil_amount_needed = wtip_shares_needed * wtip_price * 1.01
             bil_value_to_use = min(bil_value, bil_amount_needed)
+            # BIL may not support fractional shares - round to whole shares or use fractional if supported
+            # Check current BIL shares to determine if fractional is supported
             bil_shares_to_sell = bil_value_to_use / bil_price if bil_price > 0 else 0
             
+            # Try fractional first, but catch error if BIL doesn't support it
             if bil_shares_to_sell > 0:
                 actual_wtip_cost = wtip_shares_needed * wtip_price
                 bil_leftover = bil_value_to_use - actual_wtip_cost
                 bil_rebalance_leftover += max(0, bil_leftover)
                 
+                # Note: BIL selling will be wrapped in try-catch in execution loop
                 rebalance_actions.append((rssb_wtip_holding_fund, bil_shares_to_sell, "sell"))
                 rebalance_actions.append(("WTIP", wtip_shares_needed, "buy"))
                 print(f"Using ${bil_value_to_use:.2f} from BIL holding fund to buy {wtip_shares_needed} shares of WTIP")
@@ -2586,13 +2594,39 @@ def rebalance_rssb_wtip_portfolio(api):
     # Execute rebalancing actions
     for symbol, qty, action in rebalance_actions:
         if qty > 0:
-            order = submit_order(api, symbol, qty, action)
-            action_verb = "Bought" if action == "buy" else "Sold"
-            wait_for_order_fill(api, order["id"])
-            print(f"RSSB/WTIP: {action_verb} {qty:.6f} shares of {symbol} to rebalance.")
-            send_telegram_message(
-                f"RSSB/WTIP: {action_verb} {qty:.6f} shares of {symbol} to rebalance."
-            )
+            try:
+                # Special handling for BIL - it may not support fractional shares
+                if symbol == rssb_wtip_holding_fund and action == "sell":
+                    # Try fractional first, if it fails, round to whole shares
+                    try:
+                        order = submit_order(api, symbol, qty, action)
+                    except Exception as e:
+                        if "403" in str(e) or "forbidden" in str(e).lower() or "fractional" in str(e).lower():
+                            # BIL doesn't support fractional shares - round to whole shares
+                            whole_shares = int(qty)
+                            if whole_shares > 0:
+                                print(f"RSSB/WTIP: BIL doesn't support fractional shares, rounding {qty:.6f} to {whole_shares} shares")
+                                order = submit_order(api, symbol, whole_shares, action)
+                            else:
+                                print(f"RSSB/WTIP: Cannot sell BIL - {qty:.6f} shares rounds to 0")
+                                continue
+                        else:
+                            raise  # Re-raise if it's a different error
+                else:
+                    order = submit_order(api, symbol, qty, action)
+                
+                action_verb = "Bought" if action == "buy" else "Sold"
+                wait_for_order_fill(api, order["id"])
+                print(f"RSSB/WTIP: {action_verb} {qty:.6f} shares of {symbol} to rebalance.")
+                send_telegram_message(
+                    f"RSSB/WTIP: {action_verb} {qty:.6f} shares of {symbol} to rebalance."
+                )
+            except Exception as e:
+                error_msg = f"RSSB/WTIP: Failed to {action} {symbol}: {str(e)}"
+                print(error_msg)
+                send_telegram_message(error_msg)
+                # Continue with other trades even if one fails
+                continue
     
     # Handle leftover funds from rebalancing - put into BIL if under max
     if bil_rebalance_leftover > 0:
