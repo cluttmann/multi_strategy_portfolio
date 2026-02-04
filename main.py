@@ -310,6 +310,42 @@ def get_auth_headers(api):
     }
 
 
+def get_retry_session(max_retries=3, backoff_factor=1.0, timeout=30):
+    """
+    Create a requests session with retry logic for handling SSL errors and connection issues.
+    
+    Args:
+        max_retries: Maximum number of retry attempts (default: 3)
+        backoff_factor: Backoff multiplier for retries (default: 1.0)
+        timeout: Request timeout in seconds (default: 30)
+    
+    Returns:
+        requests.Session with retry adapter configured
+    """
+    from urllib3.util.retry import Retry
+    from requests.adapters import HTTPAdapter
+    
+    # Configure retry strategy
+    # Retry on connection errors, read errors, and 5xx server errors
+    retry_strategy = Retry(
+        total=max_retries,
+        backoff_factor=backoff_factor,
+        status_forcelist=[500, 502, 503, 504],  # Retry on server errors
+        allowed_methods=["GET", "POST"],  # Only retry safe methods
+        raise_on_status=False,  # Don't raise on status, let requests handle it
+        connect=max_retries,  # Retry on connection errors
+        read=max_retries,  # Retry on read errors
+    )
+    
+    # Create session with retry adapter
+    session = requests.Session()
+    adapter = HTTPAdapter(max_retries=retry_strategy)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    
+    return session
+
+
 def get_alpaca_historical_bars(api, symbol, days=400):
     """
     Fetch historical daily bars from Alpaca using IEX feed.
@@ -341,7 +377,14 @@ def get_alpaca_historical_bars(api, symbol, days=400):
             "feed": "iex"  # Use IEX feed (included with Basic subscription)
         }
         
-        response = requests.get(url, headers=get_auth_headers(api), params=params)
+        # Use retry session to handle SSL errors
+        session = get_retry_session(max_retries=3, backoff_factor=2.0, timeout=30)
+        response = session.get(
+            url,
+            headers=get_auth_headers(api),
+            params=params,
+            timeout=30
+        )
         response.raise_for_status()
         
         data = response.json()
@@ -377,7 +420,13 @@ def get_latest_trade(api, symbol):
     market_data_base_url = "https://data.alpaca.markets"
     url = f"{market_data_base_url}/v2/stocks/{symbol}/trades/latest"
     
-    response = requests.get(url, headers=get_auth_headers(api))
+    # Use retry session to handle SSL errors
+    session = get_retry_session(max_retries=3, backoff_factor=2.0, timeout=30)
+    response = session.get(
+        url,
+        headers=get_auth_headers(api),
+        timeout=30
+    )
     response.raise_for_status()
     return response.json()["trade"]["p"]
 
@@ -943,7 +992,14 @@ def check_spy_30_down_rule():
             "feed": "iex"
         }
         
-        response = requests.get(url, headers=get_auth_headers(api), params=params)
+        # Use retry session to handle SSL errors
+        session = get_retry_session(max_retries=3, backoff_factor=2.0, timeout=30)
+        response = session.get(
+            url,
+            headers=get_auth_headers(api),
+            params=params,
+            timeout=30
+        )
         response.raise_for_status()
         
         data = response.json()
@@ -3847,7 +3903,14 @@ def get_index_data(index_symbol):
             "feed": "iex"
         }
         
-        response = requests.get(url, headers=get_auth_headers(api), params=params)
+        # Use retry session to handle SSL errors
+        session = get_retry_session(max_retries=3, backoff_factor=2.0, timeout=30)
+        response = session.get(
+            url,
+            headers=get_auth_headers(api),
+            params=params,
+            timeout=30
+        )
         response.raise_for_status()
         
         data = response.json()
