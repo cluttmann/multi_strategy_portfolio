@@ -479,6 +479,23 @@ def get_order(api, order_id):
     response.raise_for_status()
     return response.json()
 
+def get_pending_orders(api, symbol=None):
+    """Get pending/open orders from Alpaca, optionally filtered by symbol"""
+    url = f"{api['BASE_URL']}/v2/orders"
+    params = {"status": "open", "limit": 500}
+    if symbol:
+        params["symbols"] = symbol
+    response = requests.get(url, headers=get_auth_headers(api), params=params)
+    response.raise_for_status()
+    return response.json()
+
+def cancel_order(api, order_id):
+    """Cancel a specific order by ID"""
+    url = f"{api['BASE_URL']}/v2/orders/{order_id}/cancel"
+    response = requests.delete(url, headers=get_auth_headers(api))
+    response.raise_for_status()
+    return response.json()
+
 def submit_order(api, symbol, qty, side):
     url = f"{api['BASE_URL']}/v2/orders"
     data = {
@@ -1573,94 +1590,182 @@ def make_monthly_buys_rssb_wtip(api, force_execute=False, investment_calc=None, 
         current_wtip_percent,
     ) = get_rssb_wtip_allocations(api)
 
-    # Calculate underweight amounts
-    rssb_underweight = max(0, target_rssb_value - rssb_value)
-    wtip_underweight = max(0, target_wtip_value - wtip_value)
-    total_underweight = rssb_underweight + wtip_underweight
-
-    # If perfectly balanced, use standard split
-    if total_underweight == 0:
-        rssb_amount = investment_amount * rssb_allocation
-        wtip_amount = investment_amount * wtip_allocation
-    else:
-        # Allocate proportionally based on underweight amounts
-        rssb_amount = (rssb_underweight / total_underweight) * investment_amount
-        wtip_amount = (wtip_underweight / total_underweight) * investment_amount
-
-    # Get current prices for RSSB and WTIP
+    # Calculate total available: current positions + BIL + new investment
+    # Strategy: MINIMIZE SELLS to avoid taxable events
+    total_to_allocate = rssb_value + wtip_value + bil_value + investment_amount
+    
+    print(f"RSSB/WTIP Strategy - Investment: ${investment_amount:.2f}")
+    print(f"Current RSSB value: ${rssb_value:.2f}")
+    print(f"Current WTIP value: ${wtip_value:.2f}")
+    print(f"BIL holding fund: ${bil_value:.2f}")
+    print(f"Total to allocate: ${total_to_allocate:.2f}")
+    
+    # Calculate target allocations (80% RSSB, 20% WTIP)
+    target_rssb_value_new = total_to_allocate * rssb_allocation
+    target_wtip_value_new = total_to_allocate * wtip_allocation
+    
+    print(f"Target RSSB: ${target_rssb_value_new:.2f} (80%)")
+    print(f"Target WTIP: ${target_wtip_value_new:.2f} (20%)")
+    
+    # Get current prices
     rssb_price = float(get_latest_trade(api, "RSSB"))
     wtip_price = float(get_latest_trade(api, "WTIP"))
     
-    # Check if we can use BIL funds to buy WTIP (if BIL + new investment reaches threshold)
-    bil_available_for_wtip = 0
-    bil_amount_to_sell = 0
-    if bil_value > 0:
-        # Check if BIL + new investment would allow us to buy at least 1 WTIP share
-        total_available_for_wtip = bil_value + wtip_amount
-        potential_wtip_shares = round(total_available_for_wtip / wtip_price)
-        if potential_wtip_shares >= 1:
-            # Calculate exactly how much we need from BIL (only what's needed, with 1% buffer for price fluctuations)
-            wtip_shares_we_can_buy = potential_wtip_shares
-            wtip_cost_needed = wtip_shares_we_can_buy * wtip_price * 1.01  # 1% buffer
-            bil_amount_to_sell = max(0, min(bil_value, wtip_cost_needed - wtip_amount))
-            if bil_amount_to_sell > 0:
-                bil_available_for_wtip = bil_amount_to_sell
-                wtip_amount += bil_available_for_wtip
+    # Calculate how much we need to buy/sell for each
+    rssb_value_delta = target_rssb_value_new - rssb_value
+    wtip_value_delta = target_wtip_value_new - wtip_value
     
-    # Calculate number of shares to buy
-    rssb_shares_to_buy = rssb_amount / rssb_price
-    # WTIP doesn't support fractional shares on Alpaca - round to whole shares
-    wtip_shares_to_buy = round(wtip_amount / wtip_price)
-    
-    # Handle WTIP non-fractionable shares and BIL holding fund
+    # Track purchases and sells
+    rssb_shares_to_buy = 0
+    wtip_shares_to_buy = 0
+    rssb_shares_to_sell = 0
+    wtip_shares_to_sell = 0
+    actual_purchases = {}
     uninvested_wtip_amount = 0
-    original_wtip_amount = wtip_amount - bil_available_for_wtip  # Original allocation from new investment
     
-    if wtip_shares_to_buy < 1:
-        # Can't buy WTIP - calculate uninvested amount (only from new investment, not BIL)
-        uninvested_wtip_amount = original_wtip_amount
-        wtip_shares_to_buy = 0
-        wtip_amount = 0
-        # If we added BIL funds but still can't buy, we need to return those BIL funds
-        if bil_available_for_wtip > 0:
-            # Don't use BIL funds if we can't buy
-            bil_available_for_wtip = 0
-    else:
-        # Adjust wtip_amount to reflect actual purchase
-        wtip_amount = wtip_shares_to_buy * wtip_price
-        # Calculate uninvested: if we used BIL, the uninvested is only from new investment portion
-        if bil_available_for_wtip > 0:
-            # We used BIL funds, so uninvested is the difference between what we allocated and what we spent
-            spent_from_new_investment = wtip_amount - bil_available_for_wtip
-            uninvested_wtip_amount = max(0, original_wtip_amount - spent_from_new_investment)
-        else:
-            # No BIL used, uninvested is the difference
-            uninvested_wtip_amount = max(0, original_wtip_amount - wtip_amount)
+    # Available new funds (investment + BIL) - use these first to minimize sells
+    available_new_funds = investment_amount + bil_value
+    funds_used = 0
     
-    # If we're using BIL funds to buy WTIP, sell only what we need (do this first to calculate leftover)
-    bil_leftover_after_wtip = 0
-    if bil_amount_to_sell > 0 and wtip_shares_to_buy >= 1:
-        # Calculate exact amount needed: cost of WTIP shares we'll buy (with small buffer)
-        actual_wtip_cost = wtip_shares_to_buy * wtip_price * 1.01  # 1% buffer for price fluctuations
-        bil_amount_needed = max(0, actual_wtip_cost - (wtip_amount - bil_available_for_wtip))
-        bil_shares_to_sell = bil_amount_needed / bil_price if bil_price > 0 else 0
+    # Step 1: Use new funds to buy underweight positions first (minimize sells)
+    # Priority: Buy the more underweight position first
+    positions_to_buy = []
+    if rssb_value_delta > 0.01:
+        positions_to_buy.append(("RSSB", rssb_value_delta, rssb_price, True))  # True = fractionable
+    if wtip_value_delta > 0.01:
+        positions_to_buy.append(("WTIP", wtip_value_delta, wtip_price, False))  # False = non-fractionable
+    
+    # Sort by underweight amount (largest first)
+    positions_to_buy.sort(key=lambda x: x[1], reverse=True)
+    
+    for symbol, value_delta, price, is_fractionable in positions_to_buy:
+        if funds_used >= available_new_funds:
+            break  # No more funds available
+            
+        remaining_funds = available_new_funds - funds_used
+        max_we_can_buy = min(value_delta, remaining_funds)
         
-        if bil_shares_to_sell > 0:
-            # Note: We'll execute this sell order later, but calculate leftover now
-            actual_wtip_cost_final = wtip_shares_to_buy * wtip_price
-            bil_leftover_after_wtip = max(0, bil_amount_needed - actual_wtip_cost_final)
-            # Update bil_value for calculations below (we'll actually sell later)
-            bil_value -= bil_amount_needed
+        if max_we_can_buy >= price:  # Can buy at least 1 share (or fractional for RSSB)
+            if is_fractionable:
+                # RSSB supports fractional shares
+                shares_to_buy = max_we_can_buy / price
+                actual_cost = shares_to_buy * price
+            else:
+                # WTIP doesn't support fractional - round to whole shares
+                shares_to_buy = round(max_we_can_buy / price)
+                if shares_to_buy >= 1:
+                    actual_cost = shares_to_buy * price
+                else:
+                    # Can't buy even 1 share
+                    if symbol == "WTIP":
+                        uninvested_wtip_amount = max_we_can_buy
+                    continue
+            
+            if shares_to_buy > 0:
+                try:
+                    buy_order = submit_order(api, symbol, shares_to_buy, "buy")
+                    if not skip_order_wait:
+                        wait_for_order_fill(api, buy_order["id"])
+                    
+                    print(f"Bought {shares_to_buy:.4f if is_fractionable else shares_to_buy:.0f} shares of {symbol} (${actual_cost:.2f})")
+                    actual_purchases[symbol] = actual_cost
+                    funds_used += actual_cost
+                    
+                    if symbol == "RSSB":
+                        rssb_shares_to_buy = shares_to_buy
+                    else:
+                        wtip_shares_to_buy = shares_to_buy
+                except Exception as e:
+                    error_msg = f"RSSB/WTIP: Failed to buy {symbol}: {str(e)}"
+                    print(error_msg)
+                    send_telegram_message(error_msg)
+                    return error_msg
     
-    # Handle BIL holding fund for uninvested WTIP amounts and leftover from BIL sale
+    # Step 2: Only sell if still overweight after using all new funds
+    # Recalculate current values after purchases
+    rssb_value_after = rssb_value + (rssb_shares_to_buy * rssb_price if rssb_shares_to_buy > 0 else 0)
+    wtip_value_after = wtip_value + (wtip_shares_to_buy * wtip_price if wtip_shares_to_buy > 0 else 0)
+    
+    # Check if still overweight after purchases
+    rssb_value_delta_after = target_rssb_value_new - rssb_value_after
+    wtip_value_delta_after = target_wtip_value_new - wtip_value_after
+    
+    # Only sell if still overweight
+    if rssb_value_delta_after < -0.01:  # Still overweight
+        shares_to_sell = abs(rssb_value_delta_after) / rssb_price
+        if shares_to_sell > 0.0001:  # Meaningful amount
+            try:
+                sell_order = submit_order(api, "RSSB", shares_to_sell, "sell")
+                if not skip_order_wait:
+                    wait_for_order_fill(api, sell_order["id"])
+                rssb_shares_to_sell = shares_to_sell
+                print(f"Sold {shares_to_sell:.4f} shares of RSSB (${abs(rssb_value_delta_after):.2f}) to rebalance")
+            except Exception as e:
+                error_msg = f"RSSB/WTIP: Failed to sell RSSB: {str(e)}"
+                print(error_msg)
+                send_telegram_message(error_msg)
+                # Continue - sell failure shouldn't stop the strategy
+    
+    if wtip_value_delta_after < -0.01:  # Still overweight
+        shares_to_sell = round(abs(wtip_value_delta_after) / wtip_price)
+        whole_shares_to_sell = int(shares_to_sell)  # Round down
+        if whole_shares_to_sell > 0:
+            try:
+                sell_order = submit_order(api, "WTIP", whole_shares_to_sell, "sell")
+                if not skip_order_wait:
+                    wait_for_order_fill(api, sell_order["id"])
+                wtip_shares_to_sell = whole_shares_to_sell
+                print(f"Sold {whole_shares_to_sell:.0f} shares of WTIP (${whole_shares_to_sell * wtip_price:.2f}) to rebalance")
+            except Exception as e:
+                error_msg = f"RSSB/WTIP: Failed to sell WTIP: {str(e)}"
+                print(error_msg)
+                send_telegram_message(error_msg)
+                # Continue - sell failure shouldn't stop the strategy
+    
+    # Step 3: Sell BIL to fund purchases (BIL was included in total_to_allocate)
+    bil_shares_to_sell = 0
+    bil_amount_to_sell = 0
+    total_purchases = sum(actual_purchases.values())
+    
+    if total_purchases > 0 and bil_value > 0:
+        # Calculate how much BIL to sell: proportional to purchases
+        bil_amount_to_sell = min(bil_value, total_purchases)
+        
+        if bil_amount_to_sell > 0:
+            bil_shares_to_sell = bil_amount_to_sell / bil_price if bil_price > 0 else 0
+            
+            # Get actual available BIL shares right before selling
+            actual_bil_shares_available = get_holding_fund_shares(api, rssb_wtip_holding_fund)
+            bil_shares_to_sell = min(bil_shares_to_sell, actual_bil_shares_available)
+            
+            if bil_shares_to_sell > 0.0001:  # Only sell if meaningful amount
+                try:
+                    sell_order = submit_order(api, rssb_wtip_holding_fund, bil_shares_to_sell, "sell")
+                    if not skip_order_wait:
+                        wait_for_order_fill(api, sell_order["id"])
+                    
+                    actual_bil_sold_value = bil_shares_to_sell * bil_price
+                    bil_value -= actual_bil_sold_value
+                    print(f"Sold {bil_shares_to_sell:.6f} shares of BIL (${actual_bil_sold_value:.2f}) to fund purchases")
+                except Exception as e:
+                    error_msg = f"RSSB/WTIP: Failed to sell BIL: {str(e)}"
+                    print(error_msg)
+                    send_telegram_message(error_msg)
+                    # Continue - BIL sell failure shouldn't stop the strategy
+                    print("Continuing despite BIL sell failure...")
+    
+    # Step 4: Handle uninvested amounts - add to BIL holding fund (up to max)
+    bil_leftover_after_wtip = 0
     bil_shares_to_buy = 0
     bil_amount_to_buy = 0
+    
+    # Handle BIL holding fund for uninvested amounts
     total_bil_to_add = uninvested_wtip_amount + bil_leftover_after_wtip
     
     if total_bil_to_add > 0:
         # Check if we can add to BIL holding fund
-        # Note: bil_value was already reduced if we sold BIL, so we need to account for that
-        current_bil_value_after_sale = bil_value  # This is already updated if we sold
+        # Note: bil_value was already reduced if we sold BIL
+        current_bil_value_after_sale = bil_value
         bil_value_after_investment = current_bil_value_after_sale + total_bil_to_add
         
         if bil_value_after_investment <= rssb_wtip_holding_fund_max:
@@ -1678,10 +1783,14 @@ def make_monthly_buys_rssb_wtip(api, force_execute=False, investment_calc=None, 
             if excess_amount > 0:
                 excess_wtip_shares = round(excess_amount / wtip_price)
                 if excess_wtip_shares >= 1:
-                    # We already bought WTIP, so add to the existing purchase
-                    wtip_shares_to_buy += excess_wtip_shares
-                    wtip_amount += excess_wtip_shares * wtip_price
-                    print(f"Using excess ${excess_amount:.2f} to buy additional {excess_wtip_shares} shares of WTIP")
+                    try:
+                        excess_buy_order = submit_order(api, "WTIP", excess_wtip_shares, "buy")
+                        if not skip_order_wait:
+                            wait_for_order_fill(api, excess_buy_order["id"])
+                        wtip_shares_to_buy += excess_wtip_shares
+                        print(f"Using excess ${excess_amount:.2f} to buy additional {excess_wtip_shares} shares of WTIP")
+                    except Exception as e:
+                        print(f"Failed to buy WTIP with excess: {e}")
                 else:
                     # Still can't buy WTIP, add excess to BIL if under max
                     if current_bil_value_after_sale + bil_amount_to_buy + excess_amount <= rssb_wtip_holding_fund_max:
@@ -1691,79 +1800,34 @@ def make_monthly_buys_rssb_wtip(api, force_execute=False, investment_calc=None, 
                         # Can't add to BIL (over max) and can't buy WTIP - this money will remain as cash
                         print(f"Warning: ${excess_amount:.2f} cannot be invested (BIL at max, WTIP too expensive)")
     
-    print(f"RSSB/WTIP Strategy - Investment: ${investment_amount:.2f}")
-    print(f"Current positions: {current_positions}")
-    print(f"Total invested: ${total_invested:.2f}")
-    print(f"BIL holding fund: {get_holding_fund_shares(api, rssb_wtip_holding_fund):.6f} shares (${bil_value:.2f})")
-    
-    # Execute market orders with enhanced tracking
-    shares_bought = []
+    # Execute market orders tracking
     trades_executed = []
     
-    # If we're using BIL funds to buy WTIP, execute the sell order (we calculated this above)
-    if bil_amount_to_sell > 0 and wtip_shares_to_buy >= 1:
-        actual_wtip_cost = wtip_shares_to_buy * wtip_price * 1.01
-        bil_amount_needed = max(0, actual_wtip_cost - (wtip_amount - bil_available_for_wtip))
-        bil_shares_to_sell = bil_amount_needed / bil_price if bil_price > 0 else 0
-        
-        if bil_shares_to_sell > 0:
-            try:
-                # Sell only the amount of BIL we actually need
-                sell_order = submit_order(api, rssb_wtip_holding_fund, bil_shares_to_sell, "sell")
-                if not skip_order_wait:
-                    wait_for_order_fill(api, sell_order["id"])
-                
-                bil_shares -= bil_shares_to_sell
-                trades_executed.append(f"Sold {bil_shares_to_sell:.6f} shares of {rssb_wtip_holding_fund} (${bil_amount_needed:.2f}) to buy WTIP")
-                print(f"Sold {bil_shares_to_sell:.6f} shares of {rssb_wtip_holding_fund} (${bil_amount_needed:.2f}) to buy WTIP")
-                if bil_leftover_after_wtip > 0:
-                    print(f"Leftover from BIL sale after WTIP purchase: ${bil_leftover_after_wtip:.2f}")
-            except Exception as e:
-                error_msg = f"RSSB/WTIP: Failed to sell {rssb_wtip_holding_fund}: {str(e)}"
-                print(error_msg)
-                send_telegram_message(error_msg)
-                return error_msg
+    # Note: Purchases and sells were already executed above in the tax-efficient logic
+    # Just track them for reporting
+    if rssb_shares_to_buy > 0:
+        trades_executed.append(f"Bought {rssb_shares_to_buy:.4f} shares of RSSB")
+    if wtip_shares_to_buy > 0:
+        trades_executed.append(f"Bought {wtip_shares_to_buy:.0f} shares of WTIP")
+    if rssb_shares_to_sell > 0:
+        trades_executed.append(f"Sold {rssb_shares_to_sell:.4f} shares of RSSB")
+    if wtip_shares_to_sell > 0:
+        trades_executed.append(f"Sold {wtip_shares_to_sell:.0f} shares of WTIP")
     
-    # Buy RSSB and WTIP
-    for symbol, qty, amount in [("RSSB", rssb_shares_to_buy, rssb_amount), ("WTIP", wtip_shares_to_buy, wtip_amount)]:
-        if qty > 0:
-            try:
-                order = submit_order(api, symbol, qty, "buy")
-                if not skip_order_wait:
-                    wait_for_order_fill(api, order["id"])
-                
-                shares_bought.append(qty)
-                trades_executed.append(f"Bought {qty:.6f} shares of {symbol} for ${amount:.2f}")
-                print(f"Bought {qty:.6f} shares of {symbol} for ${amount:.2f}")
-                send_telegram_message(f"RSSB/WTIP: Bought {qty:.6f} shares of {symbol} for ${amount:.2f}")
-                
-            except Exception as e:
-                error_msg = f"RSSB/WTIP: Failed to buy {symbol}: {str(e)}"
-                print(error_msg)
-                send_telegram_message(error_msg)
-                return error_msg
-    
-    # Buy BIL holding fund if needed
+    # Buy BIL holding fund if needed (for uninvested amounts)
     if bil_shares_to_buy > 0:
         try:
             bil_order = submit_order(api, rssb_wtip_holding_fund, bil_shares_to_buy, "buy")
             if not skip_order_wait:
                 wait_for_order_fill(api, bil_order["id"])
-            
-            bil_shares += bil_shares_to_buy
-            bil_value += bil_amount_to_buy
-            trades_executed.append(f"Bought {bil_shares_to_buy:.6f} shares of {rssb_wtip_holding_fund} (${bil_amount_to_buy:.2f}) - holding fund")
-            print(f"Bought {bil_shares_to_buy:.6f} shares of {rssb_wtip_holding_fund} for ${bil_amount_to_buy:.2f} (holding fund)")
-            send_telegram_message(f"RSSB/WTIP: Bought {bil_shares_to_buy:.6f} shares of {rssb_wtip_holding_fund} (holding fund)")
-            
+            trades_executed.append(f"Bought {bil_shares_to_buy:.6f} shares of BIL (${bil_amount_to_buy:.2f}) - holding fund")
+            print(f"Bought {bil_shares_to_buy:.6f} shares of BIL (${bil_amount_to_buy:.2f}) - holding fund")
         except Exception as e:
-            error_msg = f"RSSB/WTIP: Failed to buy {rssb_wtip_holding_fund}: {str(e)}"
-            print(error_msg)
-            send_telegram_message(error_msg)
-            return error_msg
+            print(f"RSSB/WTIP: Failed to buy BIL: {e}")
+            # Continue - BIL buy failure shouldn't stop the strategy
     
     # Update Firestore with new positions (even if no trades executed, update holding fund)
-    if trades_executed or bil_shares_to_buy > 0 or bil_available_for_wtip > 0:
+    if trades_executed or bil_shares_to_buy > 0:
         total_invested += investment_amount
         current_positions.update({
             "RSSB": current_positions.get("RSSB", 0) + rssb_shares_to_buy,
@@ -1773,6 +1837,11 @@ def make_monthly_buys_rssb_wtip(api, force_execute=False, investment_calc=None, 
         # Update holding fund position (get fresh from Alpaca to be accurate)
         updated_bil_shares = get_holding_fund_shares(api, rssb_wtip_holding_fund)
         holding_fund_position[rssb_wtip_holding_fund] = updated_bil_shares
+        
+        # Get actual positions from Alpaca to update Firestore accurately
+        positions_dict = {p["symbol"]: float(p["qty"]) for p in list_positions(api)}
+        current_positions["RSSB"] = positions_dict.get("RSSB", 0)
+        current_positions["WTIP"] = positions_dict.get("WTIP", 0)
         
         save_balance("rssb_wtip", {
             "total_invested": total_invested,
@@ -2474,7 +2543,9 @@ def get_spxl_sma_value(api):
         
         # Get invested amount from Firestore
         balances = load_balances()
-        spxl_data = balances.get("SPXL_SMA", {})
+        # Use lowercase to match other strategies (nine_sig, sector_momentum, etc.)
+        # Try both for backward compatibility during migration
+        spxl_data = balances.get("spxl_sma", {}) or balances.get("SPXL_SMA", {})
         invested_amount = spxl_data.get("total_invested", 0)
         
         return {
@@ -2969,6 +3040,11 @@ def execute_quarterly_nine_sig_signal(api, force_execute=False):
         current_agg_balance = positions.get("AGG", 0)
         total_portfolio = current_tqqq_balance + current_agg_balance
         
+        print(f"\n=== 9-Sig Quarterly Rebalancing ===")
+        print(f"Current TQQQ balance: ${current_tqqq_balance:.2f}")
+        print(f"Current AGG balance: ${current_agg_balance:.2f}")
+        print(f"Total portfolio: ${total_portfolio:.2f}")
+        
         # Step 1: Determine the Quarter's Signal Line
         previous_tqqq_balance = get_previous_quarter_tqqq_balance()
         
@@ -2976,44 +3052,153 @@ def execute_quarterly_nine_sig_signal(api, force_execute=False):
         quarterly_contributions = get_quarterly_nine_sig_contributions()
         half_quarterly_contributions = quarterly_contributions * 0.5
         
+        print(f"Previous quarter TQQQ balance: ${previous_tqqq_balance:.2f}")
+        print(f"Quarterly contributions: ${quarterly_contributions:.2f}")
+        print(f"Half quarterly contributions: ${half_quarterly_contributions:.2f}")
+        
         # Signal Line = Previous TQQQ Balance × 1.09 + (Half of Quarterly Contributions)
         if previous_tqqq_balance == 0 and total_portfolio > 0:
             # First quarter: Set signal line as 80% of total portfolio
             signal_line = total_portfolio * nine_sig_config["target_allocation"]["tqqq"]
+            print(f"First quarter initialization - setting signal line as 80% of total portfolio")
             send_telegram_message("9-Sig: First quarter initialization - setting 80/20 target allocation")
         else:
             signal_line = (previous_tqqq_balance * (1 + nine_sig_config["quarterly_growth_rate"])) + half_quarterly_contributions
+            print(f"Signal line calculation: ${previous_tqqq_balance:.2f} × 1.09 + ${half_quarterly_contributions:.2f} = ${signal_line:.2f}")
+        
+        print(f"Signal line: ${signal_line:.2f}")
         
         # Step 2: Determine Action (Buy, Sell, or Hold)
         difference = current_tqqq_balance - signal_line
         tolerance = nine_sig_config["tolerance_amount"]
+        print(f"Difference (TQQQ - Signal Line): ${difference:.2f}")
+        print(f"Tolerance: ${tolerance:.2f}")
         
         # Step 3: Execute the Trade
         if abs(difference) < tolerance:
             action = "HOLD"
+            print(f"Action: HOLD - TQQQ balance within tolerance of signal line")
             send_telegram_message(f"9-Sig: HOLD - TQQQ ${current_tqqq_balance:.2f} within tolerance of signal line ${signal_line:.2f}")
             
         elif difference < 0:
             # BUY Signal: Need more TQQQ
             amount_to_buy = abs(difference)
             action = "BUY"
+            print(f"Action: BUY - Need ${amount_to_buy:.2f} more TQQQ to reach signal line")
             
-            # Step 4: Check for bond rebalancing on buy signals
-            agg_percentage = current_agg_balance / total_portfolio if total_portfolio > 0 else 0
-            if agg_percentage > nine_sig_config["bond_rebalance_threshold"]:
-                # Add excess bonds to the buy amount
-                target_agg_balance = total_portfolio * nine_sig_config["target_allocation"]["agg"]
-                excess_agg = current_agg_balance - target_agg_balance
+            # Step 4: Check for bond rebalancing threshold (30% rule from README)
+            # If current AGG exceeds 30% threshold, rebalance down to 20% target during BUY signals
+            current_agg_percentage = current_agg_balance / total_portfolio if total_portfolio > 0 else 0
+            bond_rebalance_threshold = nine_sig_config["bond_rebalance_threshold"]
+            target_agg_percentage = nine_sig_config["target_allocation"]["agg"]
+            
+            print(f"Current AGG percentage: {current_agg_percentage:.1%} (threshold: {bond_rebalance_threshold:.1%}, target: {target_agg_percentage:.1%})")
+            
+            # Calculate what portfolio would look like after signal line buy
+            projected_tqqq_after_signal = current_tqqq_balance + amount_to_buy
+            projected_agg_after_signal = current_agg_balance - amount_to_buy
+            projected_total_after_signal = projected_tqqq_after_signal + projected_agg_after_signal
+            projected_agg_percentage_after_signal = projected_agg_after_signal / projected_total_after_signal if projected_total_after_signal > 0 else 0
+            
+            print(f"After signal line buy: AGG would be ${projected_agg_after_signal:.2f} ({projected_agg_percentage_after_signal:.1%})")
+            
+            # Check if bond rebalancing is needed (either current AGG > 30% OR projected AGG > 20% target)
+            # Special handling for first quarter: signal line is already set to 80% of portfolio, which naturally results in 20% AGG
+            needs_rebalancing = False
+            excess_agg = 0
+            
+            # For first quarter initialization, signal line = 80% of portfolio, so buying to signal line naturally achieves 80/20
+            # Only need additional rebalancing if projected AGG would still be above target after signal buy
+            is_first_quarter = (previous_tqqq_balance == 0 and total_portfolio > 0)
+            
+            if is_first_quarter:
+                # First quarter: signal line is 80% of portfolio, so buying to signal line should naturally result in 20% AGG
+                # Check if projected AGG after signal buy would be exactly 20% (as expected) or higher
+                if projected_agg_percentage_after_signal > target_agg_percentage:
+                    # This shouldn't happen in first quarter, but handle it if it does
+                    target_agg_balance = projected_total_after_signal * target_agg_percentage
+                    excess_agg = projected_agg_after_signal - target_agg_balance
+                    needs_rebalancing = True
+                    print(f"First quarter: Projected AGG ({projected_agg_percentage_after_signal:.1%}) would exceed {target_agg_percentage:.1%} target - adding rebalance")
+                else:
+                    print(f"First quarter: Signal line buy will naturally achieve {target_agg_percentage:.1%} AGG target - no additional rebalancing needed")
+            elif current_agg_percentage > bond_rebalance_threshold:
+                # AGG exceeds 30% threshold - rebalance down to 20% target
+                target_agg_balance = projected_total_after_signal * target_agg_percentage
+                excess_agg = projected_agg_after_signal - target_agg_balance
+                needs_rebalancing = True
+                print(f"Bond rebalancing triggered: Current AGG ({current_agg_percentage:.1%}) exceeds {bond_rebalance_threshold:.1%} threshold")
+            elif projected_agg_percentage_after_signal > target_agg_percentage:
+                # AGG would still be above 20% target after signal buy - rebalance to target
+                target_agg_balance = projected_total_after_signal * target_agg_percentage
+                excess_agg = projected_agg_after_signal - target_agg_balance
+                needs_rebalancing = True
+                print(f"Bond rebalancing needed: Projected AGG ({projected_agg_percentage_after_signal:.1%}) would exceed {target_agg_percentage:.1%} target")
+            
+            if needs_rebalancing and excess_agg > 0:
                 amount_to_buy += excess_agg
-                send_telegram_message(f"9-Sig: Rebalancing excess AGG (${excess_agg:.2f}) during buy signal")
+                print(f"Adding ${excess_agg:.2f} to buy amount to rebalance AGG to {target_agg_percentage:.1%}")
+                print(f"Total buy amount: ${amount_to_buy:.2f} (signal: ${abs(difference):.2f} + rebalance: ${excess_agg:.2f})")
+                send_telegram_message(f"9-Sig: Bond rebalancing - Adding ${excess_agg:.2f} to buy amount to reach {target_agg_percentage:.1%} AGG target")
+            else:
+                print(f"Signal line buy will naturally rebalance AGG to target - no additional rebalancing needed")
             
-            if current_agg_balance >= amount_to_buy:
+            print(f"Required AGG to sell: ${amount_to_buy:.2f}, Available AGG balance: ${current_agg_balance:.2f}")
+            
+            # Check available shares (excluding held for orders, unsettled, etc.)
+            positions = list_positions(api)
+            agg_position = next((p for p in positions if p.get("symbol") == "AGG"), None)
+            
+            # Check for pending orders that might be holding shares
+            try:
+                pending_orders = get_pending_orders(api, "AGG")
+                if pending_orders:
+                    print(f"Found {len(pending_orders)} pending AGG orders:")
+                    for order in pending_orders:
+                        print(f"  Order {order.get('id')}: {order.get('side')} {order.get('qty')} shares (status: {order.get('status')})")
+                    print("Note: Shares held for pending orders are not available for new trades")
+            except Exception as e:
+                print(f"Could not check pending orders: {e}")
+            
+            if agg_position:
+                # Get available shares (qty_available field from Alpaca)
+                available_agg_shares = float(agg_position.get("qty_available", 0))
+                qty = float(agg_position.get("qty", 0))
+                print(f"AGG position: {qty} total shares, {available_agg_shares} available")
+            else:
+                available_agg_shares = 0
+                print("No AGG position found")
+            
+            agg_price = float(get_latest_trade(api, "AGG"))
+            available_agg_value = available_agg_shares * agg_price if agg_price > 0 else 0
+            
+            print(f"Available AGG: {available_agg_shares:.6f} shares (value: ${available_agg_value:.2f})")
+            
+            # Use available shares if less than required, but only if we have at least some available
+            if available_agg_value > 0 and available_agg_value < amount_to_buy:
+                print(f"Warning: Only ${available_agg_value:.2f} AGG available (need ${amount_to_buy:.2f})")
+                print(f"Adjusting buy amount to available funds for cold start scenario")
+                amount_to_buy = available_agg_value
+                print(f"Adjusted buy amount: ${amount_to_buy:.2f}")
+            
+            if current_agg_balance >= amount_to_buy and available_agg_value >= amount_to_buy:
                 # Execute buy trade
+                print("Executing BUY trade...")
                 tqqq_price = float(get_latest_trade(api, "TQQQ"))
-                agg_price = float(get_latest_trade(api, "AGG"))
                 
                 agg_shares_to_sell = amount_to_buy / agg_price
                 tqqq_shares_to_buy = amount_to_buy / tqqq_price
+                
+                # Ensure we don't try to sell more shares than available
+                if agg_shares_to_sell > available_agg_shares:
+                    print(f"Adjusting: Can only sell {available_agg_shares:.6f} shares (requested {agg_shares_to_sell:.6f})")
+                    agg_shares_to_sell = available_agg_shares
+                    amount_to_buy = agg_shares_to_sell * agg_price
+                    tqqq_shares_to_buy = amount_to_buy / tqqq_price
+                    print(f"Adjusted: Selling {agg_shares_to_sell:.6f} AGG shares for ${amount_to_buy:.2f}")
+                
+                print(f"Selling {agg_shares_to_sell:.6f} AGG shares @ ${agg_price:.2f}")
+                print(f"Buying {tqqq_shares_to_buy:.6f} TQQQ shares @ ${tqqq_price:.2f}")
                 
                 # Sell AGG first, then buy TQQQ
                 sell_order = submit_order(api, "AGG", agg_shares_to_sell, "sell")
@@ -3022,34 +3207,90 @@ def execute_quarterly_nine_sig_signal(api, force_execute=False):
                 buy_order = submit_order(api, "TQQQ", tqqq_shares_to_buy, "buy")
                 wait_for_order_fill(api, buy_order["id"])
                 
+                print("BUY trade executed successfully!")
                 send_telegram_message(f"9-Sig: BUY signal executed - Bought ${amount_to_buy:.2f} TQQQ (sold AGG)")
+            elif available_agg_value > 0:
+                # Partial execution possible - use available shares
+                print(f"Partial execution: Only ${available_agg_value:.2f} AGG available, executing partial buy")
+                amount_to_buy = available_agg_value
+                tqqq_price = float(get_latest_trade(api, "TQQQ"))
+                
+                agg_shares_to_sell = available_agg_shares
+                tqqq_shares_to_buy = amount_to_buy / tqqq_price
+                
+                print(f"Executing partial BUY: Selling {agg_shares_to_sell:.6f} AGG shares for ${amount_to_buy:.2f}")
+                print(f"Buying {tqqq_shares_to_buy:.6f} TQQQ shares @ ${tqqq_price:.2f}")
+                
+                sell_order = submit_order(api, "AGG", agg_shares_to_sell, "sell")
+                wait_for_order_fill(api, sell_order["id"])
+                
+                buy_order = submit_order(api, "TQQQ", tqqq_shares_to_buy, "buy")
+                wait_for_order_fill(api, buy_order["id"])
+                
+                print("Partial BUY trade executed successfully!")
+                send_telegram_message(f"9-Sig: Partial BUY executed - Bought ${amount_to_buy:.2f} TQQQ (sold available AGG)")
             else:
                 # Insufficient AGG funds
-                send_telegram_message(f"9-Sig: BUY signal but insufficient AGG (${current_agg_balance:.2f} < ${amount_to_buy:.2f}) - HOLDING existing positions")
+                print(f"Action: HOLD_INSUFFICIENT_FUNDS - Not enough AGG available to execute buy")
+                print(f"  Required: ${amount_to_buy:.2f}, Available: ${available_agg_value:.2f}")
+                send_telegram_message(f"9-Sig: BUY signal but insufficient AGG (${available_agg_value:.2f} available < ${amount_to_buy:.2f} needed) - HOLDING existing positions")
                 action = "HOLD_INSUFFICIENT_FUNDS"
                 
         else:
             # SELL Signal: Too much TQQQ
             amount_to_sell = difference
             action = "SELL"
+            print(f"Action: SELL - Need to sell ${amount_to_sell:.2f} TQQQ")
             
             # Step 5: Check for "30 Down, Stick Around" rule
-            if check_spy_30_down_rule():
+            spy_30_down = check_spy_30_down_rule()
+            print(f"SPY 30% down rule check: {spy_30_down}")
+            if spy_30_down:
                 ignored_count = count_ignored_sell_signals()
+                print(f"Ignored sell signals count: {ignored_count}/4")
                 
                 if ignored_count < 4:
                     action = "SELL_IGNORED"
+                    print(f"Action: SELL_IGNORED - Ignoring sell signal due to '30 Down, Stick Around' rule")
                     send_telegram_message(f"9-Sig: SELL signal IGNORED due to '30 Down, Stick Around' rule (SPY down >30%). Ignored {ignored_count + 1}/4 signals.")
                 else:
+                    print("Resuming normal operation after ignoring 4 sell signals")
                     send_telegram_message("9-Sig: Resuming normal operation after ignoring 4 sell signals")
             
             if action == "SELL":
                 # Execute sell trade
-                tqqq_price = float(get_latest_trade(api, "TQQQ"))
-                agg_price = float(get_latest_trade(api, "AGG"))
+                print("Executing SELL trade...")
                 
+                # Check available TQQQ shares
+                positions = list_positions(api)
+                tqqq_position = next((p for p in positions if p.get("symbol") == "TQQQ"), None)
+                available_tqqq_shares = float(tqqq_position.get("available", 0)) if tqqq_position else 0
+                tqqq_price = float(get_latest_trade(api, "TQQQ"))
+                available_tqqq_value = available_tqqq_shares * tqqq_price if tqqq_price > 0 else 0
+                
+                print(f"Available TQQQ shares: {available_tqqq_shares:.6f} (value: ${available_tqqq_value:.2f})")
+                print(f"Required to sell: ${amount_to_sell:.2f}")
+                
+                # Adjust if we don't have enough available shares
+                if available_tqqq_value > 0 and available_tqqq_value < amount_to_sell:
+                    print(f"Warning: Only ${available_tqqq_value:.2f} TQQQ available (need ${amount_to_sell:.2f})")
+                    print(f"Adjusting sell amount to available shares")
+                    amount_to_sell = available_tqqq_value
+                
+                agg_price = float(get_latest_trade(api, "AGG"))
                 tqqq_shares_to_sell = amount_to_sell / tqqq_price
                 agg_shares_to_buy = amount_to_sell / agg_price
+                
+                # Ensure we don't try to sell more shares than available
+                if tqqq_shares_to_sell > available_tqqq_shares:
+                    print(f"Adjusting: Can only sell {available_tqqq_shares:.6f} shares (requested {tqqq_shares_to_sell:.6f})")
+                    tqqq_shares_to_sell = available_tqqq_shares
+                    amount_to_sell = tqqq_shares_to_sell * tqqq_price
+                    agg_shares_to_buy = amount_to_sell / agg_price
+                    print(f"Adjusted: Selling {tqqq_shares_to_sell:.6f} TQQQ shares for ${amount_to_sell:.2f}")
+                
+                print(f"Selling {tqqq_shares_to_sell:.6f} TQQQ shares @ ${tqqq_price:.2f}")
+                print(f"Buying {agg_shares_to_buy:.6f} AGG shares @ ${agg_price:.2f}")
                 
                 # Sell TQQQ first, then buy AGG
                 sell_order = submit_order(api, "TQQQ", tqqq_shares_to_sell, "sell")
@@ -3058,26 +3299,39 @@ def execute_quarterly_nine_sig_signal(api, force_execute=False):
                 buy_order = submit_order(api, "AGG", agg_shares_to_buy, "buy")
                 wait_for_order_fill(api, buy_order["id"])
                 
+                print("SELL trade executed successfully!")
                 send_telegram_message(f"9-Sig: SELL signal executed - Sold ${amount_to_sell:.2f} TQQQ (bought AGG)")
         
-        # Save quarterly data for next calculation
+        # Get updated positions after trades (or use current if no trades were executed)
+        updated_positions = {p["symbol"]: float(p["market_value"]) for p in list_positions(api)}
+        final_tqqq_balance = updated_positions.get("TQQQ", 0)
+        final_agg_balance = updated_positions.get("AGG", 0)
+        
+        # Save quarterly data for next calculation - use POST-TRADE balances
+        # This ensures the next quarter's signal line is calculated from the correct ending balance
         current_quarter = f"{datetime.datetime.now().year}-Q{((datetime.datetime.now().month-1)//3+1)}"
         save_nine_sig_quarterly_data(
             current_quarter,
-            current_tqqq_balance,
-            current_agg_balance, 
+            final_tqqq_balance,  # Use post-trade balance for next quarter's calculation
+            final_agg_balance,   # Use post-trade balance
             signal_line,
             action,
             quarterly_contributions
         )
         
         # Report final allocations
-        updated_positions = {p["symbol"]: float(p["market_value"]) for p in list_positions(api)}
-        updated_total = updated_positions.get("TQQQ", 0) + updated_positions.get("AGG", 0)
+        updated_total = final_tqqq_balance + final_agg_balance
+        print(f"\n=== Final Results ===")
+        print(f"Final TQQQ balance: ${final_tqqq_balance:.2f}")
+        print(f"Final AGG balance: ${final_agg_balance:.2f}")
+        print(f"Final total portfolio: ${updated_total:.2f}")
         if updated_total > 0:
-            tqqq_pct = updated_positions.get("TQQQ", 0) / updated_total
-            agg_pct = updated_positions.get("AGG", 0) / updated_total
+            tqqq_pct = final_tqqq_balance / updated_total
+            agg_pct = final_agg_balance / updated_total
+            print(f"Final allocation: TQQQ {tqqq_pct:.1%}, AGG {agg_pct:.1%} (Target: 80/20)")
             send_telegram_message(f"9-Sig allocation: TQQQ {tqqq_pct:.1%}, AGG {agg_pct:.1%} (Target: 80/20)")
+        print(f"Action taken: {action}")
+        print("=" * 40 + "\n")
         
         return f"9-Sig quarterly signal: {action}"
     
@@ -3271,7 +3525,8 @@ def monthly_buying_sma(api, symbol, force_execute=False, investment_calc=None, m
 
     # Load current strategy state from Firestore
     balances = load_balances(env)
-    spxl_data = balances.get(f"{symbol}_SMA", {})
+    # Use lowercase to match other strategies
+    spxl_data = balances.get("spxl_sma", {}) or balances.get(f"{symbol}_SMA", {})
     total_invested = spxl_data.get("total_invested", 0)
     current_shares = spxl_data.get("current_shares", 0)
     holding_fund_position = spxl_data.get("holding_fund_position", {})
@@ -3395,7 +3650,7 @@ def monthly_buying_sma(api, symbol, force_execute=False, investment_calc=None, m
             updated_sgov_shares = get_holding_fund_shares(api, spxl_sma_holding_fund)
             holding_fund_position[spxl_sma_holding_fund] = updated_sgov_shares
             
-            save_balance(f"{symbol}_SMA", {
+            save_balance("spxl_sma", {
                 "total_invested": new_total_invested,
                 "current_shares": new_total_shares,
                 "holding_fund_position": holding_fund_position,
@@ -3494,7 +3749,7 @@ def monthly_buying_sma(api, symbol, force_execute=False, investment_calc=None, m
                     send_telegram_message(telegram_msg)
                     
                     # Update Firestore
-                    save_balance(f"{symbol}_SMA", {
+                    save_balance("spxl_sma", {
                         "total_invested": new_total_invested,
                         "current_shares": current_shares,  # Keep SPXL shares (if any)
                         "holding_fund_position": holding_fund_position,
@@ -3580,12 +3835,13 @@ def daily_trade_sma(api, symbol):
                 send_telegram_message(f"Warning: Sold {symbol} but failed to buy {spxl_sma_holding_fund}: {e}")
             
             # Update Firestore with comprehensive tracking
-            existing_data = load_balances().get(f"{symbol}_SMA", {})
+            # Use lowercase to match other strategies, try both for backward compatibility
+            existing_data = load_balances().get("spxl_sma", {}) or load_balances().get(f"{symbol}_SMA", {})
             updated_sgov_shares = get_holding_fund_shares(api, spxl_sma_holding_fund)
             holding_fund_position = existing_data.get("holding_fund_position", {})
             holding_fund_position[spxl_sma_holding_fund] = updated_sgov_shares
             
-            save_balance(symbol + "_SMA", {
+            save_balance("spxl_sma", {
                 "total_invested": existing_data.get("total_invested", invested),
                 "current_shares": 0,  # Sold all shares
                 "holding_fund_position": holding_fund_position,
@@ -3641,12 +3897,13 @@ def daily_trade_sma(api, symbol):
                     current_shares = float(position["qty"]) if position else 0
                     
                     # Update Firestore
-                    existing_data = load_balances().get(f"{symbol}_SMA", {})
+                    # Use lowercase to match other strategies, try both for backward compatibility
+                    existing_data = load_balances().get("spxl_sma", {}) or load_balances().get(f"{symbol}_SMA", {})
                     updated_sgov_shares = get_holding_fund_shares(api, spxl_sma_holding_fund)
                     holding_fund_position = existing_data.get("holding_fund_position", {})
                     holding_fund_position[spxl_sma_holding_fund] = updated_sgov_shares
                     
-                    save_balance(symbol + "_SMA", {
+                    save_balance("spxl_sma", {
                         "total_invested": existing_data.get("total_invested", invested),
                         "current_shares": current_shares,
                         "holding_fund_position": holding_fund_position,
@@ -3680,12 +3937,13 @@ def daily_trade_sma(api, symbol):
             current_shares = float(position["qty"])
             
             # Load existing data to preserve other fields
-            existing_data = load_balances().get(f"{symbol}_SMA", {})
+            # Use lowercase to match other strategies, try both for backward compatibility
+            existing_data = load_balances().get("spxl_sma", {}) or load_balances().get(f"{symbol}_SMA", {})
             holding_fund_position = existing_data.get("holding_fund_position", {})
             updated_sgov_shares = get_holding_fund_shares(api, spxl_sma_holding_fund)
             holding_fund_position[spxl_sma_holding_fund] = updated_sgov_shares
             
-            save_balance(symbol + "_SMA", {
+            save_balance("spxl_sma", {
                 "total_invested": invested,
                 "current_shares": current_shares,
                 "holding_fund_position": holding_fund_position,
@@ -3710,7 +3968,8 @@ def daily_trade_sma(api, symbol):
         position = next((p for p in positions if p["symbol"] == symbol), None)
         
         # Load existing data to preserve other fields
-        existing_data = load_balances().get(f"{symbol}_SMA", {})
+        # Use lowercase to match other strategies, try both for backward compatibility
+        existing_data = load_balances().get("spxl_sma", {}) or load_balances().get(f"{symbol}_SMA", {})
         holding_fund_position = existing_data.get("holding_fund_position", {})
         updated_sgov_shares = get_holding_fund_shares(api, spxl_sma_holding_fund)
         holding_fund_position[spxl_sma_holding_fund] = updated_sgov_shares
@@ -3719,7 +3978,7 @@ def daily_trade_sma(api, symbol):
             invested = float(position["market_value"])
             current_shares = float(position["qty"])
             
-            save_balance(symbol + "_SMA", {
+            save_balance("spxl_sma", {
                 "total_invested": invested,
                 "current_shares": current_shares,
                 "holding_fund_position": holding_fund_position,
@@ -3734,7 +3993,7 @@ def daily_trade_sma(api, symbol):
             })
         else:
             # Update holding fund position even if no SPXL position
-            save_balance(symbol + "_SMA", {
+            save_balance("spxl_sma", {
                 "total_invested": existing_data.get("total_invested", 0),
                 "current_shares": 0,
                 "holding_fund_position": holding_fund_position,
@@ -4894,12 +5153,14 @@ def monthly_sector_momentum_strategy(api, force_execute=False, investment_calc=N
     actual_positions = get_sector_momentum_positions(api)
     
     # Calculate current strategy value from actual Alpaca positions
-    # Include holding fund value in total strategy value
+    # Total available = current sector positions + SHV holding fund + new investment
     current_value_data = get_sector_momentum_value(api)
-    current_value = current_value_data["total_value"] + shv_value
-    total_to_allocate = current_value + investment_amount
+    current_sector_value = current_value_data["total_value"]  # Only sector positions, not SHV
+    total_to_allocate = current_sector_value + shv_value + investment_amount
     
-    print(f"Current strategy value: ${current_value:.2f}")
+    print(f"Current sector positions value: ${current_sector_value:.2f}")
+    print(f"SHV holding fund: ${shv_value:.2f}")
+    print(f"New investment: ${investment_amount:.2f}")
     print(f"Total to allocate: ${total_to_allocate:.2f}")
     
     trades_executed = []
@@ -4922,7 +5183,9 @@ def monthly_sector_momentum_strategy(api, force_execute=False, investment_calc=N
         print(f"Top 3 sectors: {top_3_sectors}")
         
         # Calculate target allocation per sector (33.33% each)
+        # This includes: current positions + SHV + new investment, all allocated to top 3 sectors
         target_allocation_per_sector = total_to_allocate * sector_momentum_config["target_allocation_per_sector"]
+        print(f"Target allocation per sector: ${target_allocation_per_sector:.2f} (33.33% of ${total_to_allocate:.2f})")
         
         # Sell sectors not in top 3 (use actual positions from Alpaca)
         sectors_to_sell = [ticker for ticker in actual_positions.keys() if ticker not in top_3_sectors]
@@ -4954,7 +5217,9 @@ def monthly_sector_momentum_strategy(api, force_execute=False, investment_calc=N
         
         
         # Rebalance to target allocations for top 3 sectors (use actual positions from Alpaca)
-        # Sector ETFs are non-fractionable (like WTIP), so we need to round to whole shares
+        # Strategy: MINIMIZE SELLS to avoid taxable events
+        # 1. First, use new investment + SHV to buy underweight sectors
+        # 2. Only sell overweight sectors if absolutely necessary after using all new funds
         sector_etfs = sector_momentum_config["sector_etfs"]
         bond_etf = sector_momentum_config["bond_etf"]
         
@@ -4963,90 +5228,105 @@ def monthly_sector_momentum_strategy(api, force_execute=False, investment_calc=N
         total_uninvested = 0
         actual_sector_purchases = {}  # Track actual purchase costs per sector
         
-        # Check if we can use SHV funds to buy sectors (if SHV + new investment reaches threshold)
-        shv_available_for_sectors = 0
-        if shv_value > 0:
-            # Try to use SHV funds to buy sectors if we're close to threshold
-            # Calculate if SHV + investment would allow buying at least 1 share of any sector
-            avg_sector_price = sum([float(get_latest_trade(api, ticker)) for ticker in top_3_sectors]) / len(top_3_sectors)
-            potential_shares_with_shv = round((shv_value + investment_amount) / avg_sector_price)
-            if potential_shares_with_shv >= 1:
-                shv_available_for_sectors = min(shv_value, investment_amount * 0.5)  # Use up to 50% of investment amount from SHV
+        # Calculate available new funds (investment + SHV) for buying
+        available_new_funds = investment_amount + shv_value
+        funds_used = 0
         
+        # Step 1: Calculate target values and identify underweight/overweight sectors
+        sector_targets = {}
+        sector_current_values = {}
+        sector_underweight = {}  # Sectors that need buying
+        sector_overweight = {}   # Sectors that need selling
+        
+        for ticker in top_3_sectors:
+            current_price = float(get_latest_trade(api, ticker))
+            current_shares = actual_positions.get(ticker, 0)
+            current_value = current_shares * current_price
+            target_value = target_allocation_per_sector
+            
+            sector_targets[ticker] = target_value
+            sector_current_values[ticker] = current_value
+            
+            value_delta = target_value - current_value
+            if value_delta > 0.01:  # Underweight - needs buying
+                sector_underweight[ticker] = value_delta
+            elif value_delta < -0.01:  # Overweight - might need selling
+                sector_overweight[ticker] = abs(value_delta)
+        
+        # Step 2: Use new funds to buy underweight sectors first (minimize sells)
+        for ticker in sorted(sector_underweight.keys(), key=lambda x: sector_underweight[x], reverse=True):
+            if funds_used >= available_new_funds:
+                break  # No more funds available
+                
+            try:
+                current_price = float(get_latest_trade(api, ticker))
+                current_shares = actual_positions.get(ticker, 0)
+                current_value = sector_current_values[ticker]
+                target_value = sector_targets[ticker]
+                value_delta = target_value - current_value
+                
+                # Calculate how much we can afford with remaining funds
+                remaining_funds = available_new_funds - funds_used
+                max_we_can_buy = min(value_delta, remaining_funds)
+                
+                if max_we_can_buy >= current_price:  # Can buy at least 1 share
+                    shares_to_buy = round(max_we_can_buy / current_price)
+                    if shares_to_buy >= 1:
+                        actual_cost = shares_to_buy * current_price
+                        buy_order = submit_order(api, ticker, shares_to_buy, "buy")
+                        if not skip_order_wait:
+                            wait_for_order_fill(api, buy_order["id"])
+                        trades_executed.append(f"Bought {shares_to_buy:.0f} shares of {ticker} (${actual_cost:.2f} to reach target ${target_value:.2f})")
+                        print(f"Bought {shares_to_buy:.0f} shares of {ticker} (${actual_cost:.2f} to reach target ${target_value:.2f})")
+                        
+                        actual_sector_purchases[ticker] = actual_cost
+                        funds_used += actual_cost
+                        
+                        # Update current value after purchase
+                        sector_current_values[ticker] += actual_cost
+                    else:
+                        # Can't buy even 1 share - track uninvested
+                        uninvested_amounts[ticker] = max_we_can_buy
+                        total_uninvested += max_we_can_buy
+                        print(f"Cannot buy {ticker}: need ${current_price:.2f} for 1 share, but only have ${max_we_can_buy:.2f}")
+                else:
+                    # Not enough funds - track uninvested
+                    uninvested_amounts[ticker] = max_we_can_buy
+                    total_uninvested += max_we_can_buy
+                    print(f"Insufficient funds for {ticker}: need ${value_delta:.2f}, have ${remaining_funds:.2f}")
+            except Exception as e:
+                error_msg = f"Failed to buy {ticker}: {e}"
+                print(error_msg)
+                send_telegram_message(f"Sector Momentum Error: {error_msg}")
+                return error_msg
+        
+        # Step 3: Only sell overweight sectors if we still need to after using all new funds
+        # Calculate remaining imbalance after using new funds
         for ticker in top_3_sectors:
             try:
                 current_price = float(get_latest_trade(api, ticker))
-                # Use actual shares from Alpaca, fallback to Firestore if not found
-                current_shares = actual_positions.get(ticker, current_positions.get(ticker, 0))
+                current_value = sector_current_values[ticker]  # Updated after purchases
+                target_value = sector_targets[ticker]
+                value_delta = target_value - current_value
                 
-                # Calculate target allocation
-                # Include SHV funds if available for this ticker
-                ticker_allocation_from_shv = shv_available_for_sectors / len(top_3_sectors) if shv_available_for_sectors > 0 else 0
-                total_allocation_for_ticker = target_allocation_per_sector + ticker_allocation_from_shv
-                
-                # Calculate target shares
-                target_shares = total_allocation_for_ticker / current_price
-                shares_delta = target_shares - current_shares
-                
-                # Check if this is a non-fractionable ETF (all sector ETFs are non-fractionable)
-                is_non_fractionable = ticker in sector_etfs
-                
-                if abs(shares_delta) > 0.01:  # Only trade if difference is meaningful
-                    if shares_delta > 0:
-                        # Buy more shares
-                        if is_non_fractionable:
-                            # Round to whole shares for non-fractionable ETFs
-                            whole_shares_to_buy = round(shares_delta)
-                            
-                            # Calculate amount available for this ticker (from new investment, proportional)
-                            # Each sector gets investment_amount / 3 for new investment
-                            new_investment_per_sector = investment_amount / len(top_3_sectors)
-                            amount_available_for_ticker = new_investment_per_sector + ticker_allocation_from_shv
-                            
-                            # Check if we can afford at least 1 whole share
-                            if whole_shares_to_buy >= 1 and amount_available_for_ticker >= current_price:
-                                actual_cost = whole_shares_to_buy * current_price
-                                buy_order = submit_order(api, ticker, whole_shares_to_buy, "buy")
-                                if not skip_order_wait:
-                                    wait_for_order_fill(api, buy_order["id"])
-                                trades_executed.append(f"Bought {whole_shares_to_buy:.0f} shares of {ticker} (rebalancing to 33.33%, rounded from {shares_delta:.4f})")
-                                print(f"Bought {whole_shares_to_buy:.0f} shares of {ticker} (rounded from {shares_delta:.4f})")
-                                
-                                # Track actual purchase cost and SHV portion used
-                                actual_sector_purchases[ticker] = actual_cost
-                                if ticker_allocation_from_shv > 0:
-                                    # SHV portion used is min of allocated and actual cost
-                                    shv_portion_used = min(ticker_allocation_from_shv, actual_cost)
-                                    shv_available_for_sectors -= shv_portion_used
-                            else:
-                                # Can't buy this sector - track uninvested amount from new investment
-                                if amount_available_for_ticker < current_price:
-                                    uninvested_amounts[ticker] = new_investment_per_sector
-                                    total_uninvested += new_investment_per_sector
-                                    print(f"Cannot buy {ticker}: need ${current_price:.2f}, have ${amount_available_for_ticker:.2f}")
-                        else:
-                            # SCHZ and other fractionable ETFs can use fractional shares
-                            buy_order = submit_order(api, ticker, shares_delta, "buy")
-                            if not skip_order_wait:
-                                wait_for_order_fill(api, buy_order["id"])
-                            trades_executed.append(f"Bought {shares_delta:.4f} shares of {ticker} (rebalancing to 33.33%)")
-                            print(f"Bought {shares_delta:.4f} shares of {ticker}")
+                # Only sell if still overweight after using new funds
+                if value_delta < -0.01:  # Still overweight
+                    shares_to_sell = round(abs(value_delta) / current_price)
+                    whole_shares_to_sell = int(shares_to_sell)  # Round down to whole shares
+                    
+                    if whole_shares_to_sell > 0:
+                        sell_order = submit_order(api, ticker, whole_shares_to_sell, "sell")
+                        if not skip_order_wait:
+                            wait_for_order_fill(api, sell_order["id"])
+                        trades_executed.append(f"Sold {whole_shares_to_sell:.0f} shares of {ticker} (rebalancing to 33.33%, rounded down from {shares_to_sell:.4f})")
+                        print(f"Sold {whole_shares_to_sell:.0f} shares of {ticker} (rebalancing after using new funds)")
                     else:
-                        # Sell shares - round down to whole shares (Alpaca doesn't allow fractional short sales)
-                        shares_to_sell = abs(shares_delta)
-                        whole_shares_to_sell = int(shares_to_sell)  # Round down to whole shares
-                        if whole_shares_to_sell > 0:
-                            sell_order = submit_order(api, ticker, whole_shares_to_sell, "sell")
-                            if not skip_order_wait:
-                                wait_for_order_fill(api, sell_order["id"])
-                            trades_executed.append(f"Sold {whole_shares_to_sell:.0f} shares of {ticker} (rebalancing to 33.33%, rounded down from {shares_to_sell:.4f})")
-                            print(f"Sold {whole_shares_to_sell:.0f} shares of {ticker}")
-                            
-                            # Note: Fractional shares that couldn't be sold remain in the position
-                            # They don't become "uninvested" - they're still invested in that sector
-                        else:
-                            print(f"Skipping sell of {ticker}: {shares_to_sell:.4f} shares is less than 1 whole share")
-                            # Can't sell - fractional shares remain in the position
+                        print(f"Skipping sell of {ticker}: {shares_to_sell:.4f} shares is less than 1 whole share")
+            except Exception as e:
+                error_msg = f"Failed to rebalance {ticker}: {e}"
+                print(error_msg)
+                send_telegram_message(f"Sector Momentum Error: {error_msg}")
+                return error_msg
                 
             except Exception as e:
                 error_msg = f"Failed to rebalance {ticker}: {e}"
@@ -5054,53 +5334,48 @@ def monthly_sector_momentum_strategy(api, force_execute=False, investment_calc=N
                 send_telegram_message(f"Sector Momentum Error: {error_msg}")
                 return error_msg
         
-        # Handle SHV holding fund: sell if used, buy if we have uninvested amounts
+        # Handle SHV holding fund: sell SHV to fund sector purchases
+        # Since SHV is included in total_to_allocate, we need to sell it to fund purchases
         shv_shares_to_buy = 0
         shv_amount_to_buy = 0
         shv_leftover_after_sectors = 0
         
-        # If we used SHV funds to buy sectors, calculate exact amount needed and sell only that
-        if shv_available_for_sectors > 0 and shv_value > 0 and len(actual_sector_purchases) > 0:
-            # Calculate total SHV actually used based on actual purchases
-            total_shv_used = 0
-            initial_shv_per_sector = shv_available_for_sectors / len(top_3_sectors)
+        # Calculate total purchases made (to determine how much SHV to sell)
+        total_purchases = sum(actual_sector_purchases.values())
+        
+        # If we made purchases and have SHV, sell SHV to fund them
+        # SHV was part of total_to_allocate, so we need to sell it to cover purchases
+        # Strategy: Sell SHV to fund purchases that exceed what new investment can cover
+        if total_purchases > 0 and shv_value > 0:
+            # Calculate how much SHV to sell: 
+            # If purchases exceed new investment, we need SHV to cover the difference
+            # Otherwise, we still sell SHV since it's part of the allocation and should be converted to sectors
+            shv_amount_to_sell = min(shv_value, total_purchases)
             
-            for ticker in top_3_sectors:
-                if ticker in actual_sector_purchases:
-                    # Sector was bought - SHV portion is min of allocated and actual cost
-                    actual_cost = actual_sector_purchases[ticker]
-                    shv_portion_used = min(initial_shv_per_sector, actual_cost)
-                    total_shv_used += shv_portion_used
-                else:
-                    # Sector couldn't be bought - its SHV allocation is leftover
-                    shv_leftover_after_sectors += initial_shv_per_sector
-            
-            # Sell only the amount of SHV we actually used (with 1% buffer)
-            if total_shv_used > 0:
-                shv_amount_to_sell = total_shv_used * 1.01  # 1% buffer
+            if shv_amount_to_sell > 0:
                 shv_shares_to_sell = shv_amount_to_sell / shv_price if shv_price > 0 else 0
                 
-                if shv_shares_to_sell > 0 and shv_amount_to_sell <= shv_value:
+                # Get actual available SHV shares right before selling
+                actual_shv_shares_available = get_holding_fund_shares(api, holding_fund_ticker)
+                shv_shares_to_sell = min(shv_shares_to_sell, actual_shv_shares_available)
+                
+                if shv_shares_to_sell > 0.0001:  # Only sell if meaningful amount
                     try:
                         sell_order = submit_order(api, holding_fund_ticker, shv_shares_to_sell, "sell")
                         if not skip_order_wait:
                             wait_for_order_fill(api, sell_order["id"])
                         
-                        # Calculate leftover: we sold shv_amount_to_sell but only used total_shv_used
-                        actual_leftover = shv_amount_to_sell - total_shv_used
-                        shv_leftover_after_sectors += max(0, actual_leftover)
-                        
+                        actual_shv_sold_value = shv_shares_to_sell * shv_price
                         shv_shares -= shv_shares_to_sell
-                        shv_value -= shv_amount_to_sell
-                        trades_executed.append(f"Sold {shv_shares_to_sell:.6f} shares of {holding_fund_ticker} (${shv_amount_to_sell:.2f}) to buy sectors")
-                        print(f"Sold {shv_shares_to_sell:.6f} shares of {holding_fund_ticker} (${shv_amount_to_sell:.2f}) to buy sectors")
-                        if shv_leftover_after_sectors > 0:
-                            print(f"Leftover from SHV sale: ${shv_leftover_after_sectors:.2f}")
+                        shv_value -= actual_shv_sold_value
+                        trades_executed.append(f"Sold {shv_shares_to_sell:.6f} shares of {holding_fund_ticker} (${actual_shv_sold_value:.2f}) to fund sector purchases")
+                        print(f"Sold {shv_shares_to_sell:.6f} shares of {holding_fund_ticker} (${actual_shv_sold_value:.2f}) to fund sector purchases")
                     except Exception as e:
                         error_msg = f"Sector Momentum: Failed to sell {holding_fund_ticker}: {str(e)}"
                         print(error_msg)
                         send_telegram_message(error_msg)
-                        return error_msg
+                        # Continue even if SHV sell fails - purchases may have already been made
+                        print("Continuing despite SHV sell failure...")
         
         # If we have uninvested amounts or leftover from SHV sale, add to SHV holding fund (up to max)
         total_shv_to_add = total_uninvested + shv_leftover_after_sectors
@@ -5137,42 +5412,36 @@ def monthly_sector_momentum_strategy(api, force_execute=False, investment_calc=N
                                 except Exception as e:
                                     print(f"Failed to buy {ticker} with excess: {e}")
         
-        # Buy SHV holding fund if needed
+        # Buy SHV holding fund if needed (only if amount meets minimum order size)
         if shv_shares_to_buy > 0:
-            try:
-                shv_buy_order = submit_order(api, holding_fund_ticker, shv_shares_to_buy, "buy")
-                if not skip_order_wait:
-                    wait_for_order_fill(api, shv_buy_order["id"])
-                shv_shares += shv_shares_to_buy
-                shv_value += shv_amount_to_buy
-                trades_executed.append(f"Bought {shv_shares_to_buy:.6f} shares of {holding_fund_ticker} (${shv_amount_to_buy:.2f}) - holding fund")
-                print(f"Bought {shv_shares_to_buy:.6f} shares of {holding_fund_ticker} for ${shv_amount_to_buy:.2f} (holding fund)")
-                send_telegram_message(f"Sector Momentum: Bought {shv_shares_to_buy:.6f} shares of {holding_fund_ticker} (holding fund)")
-            except Exception as e:
-                error_msg = f"Sector Momentum: Failed to buy {holding_fund_ticker}: {str(e)}"
-                print(error_msg)
-                send_telegram_message(error_msg)
-                return error_msg
-        
-        # Update Firestore with sector positions
-        # Get actual positions after trades to store accurate whole share counts
-        updated_actual_positions = get_sector_momentum_positions(api)
-        new_positions = {}
-        for ticker in top_3_sectors:
-            # Use actual position from Alpaca if available, otherwise calculate target
-            if ticker in updated_actual_positions:
-                new_positions[ticker] = updated_actual_positions[ticker]
+            # Check if the order amount meets Alpaca's minimum ($1.00)
+            if shv_amount_to_buy < margin_control_config["min_investment"]:
+                print(f"Skipping SHV purchase: amount ${shv_amount_to_buy:.2f} is below minimum order size (${margin_control_config['min_investment']:.2f})")
+                print(f"Leftover ${shv_amount_to_buy:.2f} will remain uninvested (too small for any order)")
             else:
                 try:
-                    current_price = float(get_latest_trade(api, ticker))
-                    target_shares = target_allocation_per_sector / current_price
-                    # Round to whole shares for sector ETFs (non-fractionable)
-                    if ticker in sector_etfs:
-                        new_positions[ticker] = round(target_shares)
-                    else:
-                        new_positions[ticker] = target_shares
+                    shv_buy_order = submit_order(api, holding_fund_ticker, shv_shares_to_buy, "buy")
+                    if not skip_order_wait:
+                        wait_for_order_fill(api, shv_buy_order["id"])
+                    shv_shares += shv_shares_to_buy
+                    shv_value += shv_amount_to_buy
+                    trades_executed.append(f"Bought {shv_shares_to_buy:.6f} shares of {holding_fund_ticker} (${shv_amount_to_buy:.2f}) - holding fund")
+                    print(f"Bought {shv_shares_to_buy:.6f} shares of {holding_fund_ticker} for ${shv_amount_to_buy:.2f} (holding fund)")
+                    send_telegram_message(f"Sector Momentum: Bought {shv_shares_to_buy:.6f} shares of {holding_fund_ticker} (holding fund)")
                 except Exception as e:
-                    print(f"Error updating position for {ticker}: {e}")
+                    error_msg = f"Sector Momentum: Failed to buy {holding_fund_ticker}: {str(e)}"
+                    print(error_msg)
+                    send_telegram_message(error_msg)
+                    # Don't return error - continue with other operations even if SHV buy fails
+                    print("Continuing despite SHV purchase failure...")
+        
+        # Update Firestore with sector positions
+        # ALWAYS use actual positions from Alpaca - don't calculate or filter
+        updated_actual_positions = get_sector_momentum_positions(api)
+        
+        # Use ALL actual positions from Alpaca, not just top 3
+        # This ensures Firestore matches reality even if positions exist outside top 3
+        new_positions = updated_actual_positions.copy()  # Use all actual positions
         
         # Update holding fund position (get fresh from Alpaca to be accurate)
         updated_shv_shares = get_holding_fund_shares(api, holding_fund_ticker)
@@ -5180,7 +5449,7 @@ def monthly_sector_momentum_strategy(api, force_execute=False, investment_calc=N
         
         save_balance("sector_momentum", {
             "total_invested": total_invested + investment_amount,
-            "current_positions": new_positions,
+            "current_positions": new_positions,  # All actual positions from Alpaca
             "holding_fund_position": holding_fund_position,
             "last_trade_date": datetime.datetime.now().strftime("%Y-%m-%d"),
             "top_3_sectors": top_3_sectors,
@@ -5238,10 +5507,13 @@ def monthly_sector_momentum_strategy(api, force_execute=False, investment_calc=N
                 updated_shv_shares = get_holding_fund_shares(api, holding_fund_ticker)
                 holding_fund_position[holding_fund_ticker] = updated_shv_shares
                 
-                # Update Firestore
+                # Get ALL actual positions from Alpaca (not just calculated SCHZ)
+                updated_actual_positions = get_sector_momentum_positions(api)
+                
+                # Update Firestore with ALL actual positions from Alpaca
                 save_balance("sector_momentum", {
                     "total_invested": total_invested + investment_amount,
-                    "current_positions": {bond_etf: schz_shares},
+                    "current_positions": updated_actual_positions,  # All actual positions from Alpaca
                     "holding_fund_position": holding_fund_position,
                     "last_trade_date": datetime.datetime.now().strftime("%Y-%m-%d"),
                     "top_3_sectors": [],
@@ -5400,6 +5672,96 @@ def monthly_invest_all_strategies(api, force_execute=False, skip_order_wait=Fals
     results["sector_momentum"] = monthly_sector_momentum_strategy(api, force_execute, investment_calc, margin_result, skip_order_wait, env)
     
     print("\n=== All Monthly Strategies Complete ===")
+    
+    return results
+
+
+def monthly_invest_rssb_sector_momentum_custom(api, total_budget=300.0, force_execute=True, skip_order_wait=False, env="live"):
+    """
+    Special occasion function to run only RSSB/WTIP and Sector Momentum strategies
+    with a custom budget, split 50/50 between the two strategies.
+    
+    Args:
+        api: Alpaca API credentials
+        total_budget: Total budget to invest (default: $300)
+        force_execute: Bypass trading day check (default: True for special occasions)
+        skip_order_wait: Skip waiting for order fills (default: False)
+        env: Environment ("live" or "paper")
+    
+    Returns:
+        dict with results from both strategies
+    """
+    print("=== Special Occasion: RSSB/WTIP + Sector Momentum Investment ===")
+    print(f"Total budget: ${total_budget:.2f}")
+    
+    # Split budget 50/50 between the two strategies
+    rssb_wtip_amount = total_budget / 2.0
+    sector_momentum_amount = total_budget / 2.0
+    
+    print(f"  RSSB/WTIP: ${rssb_wtip_amount:.2f}")
+    print(f"  Sector Momentum: ${sector_momentum_amount:.2f}")
+    
+    # Step 1: Sync cost basis from Alpaca to Firestore BEFORE executing trades
+    print("\nStep 1: Syncing cost basis from Alpaca to Firestore...")
+    cost_basis_result = recalculate_all_strategies_cost_basis(api, env, silent=True)
+    if cost_basis_result.get("success"):
+        if cost_basis_result.get("total_difference", 0) != 0:
+            print(f"✅ Cost basis synced: ${cost_basis_result['total_difference']:.2f} correction applied")
+        else:
+            print("✅ Cost basis already in sync")
+    else:
+        print(f"⚠️  Warning: Cost basis sync had issues: {cost_basis_result.get('error', 'Unknown error')}")
+    
+    # Step 2: Get margin conditions (needed for strategy functions)
+    print("\nStep 2: Getting margin conditions...")
+    margin_result = check_margin_conditions(api)
+    
+    # Step 3: Create custom investment_calc dict with only our two strategies
+    # The functions expect this structure but we'll override the amounts
+    investment_calc = {
+        "total_cash": total_budget,
+        "total_reserved": 0,
+        "total_available": total_budget,
+        "margin_approved": 0,
+        "used_margin": 0,
+        "total_investing": total_budget,
+        "strategy_amounts": {
+            "rssb_wtip_allo": rssb_wtip_amount,
+            "sector_momentum_allo": sector_momentum_amount,
+            # Set other strategies to 0 (they won't be called anyway)
+            "hfea_allo": 0,
+            "golden_hfea_lite_allo": 0,
+            "spxl_allo": 0,
+            "nine_sig_allo": 0,
+            "dual_momentum_allo": 0,
+        },
+        "reserved_amounts": {}
+    }
+    
+    # Step 4: Run both strategies with custom budget
+    results = {}
+    
+    print("\n=== Executing RSSB/WTIP ===")
+    results["rssb_wtip"] = make_monthly_buys_rssb_wtip(
+        api, 
+        force_execute=force_execute, 
+        investment_calc=investment_calc, 
+        margin_result=margin_result, 
+        skip_order_wait=skip_order_wait, 
+        env=env
+    )
+    
+    print("\n=== Executing Sector Momentum ===")
+    results["sector_momentum"] = monthly_sector_momentum_strategy(
+        api, 
+        force_execute=force_execute, 
+        investment_calc=investment_calc, 
+        margin_result=margin_result, 
+        skip_order_wait=skip_order_wait, 
+        env=env
+    )
+    
+    print("\n=== Special Occasion Investment Complete ===")
     
     return results
 
@@ -5570,6 +5932,9 @@ def run_local(action, env="paper", request="test", force_execute=False):
         return monthly_dual_momentum_strategy(api, force_execute=force_execute, skip_order_wait=True, env=env)
     elif action == "monthly_sector_momentum":
         return monthly_sector_momentum_strategy(api, force_execute=force_execute, skip_order_wait=True, env=env)
+    elif action == "monthly_invest_rssb_sector_custom":
+        # Special occasion: RSSB/WTIP + Sector Momentum with $300 budget
+        return monthly_invest_rssb_sector_momentum_custom(api, total_budget=300.0, force_execute=True, skip_order_wait=True, env=env)
     else:
         return "No valid action provided."
 
@@ -5593,7 +5958,8 @@ if __name__ == "__main__":
             "buy_spxl_above_200sma",
             "index_alert",
             "monthly_dual_momentum",
-            "monthly_sector_momentum"
+            "monthly_sector_momentum",
+            "monthly_invest_rssb_sector_custom"
         ],
         required=True,
         help="Action to perform: 'monthly_invest_all' runs all five monthly strategies with coordinated budgets (recommended)",
@@ -5618,6 +5984,7 @@ if __name__ == "__main__":
 
     # Run the function locally
     result = run_local(action=args.action, env=args.env, force_execute=args.force)
+    print(f"\nResult: {result}\n")
     # save_balance("SPXL_SMA", 100)
 
 # local execution:
