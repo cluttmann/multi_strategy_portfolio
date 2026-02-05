@@ -350,6 +350,7 @@ def get_alpaca_historical_bars(api, symbol, days=400):
     """
     Fetch historical daily bars from Alpaca using IEX feed.
     Primary data source for all SMA calculations (no rate limiting).
+    Includes explicit SSL error handling with retries.
     
     Args:
         api: Alpaca API credentials dict
@@ -359,55 +360,103 @@ def get_alpaca_historical_bars(api, symbol, days=400):
     Returns:
         List of closing prices (most recent last), or None on error
     """
-    try:
-        from datetime import datetime, timedelta
-        
-        market_data_base_url = "https://data.alpaca.markets"
-        
-        end_date = datetime.now()
-        start_date = end_date - timedelta(days=days)
-        
-        url = f"{market_data_base_url}/v2/stocks/{symbol}/bars"
-        params = {
-            "start": start_date.strftime("%Y-%m-%d"),
-            "end": end_date.strftime("%Y-%m-%d"),
-            "timeframe": "1Day",
-            "limit": 10000,
-            "adjustment": "split",
-            "feed": "iex"  # Use IEX feed (included with Basic subscription)
-        }
-        
-        # Use retry session to handle SSL errors
-        session = get_retry_session(max_retries=3, backoff_factor=2.0, timeout=30)
-        response = session.get(
-            url,
-            headers=get_auth_headers(api),
-            params=params,
-            timeout=30
-        )
-        response.raise_for_status()
-        
-        data = response.json()
-        bars = data.get("bars", [])
-        
-        if not bars:
-            print(f"No Alpaca bars returned for {symbol}")
+    from datetime import datetime, timedelta
+    from requests.exceptions import SSLError, ConnectionError, RequestException
+    from urllib3.exceptions import SSLError as URLLib3SSLError, MaxRetryError
+    
+    market_data_base_url = "https://data.alpaca.markets"
+    
+    end_date = datetime.now()
+    start_date = end_date - timedelta(days=days)
+    
+    url = f"{market_data_base_url}/v2/stocks/{symbol}/bars"
+    params = {
+        "start": start_date.strftime("%Y-%m-%d"),
+        "end": end_date.strftime("%Y-%m-%d"),
+        "timeframe": "1Day",
+        "limit": 10000,
+        "adjustment": "split",
+        "feed": "iex"  # Use IEX feed (included with Basic subscription)
+    }
+    
+    # Manual retry loop for SSL errors with exponential backoff
+    # Note: urllib3 retry happens first, then we retry manually if it fails
+    max_retries = 5
+    for attempt in range(max_retries):
+        try:
+            # Use retry session with fewer retries since we're doing manual retries
+            session = get_retry_session(max_retries=2, backoff_factor=1.0, timeout=60)
+            response = session.get(
+                url,
+                headers=get_auth_headers(api),
+                params=params,
+                timeout=60  # Longer timeout for large data requests
+            )
+            response.raise_for_status()
+            
+            data = response.json()
+            bars = data.get("bars", [])
+            
+            if not bars:
+                print(f"No Alpaca bars returned for {symbol}")
+                return None
+            
+            # Extract closing prices
+            closes = [bar['c'] for bar in bars]
+            print(f"Fetched {len(closes)} bars for {symbol} from Alpaca IEX feed")
+            return closes
+            
+        except (SSLError, URLLib3SSLError, ConnectionError, MaxRetryError) as e:
+            # SSL, connection error, or retry exhaustion - retry with exponential backoff
+            # Check if it's an SSL-related error (even if wrapped in MaxRetryError)
+            is_ssl_error = (
+                isinstance(e, (SSLError, URLLib3SSLError)) or
+                (isinstance(e, MaxRetryError) and 
+                 (hasattr(e, 'reason') and isinstance(e.reason, (SSLError, URLLib3SSLError))) or
+                 'SSL' in str(e) or 'SSL' in str(type(e)))
+            )
+            
+            if attempt < max_retries - 1:
+                wait_time = 2 ** attempt  # Exponential backoff: 1s, 2s, 4s, 8s, 16s
+                error_type = "SSL/Connection" if is_ssl_error else "Connection"
+                print(f"{error_type} error for {symbol} (attempt {attempt + 1}/{max_retries}): {e}. Retrying in {wait_time}s...")
+                time.sleep(wait_time)
+                continue
+            else:
+                print(f"Alpaca historical fetch failed for {symbol} after {max_retries} attempts: {e}")
+                return None
+        except RequestException as e:
+            # Check if it's an SSL-related RequestException
+            if 'SSL' in str(e) or isinstance(getattr(e, 'args', [None])[0] if e.args else None, (SSLError, URLLib3SSLError)):
+                # SSL-related request error - retry
+                if attempt < max_retries - 1:
+                    wait_time = 2 ** attempt
+                    print(f"SSL-related request error for {symbol} (attempt {attempt + 1}/{max_retries}): {e}. Retrying in {wait_time}s...")
+                    time.sleep(wait_time)
+                    continue
+            # Other request errors - don't retry
+            print(f"Alpaca historical fetch failed for {symbol}: {e}")
             return None
-        
-        # Extract closing prices
-        closes = [bar['c'] for bar in bars]
-        print(f"Fetched {len(closes)} bars for {symbol} from Alpaca IEX feed")
-        return closes
-        
-    except Exception as e:
-        print(f"Alpaca historical fetch failed for {symbol}: {e}")
-        return None
+        except Exception as e:
+            # Check if it's an SSL-related error in the message
+            if 'SSL' in str(e) or 'SSLError' in str(type(e)):
+                if attempt < max_retries - 1:
+                    wait_time = 2 ** attempt
+                    print(f"SSL error (unexpected type) for {symbol} (attempt {attempt + 1}/{max_retries}): {e}. Retrying in {wait_time}s...")
+                    time.sleep(wait_time)
+                    continue
+            # Unexpected errors
+            print(f"Unexpected error fetching Alpaca data for {symbol}: {e}")
+            return None
+    
+    return None
 
 
 def get_latest_trade(api, symbol):
     """
     Get latest trade price from Alpaca.
     No fallback - raises error if Alpaca data unavailable.
+    Includes explicit SSL error handling with retries.
     
     Args:
         api: Alpaca API credentials dict
@@ -416,19 +465,72 @@ def get_latest_trade(api, symbol):
     Returns:
         Latest trade price
     """
+    from requests.exceptions import SSLError, ConnectionError, RequestException
+    from urllib3.exceptions import SSLError as URLLib3SSLError, MaxRetryError
+    
     symbol = symbol.upper()
     market_data_base_url = "https://data.alpaca.markets"
     url = f"{market_data_base_url}/v2/stocks/{symbol}/trades/latest"
     
-    # Use retry session to handle SSL errors
-    session = get_retry_session(max_retries=3, backoff_factor=2.0, timeout=30)
-    response = session.get(
-        url,
-        headers=get_auth_headers(api),
-        timeout=30
-    )
-    response.raise_for_status()
-    return response.json()["trade"]["p"]
+    # Manual retry loop for SSL errors with exponential backoff
+    # Note: urllib3 retry happens first, then we retry manually if it fails
+    max_retries = 5
+    for attempt in range(max_retries):
+        try:
+            # Use retry session with fewer retries since we're doing manual retries
+            session = get_retry_session(max_retries=2, backoff_factor=1.0, timeout=60)
+            response = session.get(
+                url,
+                headers=get_auth_headers(api),
+                timeout=60
+            )
+            response.raise_for_status()
+            return response.json()["trade"]["p"]
+            
+        except (SSLError, URLLib3SSLError, ConnectionError, MaxRetryError) as e:
+            # SSL, connection error, or retry exhaustion - retry with exponential backoff
+            # Check if it's an SSL-related error (even if wrapped in MaxRetryError)
+            is_ssl_error = (
+                isinstance(e, (SSLError, URLLib3SSLError)) or
+                (isinstance(e, MaxRetryError) and 
+                 (hasattr(e, 'reason') and isinstance(e.reason, (SSLError, URLLib3SSLError))) or
+                 'SSL' in str(e) or 'SSL' in str(type(e)))
+            )
+            
+            if attempt < max_retries - 1:
+                wait_time = 2 ** attempt  # Exponential backoff: 1s, 2s, 4s, 8s, 16s
+                error_type = "SSL/Connection" if is_ssl_error else "Connection"
+                print(f"{error_type} error for {symbol} latest trade (attempt {attempt + 1}/{max_retries}): {e}. Retrying in {wait_time}s...")
+                time.sleep(wait_time)
+                continue
+            else:
+                error_msg = f"Error fetching latest trade for {symbol} after {max_retries} attempts: {e}"
+                print(error_msg)
+                raise Exception(error_msg)
+        except RequestException as e:
+            # Check if it's an SSL-related RequestException
+            if 'SSL' in str(e) or isinstance(getattr(e, 'args', [None])[0] if e.args else None, (SSLError, URLLib3SSLError)):
+                # SSL-related request error - retry
+                if attempt < max_retries - 1:
+                    wait_time = 2 ** attempt
+                    print(f"SSL-related request error for {symbol} latest trade (attempt {attempt + 1}/{max_retries}): {e}. Retrying in {wait_time}s...")
+                    time.sleep(wait_time)
+                    continue
+            # Other request errors - don't retry
+            error_msg = f"Request error fetching latest trade for {symbol}: {e}"
+            print(error_msg)
+            raise Exception(error_msg)
+        except Exception as e:
+            # Check if it's an SSL-related error in the message
+            if 'SSL' in str(e) or 'SSLError' in str(type(e)):
+                if attempt < max_retries - 1:
+                    wait_time = 2 ** attempt
+                    print(f"SSL error (unexpected type) for {symbol} latest trade (attempt {attempt + 1}/{max_retries}): {e}. Retrying in {wait_time}s...")
+                    time.sleep(wait_time)
+                    continue
+            # Unexpected errors - re-raise
+            print(f"Unexpected error fetching latest trade for {symbol}: {e}")
+            raise
 
 
 def get_sma(api, symbol, period):
@@ -4134,6 +4236,7 @@ def get_index_data(index_symbol):
     """
     Fetch the all-time high and current price for an index using Alpaca.
     Uses 5 years of data (maximum available with Basic subscription).
+    Includes explicit SSL error handling with retries.
     
     Args:
         index_symbol: Stock symbol (e.g., "SPY", "URTH")
@@ -4141,52 +4244,100 @@ def get_index_data(index_symbol):
     Returns:
         tuple: (current_price, all_time_high)
     """
-    try:
-        # Get API credentials
-        api = set_alpaca_environment(env=alpaca_environment)
-        
-        # Fetch 5 years of data from Alpaca (max available with Basic plan)
-        from datetime import datetime, timedelta
-        
-        market_data_base_url = "https://data.alpaca.markets"
-        end_date = datetime.now()
-        start_date = end_date - timedelta(days=1825)  # 5 years
-        
-        url = f"{market_data_base_url}/v2/stocks/{index_symbol}/bars"
-        params = {
-            "start": start_date.strftime("%Y-%m-%d"),
-            "end": end_date.strftime("%Y-%m-%d"),
-            "timeframe": "1Day",
-            "limit": 10000,
-            "adjustment": "split",
-            "feed": "iex"
-        }
-        
-        # Use retry session to handle SSL errors
-        session = get_retry_session(max_retries=3, backoff_factor=2.0, timeout=30)
-        response = session.get(
-            url,
-            headers=get_auth_headers(api),
-            params=params,
-            timeout=30
-        )
-        response.raise_for_status()
-        
-        data = response.json()
-        bars = data.get("bars", [])
-        
-        if not bars:
-            raise ValueError(f"No Alpaca data returned for {index_symbol}")
-        
-        # Get all-time high and current close from bars
-        all_time_high = max(bar['h'] for bar in bars)
-        current_price = bars[-1]['c']
-        
-        return current_price, all_time_high
-        
-    except Exception as e:
-        print(f"Error fetching index data for {index_symbol}: {e}")
-        raise
+    from datetime import datetime, timedelta
+    from requests.exceptions import SSLError, ConnectionError, RequestException
+    from urllib3.exceptions import SSLError as URLLib3SSLError, MaxRetryError
+    
+    # Get API credentials
+    api = set_alpaca_environment(env=alpaca_environment)
+    
+    # Fetch 5 years of data from Alpaca (max available with Basic plan)
+    market_data_base_url = "https://data.alpaca.markets"
+    end_date = datetime.now()
+    start_date = end_date - timedelta(days=1825)  # 5 years
+    
+    url = f"{market_data_base_url}/v2/stocks/{index_symbol}/bars"
+    params = {
+        "start": start_date.strftime("%Y-%m-%d"),
+        "end": end_date.strftime("%Y-%m-%d"),
+        "timeframe": "1Day",
+        "limit": 10000,
+        "adjustment": "split",
+        "feed": "iex"
+    }
+    
+    # Manual retry loop for SSL errors with exponential backoff
+    # Note: urllib3 retry happens first, then we retry manually if it fails
+    max_retries = 5
+    for attempt in range(max_retries):
+        try:
+            # Use retry session with fewer retries since we're doing manual retries
+            # This prevents urllib3 from exhausting all retries before we can handle it
+            session = get_retry_session(max_retries=2, backoff_factor=1.0, timeout=60)
+            response = session.get(
+                url,
+                headers=get_auth_headers(api),
+                params=params,
+                timeout=60  # Longer timeout for large data requests
+            )
+            response.raise_for_status()
+            
+            data = response.json()
+            bars = data.get("bars", [])
+            
+            if not bars:
+                raise ValueError(f"No Alpaca data returned for {index_symbol}")
+            
+            # Get all-time high and current close from bars
+            all_time_high = max(bar['h'] for bar in bars)
+            current_price = bars[-1]['c']
+            
+            return current_price, all_time_high
+            
+        except (SSLError, URLLib3SSLError, ConnectionError, MaxRetryError) as e:
+            # SSL, connection error, or retry exhaustion - retry with exponential backoff
+            # Check if it's an SSL-related error (even if wrapped in MaxRetryError)
+            is_ssl_error = (
+                isinstance(e, (SSLError, URLLib3SSLError)) or
+                (isinstance(e, MaxRetryError) and 
+                 (hasattr(e, 'reason') and isinstance(e.reason, (SSLError, URLLib3SSLError))) or
+                 'SSL' in str(e) or 'SSL' in str(type(e)))
+            )
+            
+            if attempt < max_retries - 1:
+                wait_time = 2 ** attempt  # Exponential backoff: 1s, 2s, 4s, 8s, 16s
+                error_type = "SSL/Connection" if is_ssl_error else "Connection"
+                print(f"{error_type} error for {index_symbol} (attempt {attempt + 1}/{max_retries}): {e}. Retrying in {wait_time}s...")
+                time.sleep(wait_time)
+                continue
+            else:
+                error_msg = f"Error fetching index data for {index_symbol} after {max_retries} attempts: {e}"
+                print(error_msg)
+                raise Exception(error_msg)
+        except RequestException as e:
+            # Check if it's an SSL-related RequestException
+            if 'SSL' in str(e) or isinstance(getattr(e, 'args', [None])[0] if e.args else None, (SSLError, URLLib3SSLError)):
+                # SSL-related request error - retry
+                if attempt < max_retries - 1:
+                    wait_time = 2 ** attempt
+                    print(f"SSL-related request error for {index_symbol} (attempt {attempt + 1}/{max_retries}): {e}. Retrying in {wait_time}s...")
+                    time.sleep(wait_time)
+                    continue
+            # Other request errors - don't retry
+            error_msg = f"Request error fetching index data for {index_symbol}: {e}"
+            print(error_msg)
+            raise Exception(error_msg)
+        except Exception as e:
+            # Check if it's an SSL-related error in the message
+            if 'SSL' in str(e) or 'SSLError' in str(type(e)):
+                if attempt < max_retries - 1:
+                    wait_time = 2 ** attempt
+                    print(f"SSL error (unexpected type) for {index_symbol} (attempt {attempt + 1}/{max_retries}): {e}. Retrying in {wait_time}s...")
+                    time.sleep(wait_time)
+                    continue
+            # Unexpected errors - re-raise
+            print(f"Unexpected error fetching index data for {index_symbol}: {e}")
+            raise
 
 
 def get_index_sma_state(index_symbol, sma_period):
