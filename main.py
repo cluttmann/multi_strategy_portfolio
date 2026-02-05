@@ -173,7 +173,7 @@ def get_firestore_client():
 CACHE_DURATION_MINUTES = 5  # Cache freshness window
 
 
-def get_cached_market_data(symbol, data_type):
+def get_cached_market_data(symbol, data_type, env="live"):
     """
     Get cached market data from Firestore to avoid redundant Alpaca API calls.
     Cache expires after 5 minutes. Works across all Cloud Functions.
@@ -181,6 +181,7 @@ def get_cached_market_data(symbol, data_type):
     Args:
         symbol: Market symbol (e.g., "SPY", "URTH", "EEM", "EFA")
         data_type: "price", "sma200", "sma255", or state fields
+        env: Environment ("live" or "paper") - determines Firestore collection
     
     Returns:
         Cached value or None if not cached/expired/unavailable
@@ -189,7 +190,7 @@ def get_cached_market_data(symbol, data_type):
         # Normalize symbol for Firestore document ID (remove special chars)
         doc_id = symbol.replace("^", "").replace(".", "_")
         
-        doc_ref = get_firestore_client().collection("market-data").document(doc_id)
+        doc_ref = get_firestore_client().collection(f"market-data-{env}").document(doc_id)
         doc = doc_ref.get()
         
         if not doc.exists:
@@ -218,7 +219,7 @@ def get_cached_market_data(symbol, data_type):
         return None
 
 
-def get_all_market_data(symbol):
+def get_all_market_data(symbol, env="live"):
     """
     Get ALL market data for a symbol efficiently.
     Use this when you need multiple metrics (price, sma200, sma255, states).
@@ -226,15 +227,16 @@ def get_all_market_data(symbol):
     
     Args:
         symbol: Stock symbol (e.g., "SPY", "URTH")
+        env: Environment ("live" or "paper") - determines Firestore collection
     
     Returns:
         dict with all market data: price, sma200, sma255, sma200_state, sma255_state, timestamp
         Or None if cache is stale (triggers update)
     
     Example:
-        data = get_all_market_data("SPY")
+        data = get_all_market_data("SPY", env="live")
         if data is None:
-            data = update_market_data("SPY")
+            data = update_market_data("SPY", env="live")
         spy_price = data["price"]
         spy_sma = data["sma200"]
     """
@@ -242,7 +244,7 @@ def get_all_market_data(symbol):
         # Normalize symbol for Firestore document ID
         doc_id = symbol.replace("^", "").replace(".", "_")
         
-        doc_ref = get_firestore_client().collection("market-data").document(doc_id)
+        doc_ref = get_firestore_client().collection(f"market-data-{env}").document(doc_id)
         doc = doc_ref.get()
         
         if not doc.exists:
@@ -270,7 +272,7 @@ def get_all_market_data(symbol):
         return None
 
 
-def set_cached_market_data(symbol, data_type, value):
+def set_cached_market_data(symbol, data_type, value, env="live"):
     """
     Cache market data to Firestore to avoid redundant Alpaca API calls.
     Accessible across all Cloud Functions. Automatically expires after 5 minutes.
@@ -279,12 +281,13 @@ def set_cached_market_data(symbol, data_type, value):
         symbol: Market symbol
         data_type: "price", "sma200", or "sma255"
         value: Data value to cache
+        env: Environment ("live" or "paper") - determines Firestore collection
     """
     try:
         # Normalize symbol for Firestore document ID (remove special chars)
         doc_id = symbol.replace("^", "").replace(".", "_")
         
-        doc_ref = get_firestore_client().collection("market-data").document(doc_id)
+        doc_ref = get_firestore_client().collection(f"market-data-{env}").document(doc_id)
         
         # Get existing data or create new
         doc = doc_ref.get()
@@ -759,7 +762,7 @@ def get_account_info(api):
         return None
 
 
-def check_margin_conditions(api):
+def check_margin_conditions(api, env="live"):
     """
     Evaluate all margin control gates to determine if leverage is allowed.
     
@@ -798,9 +801,9 @@ def check_margin_conditions(api):
         # Gate 1: Market Trend (SPY > 200-SMA as S&P 500 proxy)
         try:
             # Get all SPY data at once (efficient single fetch/read)
-            spy_data = get_all_market_data("SPY")
+            spy_data = get_all_market_data("SPY", env=env)
             if spy_data is None:
-                spy_data = update_market_data("SPY")
+                spy_data = update_market_data("SPY", env=env)
             
             spy_price = spy_data["price"]
             spy_sma = spy_data["sma200"]
@@ -1019,9 +1022,20 @@ def load_balances(env="live"):
 
 
 # 9-Sig Strategy Data Management Functions
-def save_nine_sig_quarterly_data(quarter_id, tqqq_balance, agg_balance, signal_line, action, quarterly_contributions):
-    """Save quarterly data following 3Sig methodology for next quarter's calculations"""
-    doc_ref = get_firestore_client().collection("nine-sig-quarters").document(quarter_id)
+def save_nine_sig_quarterly_data(quarter_id, tqqq_balance, agg_balance, signal_line, action, quarterly_contributions, env="live"):
+    """
+    Save quarterly data following 3Sig methodology for next quarter's calculations.
+    
+    Args:
+        quarter_id: Quarter identifier
+        tqqq_balance: TQQQ balance at quarter end
+        agg_balance: AGG balance at quarter end
+        signal_line: Signal line value
+        action: Action taken
+        quarterly_contributions: Total quarterly contributions
+        env: Environment ("live" or "paper") - determines Firestore collection
+    """
+    doc_ref = get_firestore_client().collection(f"nine-sig-quarters-{env}").document(quarter_id)
     doc_ref.set({
         "quarter_id": quarter_id,
         "quarter_end_date": datetime.datetime.now().isoformat(),
@@ -1035,23 +1049,35 @@ def save_nine_sig_quarterly_data(quarter_id, tqqq_balance, agg_balance, signal_l
     })
 
 
-def get_previous_quarter_tqqq_balance():
-    """Get previous quarter's TQQQ ending balance for signal line calculation"""
-    docs = get_firestore_client().collection("nine-sig-quarters").order_by("timestamp", direction=firestore.Query.DESCENDING).limit(1).stream()
+def get_previous_quarter_tqqq_balance(env="live"):
+    """
+    Get previous quarter's TQQQ ending balance for signal line calculation.
+    
+    Args:
+        env: Environment ("live" or "paper") - determines Firestore collection
+    
+    Returns:
+        Previous quarter's TQQQ balance or 0 if not found
+    """
+    docs = get_firestore_client().collection(f"nine-sig-quarters-{env}").order_by("timestamp", direction=firestore.Query.DESCENDING).limit(1).stream()
     for doc in docs:
         data = doc.to_dict()
         return data.get("previous_tqqq_balance", 0)
     return 0
 
 
-def track_nine_sig_monthly_contribution(amount):
+def track_nine_sig_monthly_contribution(amount, env="live"):
     """
     Track actual 9-Sig monthly contribution for quarterly signal calculation.
     Handles Firestore unavailability gracefully for local testing.
+    
+    Args:
+        amount: Contribution amount
+        env: Environment ("live" or "paper") - determines Firestore collection
     """
     try:
         current_month = datetime.datetime.now().strftime("%Y-%m")
-        doc_ref = get_firestore_client().collection("nine-sig-monthly-contributions").document(current_month)
+        doc_ref = get_firestore_client().collection(f"nine-sig-monthly-contributions-{env}").document(current_month)
         doc_ref.set({
             "month": current_month,
             "amount": amount,
@@ -1061,10 +1087,16 @@ def track_nine_sig_monthly_contribution(amount):
         print(f"Warning: Could not track 9-Sig contribution to Firestore: {e}")
 
 
-def get_quarterly_nine_sig_contributions():
+def get_quarterly_nine_sig_contributions(env="live"):
     """
     Get sum of actual 9-Sig contributions made in the current quarter.
     Returns 0 if Firestore is unavailable (local testing).
+    
+    Args:
+        env: Environment ("live" or "paper") - determines Firestore collection
+    
+    Returns:
+        Total quarterly contributions or 0 if unavailable
     """
     try:
         today = datetime.datetime.now()
@@ -1074,7 +1106,7 @@ def get_quarterly_nine_sig_contributions():
         quarter_start = datetime.datetime(today.year, quarter_start_month, 1)
         
         # Get all monthly contributions from this quarter
-        docs = get_firestore_client().collection("nine-sig-monthly-contributions").where(
+        docs = get_firestore_client().collection(f"nine-sig-monthly-contributions-{env}").where(
             "timestamp", ">=", quarter_start
         ).stream()
         
@@ -1142,11 +1174,19 @@ def check_spy_30_down_rule():
         return False
 
 
-def count_ignored_sell_signals():
-    """Count how many sell signals have been ignored in the current crash protection period"""
+def count_ignored_sell_signals(env="live"):
+    """
+    Count how many sell signals have been ignored in the current crash protection period.
+    
+    Args:
+        env: Environment ("live" or "paper") - determines Firestore collection
+    
+    Returns:
+        Number of ignored sell signals (0-4)
+    """
     try:
         # Get recent quarters with ignored sell signals
-        docs = get_firestore_client().collection("nine-sig-quarters").where("action_taken", "==", "SELL_IGNORED").order_by("timestamp", direction=firestore.Query.DESCENDING).limit(4).stream()
+        docs = get_firestore_client().collection(f"nine-sig-quarters-{env}").where("action_taken", "==", "SELL_IGNORED").order_by("timestamp", direction=firestore.Query.DESCENDING).limit(4).stream()
         return len(list(docs))
     except Exception as e:
         print(f"Error counting ignored sell signals: {e}")
@@ -1252,7 +1292,7 @@ def make_monthly_nine_sig_contributions(api, force_execute=False, investment_cal
     
     # If not provided by orchestrator, calculate independently
     if margin_result is None:
-        margin_result = check_margin_conditions(api)
+        margin_result = check_margin_conditions(api, env=env)
     
     if investment_calc is None:
         investment_calc = calculate_monthly_investments(api, margin_result, env)
@@ -1396,7 +1436,7 @@ def make_monthly_nine_sig_contributions(api, force_execute=False, investment_cal
             send_telegram_message(telegram_msg)
             
             # Track the actual contribution amount for quarterly signal calculation
-            track_nine_sig_monthly_contribution(investment_amount)
+            track_nine_sig_monthly_contribution(investment_amount, env=env)
             
             # Get TQQQ shares from Alpaca for complete position tracking
             actual_tqqq_shares = updated_positions.get("TQQQ", 0) if updated_positions else 0
@@ -1450,7 +1490,7 @@ def make_monthly_buys_golden_hfea_lite(api, force_execute=False, investment_calc
     
     # If not provided by orchestrator, calculate independently
     if margin_result is None:
-        margin_result = check_margin_conditions(api)
+        margin_result = check_margin_conditions(api, env=env)
     
     if investment_calc is None:
         investment_calc = calculate_monthly_investments(api, margin_result, env)
@@ -1624,7 +1664,7 @@ def make_monthly_buys_rssb_wtip(api, force_execute=False, investment_calc=None, 
     
     # If not provided by orchestrator, calculate independently
     if margin_result is None:
-        margin_result = check_margin_conditions(api)
+        margin_result = check_margin_conditions(api, env=env)
     
     if investment_calc is None:
         investment_calc = calculate_monthly_investments(api, margin_result, env)
@@ -1989,7 +2029,7 @@ def make_monthly_buys(api, force_execute=False, investment_calc=None, margin_res
     
     # If not provided by orchestrator, calculate independently
     if margin_result is None:
-        margin_result = check_margin_conditions(api)
+        margin_result = check_margin_conditions(api, env=env)
     
     if investment_calc is None:
         investment_calc = calculate_monthly_investments(api, margin_result, env)
@@ -3125,7 +3165,7 @@ def rebalance_portfolio(api):
     return "Rebalance executed."
 
 
-def execute_quarterly_nine_sig_signal(api, force_execute=False):
+def execute_quarterly_nine_sig_signal(api, force_execute=False, env="live"):
     """Execute quarterly 9-sig signal following Jason Kelly's exact 5-step process"""
     if not force_execute and not check_trading_day(mode="quarterly"):
         print("Not first trading day of the quarter")
@@ -3148,10 +3188,10 @@ def execute_quarterly_nine_sig_signal(api, force_execute=False):
         print(f"Total portfolio: ${total_portfolio:.2f}")
         
         # Step 1: Determine the Quarter's Signal Line
-        previous_tqqq_balance = get_previous_quarter_tqqq_balance()
+        previous_tqqq_balance = get_previous_quarter_tqqq_balance(env=env)
         
         # Get actual contributions made during this quarter (dynamic amounts)
-        quarterly_contributions = get_quarterly_nine_sig_contributions()
+        quarterly_contributions = get_quarterly_nine_sig_contributions(env=env)
         half_quarterly_contributions = quarterly_contributions * 0.5
         
         print(f"Previous quarter TQQQ balance: ${previous_tqqq_balance:.2f}")
@@ -3348,7 +3388,7 @@ def execute_quarterly_nine_sig_signal(api, force_execute=False):
             spy_30_down = check_spy_30_down_rule()
             print(f"SPY 30% down rule check: {spy_30_down}")
             if spy_30_down:
-                ignored_count = count_ignored_sell_signals()
+                ignored_count = count_ignored_sell_signals(env=env)
                 print(f"Ignored sell signals count: {ignored_count}/4")
                 
                 if ignored_count < 4:
@@ -3418,7 +3458,8 @@ def execute_quarterly_nine_sig_signal(api, force_execute=False):
             final_agg_balance,   # Use post-trade balance
             signal_line,
             action,
-            quarterly_contributions
+            quarterly_contributions,
+            env=env
         )
         
         # Report final allocations
@@ -3445,7 +3486,7 @@ def execute_quarterly_nine_sig_signal(api, force_execute=False):
 
 
 # Unified function to fetch all market data and calculate all SMAs at once
-def update_market_data(symbol):
+def update_market_data(symbol, env="live"):
     """
     Fetch fresh market data from Alpaca and calculate ALL metrics in one operation.
     ALWAYS calculates and saves: price, sma200, sma255, sma200_state, sma255_state.
@@ -3453,6 +3494,7 @@ def update_market_data(symbol):
     
     Args:
         symbol: Stock symbol (e.g., "SPY", "URTH")
+        env: Environment ("live" or "paper") - determines Firestore collection
     
     Returns:
         dict with keys: price, sma200, sma255, sma200_state, sma255_state, timestamp
@@ -3460,7 +3502,7 @@ def update_market_data(symbol):
     print(f"Fetching fresh market data for {symbol} from Alpaca IEX feed")
     
     # Get API credentials
-    api = set_alpaca_environment(env=alpaca_environment)
+    api = set_alpaca_environment(env=env)
     
     # Fetch historical data (500 days covers both 200 and 255-day SMAs)
     closes = get_alpaca_historical_bars(api, symbol, days=500)
@@ -3511,7 +3553,7 @@ def update_market_data(symbol):
     
     # Save everything to Firestore at once
     doc_id = symbol.replace("^", "").replace(".", "_")
-    doc_ref = get_firestore_client().collection("market-data").document(doc_id)
+    doc_ref = get_firestore_client().collection(f"market-data-{env}").document(doc_id)
     
     # Get existing data (to preserve alert tracking fields)
     doc = doc_ref.get()
@@ -3597,12 +3639,12 @@ def monthly_buying_sma(api, symbol, force_execute=False, investment_calc=None, m
         print(f"{symbol} SMA: Force execution enabled - bypassing trading day check")
         send_telegram_message(f"{symbol} SMA: Force execution enabled for testing - bypassing trading day check")
 
-    # Get symbol-specific parameters (use SPY as S&P 500 proxy for SPXL decisions)
-    if symbol == "SPXL":
-        # Get all SPY market data at once (efficient single fetch/read)
-        spy_data = get_all_market_data("SPY")
-        if spy_data is None:
-            spy_data = update_market_data("SPY")
+        # Get symbol-specific parameters (use SPY as S&P 500 proxy for SPXL decisions)
+        if symbol == "SPXL":
+            # Get all SPY market data at once (efficient single fetch/read)
+            spy_data = get_all_market_data("SPY", env=env)
+            if spy_data is None:
+                spy_data = update_market_data("SPY", env=env)
         
         sma_200 = spy_data["sma200"]
         latest_price = spy_data["price"]
@@ -3611,7 +3653,7 @@ def monthly_buying_sma(api, symbol, force_execute=False, investment_calc=None, m
 
     # If not provided by orchestrator, calculate independently
     if margin_result is None:
-        margin_result = check_margin_conditions(api)
+        margin_result = check_margin_conditions(api, env=env)
     
     if investment_calc is None:
         investment_calc = calculate_monthly_investments(api, margin_result, env)
@@ -3889,7 +3931,7 @@ def monthly_buying_sma(api, symbol, force_execute=False, investment_calc=None, m
             return error_msg
 
 
-def daily_trade_sma(api, symbol):
+def daily_trade_sma(api, symbol, env="live"):
     if not check_trading_day(mode="daily"):
         send_telegram_message(f"Market closed today. Skipping 200SMA. for {symbol}")
         return "Market closed today."
@@ -3897,9 +3939,9 @@ def daily_trade_sma(api, symbol):
     # Use SPY as S&P 500 proxy for SPXL trading decisions
     if symbol == "SPXL":
         # Get all SPY market data at once (efficient single fetch/read)
-        spy_data = get_all_market_data("SPY")
+        spy_data = get_all_market_data("SPY", env=env)
         if spy_data is None:
-            spy_data = update_market_data("SPY")
+            spy_data = update_market_data("SPY", env=env)
         
         sma_200 = spy_data["sma200"]
         latest_price = spy_data["price"]
@@ -4340,13 +4382,14 @@ def get_index_data(index_symbol):
             raise
 
 
-def get_index_sma_state(index_symbol, sma_period):
+def get_index_sma_state(index_symbol, sma_period, env="live"):
     """
     Load the previous SMA state for an index from Firestore.
     
     Args:
         index_symbol: Market symbol (e.g., "^GSPC")
         sma_period: SMA period (e.g., 200, 255)
+        env: Environment ("live" or "paper") - determines Firestore collection
     
     Returns:
         dict with keys: state, timestamp
@@ -4356,7 +4399,7 @@ def get_index_sma_state(index_symbol, sma_period):
         # Normalize symbol for Firestore document ID
         doc_id = index_symbol.replace("^", "").replace(".", "_")
         
-        doc_ref = get_firestore_client().collection("market-data").document(doc_id)
+        doc_ref = get_firestore_client().collection(f"market-data-{env}").document(doc_id)
         doc = doc_ref.get()
         
         if not doc.exists:
@@ -4381,7 +4424,7 @@ def get_index_sma_state(index_symbol, sma_period):
         return None
 
 
-def save_index_sma_state(index_symbol, sma_period, state, price, sma_value):
+def save_index_sma_state(index_symbol, sma_period, state, price, sma_value, env="live"):
     """
     Save the current SMA state for an index to Firestore.
     Note: update_market_data() now handles price/SMA/state updates automatically.
@@ -4393,12 +4436,13 @@ def save_index_sma_state(index_symbol, sma_period, state, price, sma_value):
         state: Current state ("above", "below", or "neutral")
         price: Current price (ignored - preserved from update_market_data)
         sma_value: Current SMA value (ignored - preserved from update_market_data)
+        env: Environment ("live" or "paper") - determines Firestore collection
     """
     try:
         # Normalize symbol for Firestore document ID
         doc_id = index_symbol.replace("^", "").replace(".", "_")
         
-        doc_ref = get_firestore_client().collection("market-data").document(doc_id)
+        doc_ref = get_firestore_client().collection(f"market-data-{env}").document(doc_id)
         
         # Get existing data
         doc = doc_ref.get()
@@ -4461,13 +4505,14 @@ def is_last_trading_hour():
         return False
 
 
-def was_last_hour_alert_sent_today(index_symbol, sma_period):
+def was_last_hour_alert_sent_today(index_symbol, sma_period, env="live"):
     """
     Check if a last-hour confirmation alert was already sent today.
     
     Args:
         index_symbol: Market symbol
         sma_period: SMA period
+        env: Environment ("live" or "paper") - determines Firestore collection
     
     Returns:
         bool: True if alert was already sent today, False otherwise
@@ -4476,7 +4521,7 @@ def was_last_hour_alert_sent_today(index_symbol, sma_period):
         # Normalize symbol for Firestore document ID
         doc_id = index_symbol.replace("^", "").replace(".", "_")
         
-        doc_ref = get_firestore_client().collection("market-data").document(doc_id)
+        doc_ref = get_firestore_client().collection(f"market-data-{env}").document(doc_id)
         doc = doc_ref.get()
         
         if not doc.exists:
@@ -4507,7 +4552,7 @@ def was_last_hour_alert_sent_today(index_symbol, sma_period):
         return False
 
 
-def mark_last_hour_alert_sent(index_symbol, sma_period):
+def mark_last_hour_alert_sent(index_symbol, sma_period, env="live"):
     """
     Mark that a last-hour confirmation alert was sent today.
     Updates the unified market-data document with the alert date.
@@ -4515,12 +4560,13 @@ def mark_last_hour_alert_sent(index_symbol, sma_period):
     Args:
         index_symbol: Market symbol
         sma_period: SMA period
+        env: Environment ("live" or "paper") - determines Firestore collection
     """
     try:
         # Normalize symbol for Firestore document ID
         doc_id = index_symbol.replace("^", "").replace(".", "_")
         
-        doc_ref = get_firestore_client().collection("market-data").document(doc_id)
+        doc_ref = get_firestore_client().collection(f"market-data-{env}").document(doc_id)
         
         # Get existing data or create new
         doc = doc_ref.get()
@@ -4542,9 +4588,14 @@ def mark_last_hour_alert_sent(index_symbol, sma_period):
 
 
 
-def check_unified_index_alert(request):
-    """Unified index alert function that can handle multiple indices and alert types"""
+def check_unified_index_alert(request, env=None):
+    """
+    Unified index alert function that can handle multiple indices and alert types.
     
+    Args:
+        request: Flask request object
+        env: Environment ("live" or "paper") - if None, defaults to alpaca_environment or "live"
+    """
     # Handle case where Content-Type is not set to application/json (e.g., application/octet-stream)
     if request.content_type == "application/json":
         request_json = request.get_json(silent=True)
@@ -4566,6 +4617,10 @@ def check_unified_index_alert(request):
     sma_period = request_json.get("sma_period", 200)  # Default to 200-day SMA
     threshold_percent = request_json.get("threshold_percent", 30.0)  # For ATH drops
     noise_threshold = request_json.get("noise_threshold", 1.0)  # For SMA crossings
+    
+    # Determine environment: from parameter, request JSON, or default to alpaca_environment
+    if env is None:
+        env = request_json.get("env", alpaca_environment if 'alpaca_environment' in globals() else "live")
     
     if not index_symbol:
         return jsonify({"error": "Missing required parameter: index_symbol"}), 400
@@ -4590,9 +4645,9 @@ def check_unified_index_alert(request):
         elif alert_type == "sma_crossing":
             # Handle SMA crossing alerts with crossover detection
             # Get all market data at once for efficiency
-            market_data = get_all_market_data(index_symbol)
+            market_data = get_all_market_data(index_symbol, env=env)
             if market_data is None:
-                market_data = update_market_data(index_symbol)
+                market_data = update_market_data(index_symbol, env=env)
             
             current_price = market_data["price"]
             
@@ -4603,7 +4658,7 @@ def check_unified_index_alert(request):
                 sma_value = market_data["sma200"]
             else:
                 # For any other period, calculate dynamically using Alpaca
-                api = set_alpaca_environment(env=alpaca_environment)
+                api = set_alpaca_environment(env=env)
                 
                 # Fetch enough data for custom SMA period (add 50% buffer)
                 days_needed = int(sma_period * 1.5 * 1.4)  # trading days to calendar days with buffer
@@ -4619,7 +4674,7 @@ def check_unified_index_alert(request):
             price_diff_percent = ((current_price - sma_value) / sma_value) * 100
             
             # Load previous state from Firestore
-            previous_state_data = get_index_sma_state(index_symbol, sma_period)
+            previous_state_data = get_index_sma_state(index_symbol, sma_period, env=env)
             previous_state = previous_state_data.get("state") if previous_state_data else None
             
             # Determine current state based on noise threshold
@@ -4632,7 +4687,7 @@ def check_unified_index_alert(request):
             
             # Check if we're in the last trading hour
             in_last_hour = is_last_trading_hour()
-            already_sent_last_hour = was_last_hour_alert_sent_today(index_symbol, sma_period)
+            already_sent_last_hour = was_last_hour_alert_sent_today(index_symbol, sma_period, env=env)
             
             # Initialize response variables
             message = None
@@ -4667,7 +4722,7 @@ def check_unified_index_alert(request):
                     send_telegram_message(message)
                     # If sent during last hour, mark it
                     if in_last_hour:
-                        mark_last_hour_alert_sent(index_symbol, sma_period)
+                        mark_last_hour_alert_sent(index_symbol, sma_period, env=env)
             
             # Check for last hour confirmation (only if no crossover alert was sent)
             elif in_last_hour and not already_sent_last_hour and current_state != "neutral":
@@ -4684,10 +4739,10 @@ def check_unified_index_alert(request):
                 # Send the last hour confirmation
                 if message:
                     send_telegram_message(message)
-                    mark_last_hour_alert_sent(index_symbol, sma_period)
+                    mark_last_hour_alert_sent(index_symbol, sma_period, env=env)
             
             # Save current state to Firestore (always update)
-            save_index_sma_state(index_symbol, sma_period, current_state, current_price, sma_value)
+            save_index_sma_state(index_symbol, sma_period, current_state, current_price, sma_value, env=env)
             
             # Return appropriate response
             if alert_sent:
@@ -5030,7 +5085,7 @@ def monthly_dual_momentum_strategy(api, force_execute=False, investment_calc=Non
     
     # If not provided by orchestrator, calculate independently
     if margin_result is None:
-        margin_result = check_margin_conditions(api)
+        margin_result = check_margin_conditions(api, env=env)
     
     if investment_calc is None:
         investment_calc = calculate_monthly_investments(api, margin_result, env)
@@ -5247,7 +5302,7 @@ def monthly_sector_momentum_strategy(api, force_execute=False, investment_calc=N
     
     # If not provided by orchestrator, calculate independently
     if margin_result is None:
-        margin_result = check_margin_conditions(api)
+        margin_result = check_margin_conditions(api, env=env)
     
     if investment_calc is None:
         investment_calc = calculate_monthly_investments(api, margin_result, env)
@@ -5277,9 +5332,9 @@ def monthly_sector_momentum_strategy(api, force_execute=False, investment_calc=N
     print("Checking SPY 200-SMA trend filter...")
     try:
         # Get all SPY market data at once (efficient single fetch/read)
-        spy_data = get_all_market_data("SPY")
+        spy_data = get_all_market_data("SPY", env=env)
         if spy_data is None:
-            spy_data = update_market_data("SPY")
+            spy_data = update_market_data("SPY", env=env)
         
         spy_price = spy_data["price"]
         spy_sma = spy_data["sma200"]
@@ -5786,7 +5841,7 @@ def monthly_invest_all_strategies(api, force_execute=False, skip_order_wait=Fals
     # Step 2: Calculate margin conditions and investment amounts ONCE
     print("\nStep 2: Calculating budgets for all strategies...")
     
-    margin_result = check_margin_conditions(api)
+    margin_result = check_margin_conditions(api, env=env)
     investment_calc = calculate_monthly_investments(api, margin_result, env)
     
     print(f"Total investing power: ${investment_calc['total_investing']:.2f}")
@@ -5865,7 +5920,7 @@ def monthly_invest_rssb_sector_momentum_custom(api, total_budget=300.0, force_ex
     
     # Step 2: Get margin conditions (needed for strategy functions)
     print("\nStep 2: Getting margin conditions...")
-    margin_result = check_margin_conditions(api)
+    margin_result = check_margin_conditions(api, env=env)
     
     # Step 3: Create custom investment_calc dict with only our two strategies
     # The functions expect this structure but we'll override the amounts
@@ -5933,7 +5988,7 @@ def monthly_buy_hfea(request):
     api = set_alpaca_environment(
         env=alpaca_environment
     )  # or 'paper' based on your needs
-    return make_monthly_buys(api)
+    return make_monthly_buys(api, env=alpaca_environment)
 
 
 @app.route("/rebalance_hfea", methods=["POST"])
@@ -5947,7 +6002,7 @@ def rebalance_hfea(request):
 @app.route("/monthly_buy_golden_hfea_lite", methods=["POST"])
 def monthly_buy_golden_hfea_lite(request):
     api = set_alpaca_environment(env=alpaca_environment)
-    return make_monthly_buys_golden_hfea_lite(api)
+    return make_monthly_buys_golden_hfea_lite(api, env=alpaca_environment)
 
 
 @app.route("/rebalance_golden_hfea_lite", methods=["POST"])
@@ -5959,7 +6014,7 @@ def rebalance_golden_hfea_lite(request):
 @app.route("/monthly_buy_rssb_wtip", methods=["POST"])
 def monthly_buy_rssb_wtip(request):
     api = set_alpaca_environment(env=alpaca_environment)
-    return make_monthly_buys_rssb_wtip(api)
+    return make_monthly_buys_rssb_wtip(api, env=alpaca_environment)
 
 
 @app.route("/rebalance_rssb_wtip", methods=["POST"])
@@ -5971,13 +6026,13 @@ def rebalance_rssb_wtip(request):
 @app.route("/monthly_nine_sig_contributions", methods=["POST"])
 def monthly_nine_sig_contributions(request):
     api = set_alpaca_environment(env=alpaca_environment)
-    return make_monthly_nine_sig_contributions(api)
+    return make_monthly_nine_sig_contributions(api, env=alpaca_environment)
 
 
 @app.route("/quarterly_nine_sig_signal", methods=["POST"])
 def quarterly_nine_sig_signal(request):
     api = set_alpaca_environment(env=alpaca_environment)
-    return execute_quarterly_nine_sig_signal(api)
+    return execute_quarterly_nine_sig_signal(api, env=alpaca_environment)
 
 
 @app.route("/monthly_buy_spxl", methods=["POST"])
@@ -5985,7 +6040,7 @@ def monthly_buy_spxl(request):
     api = set_alpaca_environment(
         env=alpaca_environment
     )  # or 'paper' based on your needs
-    result = monthly_buying_sma(api, "SPXL")
+    result = monthly_buying_sma(api, "SPXL", env=alpaca_environment)
     print(result)
     return result, 200
 
@@ -5995,7 +6050,7 @@ def daily_trade_spxl_200sma(request):
     api = set_alpaca_environment(
         env=alpaca_environment
     )  # or 'paper' based on your needs
-    result = daily_trade_sma(api, "SPXL")
+    result = daily_trade_sma(api, "SPXL", env=alpaca_environment)
     print(result)
     return result, 200
 
@@ -6008,7 +6063,7 @@ def monthly_dual_momentum(request):
     """
     try:
         api = set_alpaca_environment(env=alpaca_environment)
-        result = monthly_dual_momentum_strategy(api)
+        result = monthly_dual_momentum_strategy(api, env=alpaca_environment)
         return jsonify({"result": result}), 200
     except Exception as e:
         error_message = f"Dual Momentum Strategy error: {str(e)}"
@@ -6025,7 +6080,7 @@ def monthly_sector_momentum(request):
     """
     try:
         api = set_alpaca_environment(env=alpaca_environment)
-        result = monthly_sector_momentum_strategy(api)
+        result = monthly_sector_momentum_strategy(api, env=alpaca_environment)
         return jsonify({"result": result}), 200
     except Exception as e:
         error_message = f"Sector Momentum Strategy error: {str(e)}"
@@ -6036,7 +6091,7 @@ def monthly_sector_momentum(request):
 
 @app.route("/index_alert", methods=["POST"])
 def index_alert(request):
-    return check_unified_index_alert(request)
+    return check_unified_index_alert(request, env=alpaca_environment)
 
 
 # @app.route('/monthly_buy_tqqq', methods=['POST'])
@@ -6068,17 +6123,17 @@ def run_local(action, env="paper", request="test", force_execute=False):
     elif action == "rebalance_golden_hfea_lite":
         return rebalance_golden_hfea_lite_portfolio(api)
     elif action == "monthly_nine_sig_contributions":
-        return make_monthly_nine_sig_contributions(api, force_execute=force_execute)
+        return make_monthly_nine_sig_contributions(api, force_execute=force_execute, env=env)
     elif action == "quarterly_nine_sig_signal":
-        return execute_quarterly_nine_sig_signal(api, force_execute=force_execute)
+        return execute_quarterly_nine_sig_signal(api, force_execute=force_execute, env=env)
     elif action == "monthly_buy_spxl":
-        return monthly_buying_sma(api, "SPXL", force_execute=force_execute)
+        return monthly_buying_sma(api, "SPXL", force_execute=force_execute, env=env)
     elif action == "sell_spxl_below_200sma":
-        return daily_trade_sma(api, "SPXL")
+        return daily_trade_sma(api, "SPXL", env=env)
     elif action == "buy_spxl_above_200sma":
-        return daily_trade_sma(api, "SPXL")
+        return daily_trade_sma(api, "SPXL", env=env)
     elif action == "index_alert":
-        return check_unified_index_alert(request)
+        return check_unified_index_alert(request, env=env)
     elif action == "monthly_dual_momentum":
         return monthly_dual_momentum_strategy(api, force_execute=force_execute, skip_order_wait=True, env=env)
     elif action == "monthly_sector_momentum":
