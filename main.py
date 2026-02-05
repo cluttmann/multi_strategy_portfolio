@@ -1787,9 +1787,13 @@ def make_monthly_buys_rssb_wtip(api, force_execute=False, investment_calc=None, 
         remaining_funds = available_new_funds - funds_used
         max_we_can_buy = min(value_delta, remaining_funds)
         
-        if max_we_can_buy >= price:  # Can buy at least 1 share (or fractional for RSSB)
+        # For fractionable assets (RSSB), we can buy with any amount > 0
+        # For non-fractionable assets (WTIP), we need at least 1 share worth
+        can_buy = (is_fractionable and max_we_can_buy > 0.01) or (not is_fractionable and max_we_can_buy >= price)
+        
+        if can_buy:
             if is_fractionable:
-                # RSSB supports fractional shares
+                # RSSB supports fractional shares - buy with all available funds
                 shares_to_buy = max_we_can_buy / price
                 actual_cost = shares_to_buy * price
             else:
@@ -1809,7 +1813,8 @@ def make_monthly_buys_rssb_wtip(api, force_execute=False, investment_calc=None, 
                     if not skip_order_wait:
                         wait_for_order_fill(api, buy_order["id"])
                     
-                    print(f"Bought {shares_to_buy:.4f if is_fractionable else shares_to_buy:.0f} shares of {symbol} (${actual_cost:.2f})")
+                    shares_display = f"{shares_to_buy:.4f}" if is_fractionable else f"{shares_to_buy:.0f}"
+                    print(f"Bought {shares_display} shares of {symbol} (${actual_cost:.2f})")
                     actual_purchases[symbol] = actual_cost
                     funds_used += actual_cost
                     
@@ -1824,6 +1829,7 @@ def make_monthly_buys_rssb_wtip(api, force_execute=False, investment_calc=None, 
                     return error_msg
     
     # Step 2: Only sell if still overweight after using all new funds
+    # TAX-EFFICIENT: Only sell if deviation is significant (>5% of target) to minimize taxable events
     # Recalculate current values after purchases
     rssb_value_after = rssb_value + (rssb_shares_to_buy * rssb_price if rssb_shares_to_buy > 0 else 0)
     wtip_value_after = wtip_value + (wtip_shares_to_buy * wtip_price if wtip_shares_to_buy > 0 else 0)
@@ -1832,37 +1838,157 @@ def make_monthly_buys_rssb_wtip(api, force_execute=False, investment_calc=None, 
     rssb_value_delta_after = target_rssb_value_new - rssb_value_after
     wtip_value_delta_after = target_wtip_value_new - wtip_value_after
     
-    # Only sell if still overweight
-    if rssb_value_delta_after < -0.01:  # Still overweight
-        shares_to_sell = abs(rssb_value_delta_after) / rssb_price
-        if shares_to_sell > 0.0001:  # Meaningful amount
-            try:
-                sell_order = submit_order(api, "RSSB", shares_to_sell, "sell")
-                if not skip_order_wait:
-                    wait_for_order_fill(api, sell_order["id"])
-                rssb_shares_to_sell = shares_to_sell
-                print(f"Sold {shares_to_sell:.4f} shares of RSSB (${abs(rssb_value_delta_after):.2f}) to rebalance")
-            except Exception as e:
-                error_msg = f"RSSB/WTIP: Failed to sell RSSB: {str(e)}"
-                print(error_msg)
-                send_telegram_message(error_msg)
-                # Continue - sell failure shouldn't stop the strategy
+    # Calculate percentage deviations from target (for tax-efficient threshold)
+    rssb_overweight_pct = abs(rssb_value_delta_after) / target_rssb_value_new if target_rssb_value_new > 0 else 0
+    wtip_overweight_pct = abs(wtip_value_delta_after) / target_wtip_value_new if target_wtip_value_new > 0 else 0
     
-    if wtip_value_delta_after < -0.01:  # Still overweight
-        shares_to_sell = round(abs(wtip_value_delta_after) / wtip_price)
-        whole_shares_to_sell = int(shares_to_sell)  # Round down
-        if whole_shares_to_sell > 0:
-            try:
-                sell_order = submit_order(api, "WTIP", whole_shares_to_sell, "sell")
-                if not skip_order_wait:
-                    wait_for_order_fill(api, sell_order["id"])
-                wtip_shares_to_sell = whole_shares_to_sell
-                print(f"Sold {whole_shares_to_sell:.0f} shares of WTIP (${whole_shares_to_sell * wtip_price:.2f}) to rebalance")
-            except Exception as e:
-                error_msg = f"RSSB/WTIP: Failed to sell WTIP: {str(e)}"
-                print(error_msg)
-                send_telegram_message(error_msg)
-                # Continue - sell failure shouldn't stop the strategy
+    # Tax-efficient threshold: Only sell if overweight by >5% of target allocation
+    # This minimizes taxable events while still maintaining reasonable allocation
+    sell_threshold_pct = 0.05  # 5% threshold
+    
+    # Determine which positions need selling (only if significantly overweight)
+    positions_to_sell = []
+    if rssb_value_delta_after < -0.01 and rssb_overweight_pct > sell_threshold_pct:
+        # RSSB is overweight by more than threshold
+        positions_to_sell.append(("RSSB", abs(rssb_value_delta_after), rssb_price, True, rssb_overweight_pct))
+    
+    if wtip_value_delta_after < -0.01 and wtip_overweight_pct > sell_threshold_pct:
+        # WTIP is overweight by more than threshold
+        positions_to_sell.append(("WTIP", abs(wtip_value_delta_after), wtip_price, False, wtip_overweight_pct))
+    
+    # Sort by overweight percentage (most overweight first) - sell the worst offender
+    positions_to_sell.sort(key=lambda x: x[4], reverse=True)
+    
+    # Only sell if we have significant deviation AND we can't fix it through buying alone
+    # Strategy: Sell only the minimum needed to get closer to target, not necessarily all the way
+    for symbol, overweight_amount, price, is_fractionable, overweight_pct in positions_to_sell:
+        # Calculate how much we need to sell to get within threshold
+        # We don't need to sell all the way to target - just enough to get within acceptable range
+        target_after_sell = target_rssb_value_new if symbol == "RSSB" else target_wtip_value_new
+        current_after_buy = rssb_value_after if symbol == "RSSB" else wtip_value_after
+        
+        # Calculate maximum acceptable value (target + threshold)
+        max_acceptable_value = target_after_sell * (1 + sell_threshold_pct)
+        excess_value = current_after_buy - max_acceptable_value
+        
+        # Only sell if we're still significantly over the acceptable range
+        if excess_value > 0.01:
+            if is_fractionable:
+                # RSSB: Sell the excess amount (fractional shares allowed)
+                shares_to_sell = excess_value / price
+                if shares_to_sell > 0.0001:  # Meaningful amount
+                    try:
+                        sell_order = submit_order(api, symbol, shares_to_sell, "sell")
+                        if not skip_order_wait:
+                            wait_for_order_fill(api, sell_order["id"])
+                        rssb_shares_to_sell = shares_to_sell
+                        print(f"Sold {shares_to_sell:.4f} shares of {symbol} (${excess_value:.2f}) to reduce overweight from {overweight_pct:.1%} to within {sell_threshold_pct:.1%} threshold")
+                    except Exception as e:
+                        error_msg = f"RSSB/WTIP: Failed to sell {symbol}: {str(e)}"
+                        print(error_msg)
+                        send_telegram_message(error_msg)
+                        # Continue - sell failure shouldn't stop the strategy
+            else:
+                # WTIP: Round to whole shares, but only sell minimum needed
+                shares_to_sell = round(excess_value / price)
+                whole_shares_to_sell = int(shares_to_sell)  # Round down to be conservative
+                if whole_shares_to_sell > 0:
+                    try:
+                        sell_order = submit_order(api, symbol, whole_shares_to_sell, "sell")
+                        if not skip_order_wait:
+                            wait_for_order_fill(api, sell_order["id"])
+                        wtip_shares_to_sell = whole_shares_to_sell
+                        actual_sold_value = whole_shares_to_sell * price
+                        print(f"Sold {whole_shares_to_sell:.0f} shares of {symbol} (${actual_sold_value:.2f}) to reduce overweight from {overweight_pct:.1%} to within {sell_threshold_pct:.1%} threshold")
+                    except Exception as e:
+                        error_msg = f"RSSB/WTIP: Failed to sell {symbol}: {str(e)}"
+                        print(error_msg)
+                        send_telegram_message(error_msg)
+                        # Continue - sell failure shouldn't stop the strategy
+        else:
+            # Within acceptable range after buys - no need to sell
+            print(f"{symbol}: Overweight {overweight_pct:.1%} but within acceptable threshold ({sell_threshold_pct:.1%}) - skipping sell to minimize taxable event")
+    
+    # Step 2.5: Use proceeds from sales to buy underweight positions
+    # Recalculate values after all sells to see what we still need
+    rssb_value_after_all = rssb_value + (rssb_shares_to_buy * rssb_price if rssb_shares_to_buy > 0 else 0) - (rssb_shares_to_sell * rssb_price if rssb_shares_to_sell > 0 else 0)
+    wtip_value_after_all = wtip_value + (wtip_shares_to_buy * wtip_price if wtip_shares_to_buy > 0 else 0) - (wtip_shares_to_sell * wtip_price if wtip_shares_to_sell > 0 else 0)
+    
+    # Calculate proceeds from sales
+    sale_proceeds = 0
+    if rssb_shares_to_sell > 0:
+        sale_proceeds += rssb_shares_to_sell * rssb_price
+    if wtip_shares_to_sell > 0:
+        sale_proceeds += wtip_shares_to_sell * wtip_price
+    
+    # Use sale proceeds to buy underweight positions
+    if sale_proceeds > 0:
+        # Recalculate what we still need after all buys and sells
+        rssb_value_delta_final = target_rssb_value_new - rssb_value_after_all
+        wtip_value_delta_final = target_wtip_value_new - wtip_value_after_all
+        
+        # Priority: Buy the more underweight position first
+        positions_to_buy_with_proceeds = []
+        if rssb_value_delta_final > 0.01:
+            positions_to_buy_with_proceeds.append(("RSSB", rssb_value_delta_final, rssb_price, True))  # True = fractionable
+        if wtip_value_delta_final > 0.01:
+            positions_to_buy_with_proceeds.append(("WTIP", wtip_value_delta_final, wtip_price, False))  # False = non-fractionable
+        
+        # Sort by underweight amount (largest first)
+        positions_to_buy_with_proceeds.sort(key=lambda x: x[1], reverse=True)
+        
+        proceeds_used = 0
+        for symbol, value_delta, price, is_fractionable in positions_to_buy_with_proceeds:
+            if proceeds_used >= sale_proceeds:
+                break  # No more proceeds available
+                
+            remaining_proceeds = sale_proceeds - proceeds_used
+            max_we_can_buy = min(value_delta, remaining_proceeds)
+            
+            # For fractionable assets (RSSB), we can buy with any amount > 0
+            # For non-fractionable assets (WTIP), we need at least 1 share worth
+            can_buy = (is_fractionable and max_we_can_buy > 0.01) or (not is_fractionable and max_we_can_buy >= price)
+            
+            if can_buy:
+                if is_fractionable:
+                    # RSSB supports fractional shares - buy with all available proceeds
+                    shares_to_buy = max_we_can_buy / price
+                    actual_cost = shares_to_buy * price
+                else:
+                    # WTIP doesn't support fractional - round to whole shares
+                    shares_to_buy = round(max_we_can_buy / price)
+                    if shares_to_buy >= 1:
+                        actual_cost = shares_to_buy * price
+                    else:
+                        # Can't buy even 1 share - will go to BIL later
+                        continue
+                
+                if shares_to_buy > 0:
+                    try:
+                        buy_order = submit_order(api, symbol, shares_to_buy, "buy")
+                        if not skip_order_wait:
+                            wait_for_order_fill(api, buy_order["id"])
+                        
+                        shares_display = f"{shares_to_buy:.4f}" if is_fractionable else f"{shares_to_buy:.0f}"
+                        print(f"Bought {shares_display} shares of {symbol} (${actual_cost:.2f}) using sale proceeds")
+                        actual_purchases[symbol] = actual_purchases.get(symbol, 0) + actual_cost
+                        proceeds_used += actual_cost
+                        
+                        if symbol == "RSSB":
+                            rssb_shares_to_buy += shares_to_buy
+                        else:
+                            wtip_shares_to_buy += shares_to_buy
+                    except Exception as e:
+                        error_msg = f"RSSB/WTIP: Failed to buy {symbol} with sale proceeds: {str(e)}"
+                        print(error_msg)
+                        send_telegram_message(error_msg)
+                        # Continue - buy failure shouldn't stop the strategy
+        
+        # Any remaining proceeds after buying should go to BIL
+        remaining_proceeds_after_buys = sale_proceeds - proceeds_used
+        if remaining_proceeds_after_buys > 0.01:
+            # This will be handled in Step 4 (uninvested amounts)
+            uninvested_wtip_amount += remaining_proceeds_after_buys
     
     # Step 3: Sell BIL to fund purchases (BIL was included in total_to_allocate)
     bil_shares_to_sell = 0
@@ -4157,11 +4283,25 @@ def daily_trade_sma(api, symbol, env="live"):
 
 # Function to send a message via Telegram
 def send_telegram_message(message):
-    telegram_key, chat_id = get_telegram_secrets()
-    url = f"https://api.telegram.org/bot{telegram_key}/sendMessage"
-    data = {"chat_id": chat_id, "text": message}
-    response = requests.post(url, data=data)
-    return response.status_code
+    """
+    Send a message to Telegram. Handles network errors gracefully.
+    
+    Args:
+        message: Message text to send
+    
+    Returns:
+        HTTP status code if successful, None if failed
+    """
+    try:
+        telegram_key, chat_id = get_telegram_secrets()
+        url = f"https://api.telegram.org/bot{telegram_key}/sendMessage"
+        data = {"chat_id": chat_id, "text": message}
+        response = requests.post(url, data=data, timeout=10)
+        return response.status_code
+    except Exception as e:
+        # Log error but don't crash - network issues shouldn't stop execution
+        print(f"Warning: Failed to send Telegram message: {str(e)}")
+        return None
 
 
 def send_margin_summary_message(margin_result, strategy_name, action_taken, investment_calc=None):
@@ -5972,6 +6112,77 @@ def monthly_invest_rssb_sector_momentum_custom(api, total_budget=300.0, force_ex
     return results
 
 
+def test_monthly_buy_rssb_wtip(api, investment_amount=10.0, force_execute=True, skip_order_wait=False, env="live"):
+    """
+    Test function to run RSSB/WTIP monthly buy with a custom investment amount.
+    Useful for testing the strategy with small amounts (e.g., $10).
+    
+    Args:
+        api: Alpaca API credentials
+        investment_amount: Investment amount in dollars (default: $10.0)
+        force_execute: Bypass trading day check (default: True for testing)
+        skip_order_wait: Skip waiting for order fills (default: False)
+        env: Environment ("live" or "paper")
+    
+    Returns:
+        Result from make_monthly_buys_rssb_wtip function
+    """
+    print("=== Testing RSSB/WTIP Monthly Buy ===")
+    print(f"Investment amount: ${investment_amount:.2f}")
+    
+    # Step 1: Sync cost basis from Alpaca to Firestore BEFORE executing trades
+    print("\nStep 1: Syncing cost basis from Alpaca to Firestore...")
+    cost_basis_result = recalculate_all_strategies_cost_basis(api, env, silent=True)
+    if cost_basis_result.get("success"):
+        if cost_basis_result.get("total_difference", 0) != 0:
+            print(f"✅ Cost basis synced: ${cost_basis_result['total_difference']:.2f} correction applied")
+        else:
+            print("✅ Cost basis already in sync")
+    else:
+        print(f"⚠️  Warning: Cost basis sync had issues: {cost_basis_result.get('error', 'Unknown error')}")
+    
+    # Step 2: Get margin conditions (needed for strategy function)
+    print("\nStep 2: Getting margin conditions...")
+    margin_result = check_margin_conditions(api, env=env)
+    
+    # Step 3: Create custom investment_calc dict with only RSSB/WTIP strategy
+    # The function expects this structure but we'll override the amount
+    investment_calc = {
+        "total_cash": investment_amount,
+        "total_reserved": 0,
+        "total_available": investment_amount,
+        "margin_approved": 0,
+        "used_margin": 0,
+        "total_investing": investment_amount,
+        "strategy_amounts": {
+            "rssb_wtip_allo": investment_amount,
+            # Set other strategies to 0 (they won't be called anyway)
+            "hfea_allo": 0,
+            "golden_hfea_lite_allo": 0,
+            "spxl_allo": 0,
+            "nine_sig_allo": 0,
+            "dual_momentum_allo": 0,
+            "sector_momentum_allo": 0,
+        },
+        "reserved_amounts": {}
+    }
+    
+    # Step 4: Run RSSB/WTIP strategy with custom investment amount
+    print("\n=== Executing RSSB/WTIP Monthly Buy ===")
+    result = make_monthly_buys_rssb_wtip(
+        api, 
+        force_execute=force_execute, 
+        investment_calc=investment_calc, 
+        margin_result=margin_result, 
+        skip_order_wait=skip_order_wait, 
+        env=env
+    )
+    
+    print("\n=== RSSB/WTIP Test Complete ===")
+    
+    return result
+
+
 @app.route("/monthly_invest_all", methods=["POST"])
 def monthly_invest_all(request):
     """
@@ -6110,7 +6321,7 @@ def index_alert(request):
 #     return buy_tqqq_if_above_200sma(api)
 
 
-def run_local(action, env="paper", request="test", force_execute=False):
+def run_local(action, env="paper", request="test", force_execute=False, investment_amount=None):
     api = set_alpaca_environment(env=env, use_secret_manager=False)
     if action == "monthly_invest_all":
         return monthly_invest_all_strategies(api, force_execute=force_execute, skip_order_wait=True, env=env)
@@ -6141,6 +6352,10 @@ def run_local(action, env="paper", request="test", force_execute=False):
     elif action == "monthly_invest_rssb_sector_custom":
         # Special occasion: RSSB/WTIP + Sector Momentum with $300 budget
         return monthly_invest_rssb_sector_momentum_custom(api, total_budget=300.0, force_execute=True, skip_order_wait=True, env=env)
+    elif action == "test_monthly_buy_rssb_wtip":
+        # Test RSSB/WTIP monthly buy with custom investment amount (default: $10)
+        investment = investment_amount if investment_amount is not None else 10.0
+        return test_monthly_buy_rssb_wtip(api, investment_amount=investment, force_execute=True, skip_order_wait=True, env=env)
     else:
         return "No valid action provided."
 
@@ -6165,7 +6380,8 @@ if __name__ == "__main__":
             "index_alert",
             "monthly_dual_momentum",
             "monthly_sector_momentum",
-            "monthly_invest_rssb_sector_custom"
+            "monthly_invest_rssb_sector_custom",
+            "test_monthly_buy_rssb_wtip"
         ],
         required=True,
         help="Action to perform: 'monthly_invest_all' runs all five monthly strategies with coordinated budgets (recommended)",
@@ -6186,10 +6402,16 @@ if __name__ == "__main__":
         action="store_true",
         help="Force execution even if not on the correct trading day (for testing)",
     )
+    parser.add_argument(
+        "--investment_amount",
+        type=float,
+        default=None,
+        help="Investment amount for test_monthly_buy_rssb_wtip (default: $10.0)",
+    )
     args = parser.parse_args()
 
     # Run the function locally
-    result = run_local(action=args.action, env=args.env, force_execute=args.force)
+    result = run_local(action=args.action, env=args.env, force_execute=args.force, investment_amount=args.investment_amount)
     print(f"\nResult: {result}\n")
     # save_balance("SPXL_SMA", 100)
 
