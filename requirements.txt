@@ -6,3 +6,6 @@ requests
 pandas-market-calendars
 google-cloud-firestore
 pandas  # For SMA calculations from Alpaca data
+alpaca-py>=0.21.0         # Alpaca Trading API SDK (modern version)
+gspread>=5.12.0           # Google Sheets API
+oauth2client>=4.1.3       # Google auth (service account credentials)
