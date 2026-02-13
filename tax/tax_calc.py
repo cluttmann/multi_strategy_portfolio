@@ -13,7 +13,10 @@ Usage:
 from decimal import Decimal
 from collections import defaultdict
 
-from tax.config import get_tfs_rate, BASISZINS, get_isin, get_name
+from tax.config import (
+    get_tfs_rate, BASISZINS, get_isin, get_name,
+    ABGELTUNGSTEUER_RATE, SOLI_RATE, KIRCHENSTEUER_RATE, SPARERPAUSCHBETRAG,
+)
 from tax.ecb_rates import usd_to_eur
 from tax.fifo import RealizedTrade
 
@@ -293,6 +296,36 @@ def build_yearly_summary(
     for vp in vorabpauschale_items:
         total_vorabpauschale += Decimal(vp.get("vorabpauschale_after_tfs_eur", "0"))
 
+    # --- Estimated German Tax Liability ---
+    # Net taxable income = positive income + losses (losses are negative)
+    zeile_7 = (tfs_div_eur + total_gains_after_tfs + interest_eur + total_vorabpauschale)
+    zeile_12 = total_losses_after_tfs  # Negative
+
+    net_taxable = (zeile_7 + zeile_12).quantize(Decimal("0.01"))
+
+    # Apply Sparerpauschbetrag (€1,000 for singles)
+    sparerpauschbetrag_used = min(SPARERPAUSCHBETRAG, max(Decimal("0"), net_taxable))
+    taxable_after_freibetrag = max(Decimal("0"), net_taxable - sparerpauschbetrag_used)
+
+    # Abgeltungsteuer (25% flat tax)
+    abgeltungsteuer = (taxable_after_freibetrag * ABGELTUNGSTEUER_RATE).quantize(Decimal("0.01"))
+
+    # Solidaritätszuschlag (5.5% of Abgeltungsteuer)
+    soli = (abgeltungsteuer * SOLI_RATE).quantize(Decimal("0.01"))
+
+    # Kirchensteuer (0% if not church member, 9% in Berlin if member)
+    kirchensteuer = (abgeltungsteuer * KIRCHENSTEUER_RATE).quantize(Decimal("0.01"))
+
+    # Total German tax before foreign tax credit
+    total_german_tax = abgeltungsteuer + soli + kirchensteuer
+
+    # Foreign tax credit — capped at German tax on the foreign income
+    # (the Finanzamt credits up to what German tax would have been)
+    foreign_tax_credit = min(withholding_eur, abgeltungsteuer).quantize(Decimal("0.01"))
+
+    # Final tax due (what you actually owe the Finanzamt)
+    tax_due = max(Decimal("0"), total_german_tax - foreign_tax_credit).quantize(Decimal("0.01"))
+
     return {
         "tax_year": str(year),
         # Dividends
@@ -310,13 +343,20 @@ def build_yearly_summary(
         "foreign_tax_paid_eur": str(withholding_eur.quantize(Decimal("0.01"))),
         # Interest income
         "interest_income_eur": str(interest_eur.quantize(Decimal("0.01"))),
-        # WISO mapping notes
-        "wiso_anlage_kap_zeile_7": str(
-            (tfs_div_eur + total_gains_after_tfs + interest_eur + total_vorabpauschale)
-            .quantize(Decimal("0.01"))
-        ),
-        "wiso_anlage_kap_zeile_12": str(total_losses_after_tfs.quantize(Decimal("0.01"))),
+        # WISO mapping
+        "wiso_anlage_kap_zeile_7": str(zeile_7.quantize(Decimal("0.01"))),
+        "wiso_anlage_kap_zeile_12": str(zeile_12.quantize(Decimal("0.01"))),
         "wiso_anlage_kap_zeile_51": str(withholding_eur.quantize(Decimal("0.01"))),
+        # Estimated German tax liability
+        "net_taxable_income_eur": str(net_taxable),
+        "sparerpauschbetrag_used_eur": str(sparerpauschbetrag_used.quantize(Decimal("0.01"))),
+        "taxable_after_freibetrag_eur": str(taxable_after_freibetrag.quantize(Decimal("0.01"))),
+        "abgeltungsteuer_eur": str(abgeltungsteuer),
+        "solidaritaetszuschlag_eur": str(soli),
+        "kirchensteuer_eur": str(kirchensteuer),
+        "total_german_tax_eur": str(total_german_tax.quantize(Decimal("0.01"))),
+        "foreign_tax_credit_eur": str(foreign_tax_credit),
+        "tax_due_eur": str(tax_due),
     }
 
 

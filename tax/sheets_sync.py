@@ -62,6 +62,15 @@ TAX_SUMMARY_HEADERS = [
     "wiso_anlage_kap_zeile_7",
     "wiso_anlage_kap_zeile_12",
     "wiso_anlage_kap_zeile_51",
+    "net_taxable_income_eur",
+    "sparerpauschbetrag_used_eur",
+    "taxable_after_freibetrag_eur",
+    "abgeltungsteuer_eur",
+    "solidaritaetszuschlag_eur",
+    "kirchensteuer_eur",
+    "total_german_tax_eur",
+    "foreign_tax_credit_eur",
+    "tax_due_eur",
 ]
 
 # Headers for the Realized_Trades_FIFO tab (full FIFO audit trail)

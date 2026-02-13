@@ -268,6 +268,16 @@ BASISZINS = {
 US_WITHHOLDING_RATE = Decimal("0.15")   # 15% for US dividends under treaty
 
 # =============================================================================
+# German Tax Rates for Kapitalerträge (capital income)
+# =============================================================================
+ABGELTUNGSTEUER_RATE = Decimal("0.25")      # 25% flat tax on capital income
+SOLI_RATE = Decimal("0.055")                # 5.5% Solidaritätszuschlag on the Abgeltungsteuer
+# Kirchensteuer: 9% in Berlin (8% in Bayern/Baden-Württemberg)
+# Set to 0 if not a church member
+KIRCHENSTEUER_RATE = Decimal("0.00")        # Set to 0.09 for Berlin church members
+SPARERPAUSCHBETRAG = Decimal("0")            # Set to 0 — used at other brokers already
+
+# =============================================================================
 # Account Start Date (for initial full backfill)
 # =============================================================================
 ACCOUNT_START_DATE = "2024-01-01"
