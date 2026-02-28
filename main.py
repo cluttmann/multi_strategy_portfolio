@@ -16,12 +16,12 @@ app = Flask(__name__)
 # Strategy allocation percentages for dynamic monthly investment calculation
 # Investment amounts are calculated dynamically each month based on available cash and margin
 strategy_allocations = {
-    "hfea_allo": 0.1625,      # 16.25% to HFEA (reduced from 18.75%)
-    "golden_hfea_lite_allo": 0.1625,  # 16.25% to Golden HFEA Lite (reduced from 18.75%)
-    "spxl_allo": 0.325,       # 32.5% to SPXL SMA (reduced from 37.5%)
-    "rssb_wtip_allo": 0.10,  # 10% to RSSB/WTIP strategy
+    "hfea_allo": 0.175,      # 17.5% to HFEA (reduced from 18.75%)
+    "golden_hfea_lite_allo": 0.175,  # 17.5% to Golden HFEA Lite (reduced from 18.75%)
+    "spxl_allo": 0.175,       # 17.5% to SPXL SMA (reduced from 37.5%)
+    "rssb_wtip_allo": 0.175,  # 17.5% to RSSB/WTIP strategy
     "nine_sig_allo": 0.05,   # 5% to 9-Sig strategy
-    "dual_momentum_allo": 0.10,  # 10% to Dual Momentum strategy
+    "dual_momentum_allo": 0.15,  # 15% to Dual Momentum strategy
     "sector_momentum_allo": 0.10,  # 10% to Sector Momentum strategy
 }
 
@@ -94,6 +94,13 @@ margin_control_config = {
     "spread_above_35k": 0.01,       # +1.0% spread for accounts ≥$35k
     "portfolio_threshold": 35000,   # Threshold for spread calculation (in dollars)
     "min_investment": 1.00,         # Minimum investment amount (Alpaca requirement)
+}
+
+# Contribution rebalancing configuration
+# Tilts monthly contributions toward underweight strategies to bring portfolio back to target
+rebalance_config = {
+    "aggressiveness": 2.0,          # 0.0 = disabled (use fixed %), 1.0 = proportional tilt, 2.0+ = aggressive tilt
+    "max_single_strategy_pct": 0.50,  # Cap any single strategy at 50% of monthly contribution
 }
 
 # Sector Momentum Strategy configuration
@@ -897,11 +904,14 @@ def calculate_monthly_investments(api, margin_result, env="live"):
     1. Get total cash from account (can be negative if margin is already in use)
     2. Calculate available margin (equity × 10%), accounting for existing margin debt
     3. If cash is negative, subtract that amount from available margin capacity
-    4. Split total by strategy percentages
+    4. Split total by strategy percentages (with optional rebalancing tilt)
     
     Note: All strategies now use actual positions (no virtual cash in Firestore),
     so we don't need to subtract reserved amounts. Each strategy's equity is tracked
     via actual Alpaca positions.
+    
+    When rebalance_config["aggressiveness"] > 0, contributions are tilted toward
+    underweight strategies to bring the portfolio back toward target allocations.
     
     Args:
         api: Alpaca API credentials
@@ -916,7 +926,8 @@ def calculate_monthly_investments(api, margin_result, env="live"):
             "used_margin": float,          # Amount of margin already in use (0 if cash >= 0)
             "total_investing": float,      # Total available + margin
             "strategy_amounts": dict,      # Amount per strategy
-            "reserved_amounts": dict       # Always empty (no reserved cash anymore)
+            "reserved_amounts": dict,      # Always empty (no reserved cash anymore)
+            "rebalance_result": dict       # Rebalancing details (if enabled)
         }
     """
     # Step 1: Get total cash from account
@@ -954,11 +965,31 @@ def calculate_monthly_investments(api, margin_result, env="live"):
     
     total_investing = available_cash + margin_approved
     
-    # Step 4: Split by strategy percentages
-    strategy_amounts = {
-        key: total_investing * allocation 
-        for key, allocation in strategy_allocations.items()
-    }
+    # Step 4: Calculate allocations (with optional rebalancing tilt)
+    rebalance_result = None
+    
+    if rebalance_config["aggressiveness"] > 0:
+        # Calculate rebalanced allocations that tilt toward underweight strategies
+        rebalance_result = calculate_rebalanced_allocations(
+            api, 
+            aggressiveness=rebalance_config["aggressiveness"]
+        )
+        adjusted_allocations = rebalance_result["adjusted_allocations"]
+        
+        # Print the allocation dashboard showing current vs target vs adjusted
+        print_allocation_dashboard(rebalance_result, contribution_amount=total_investing)
+        
+        # Use adjusted allocations for strategy amounts
+        strategy_amounts = {
+            key: total_investing * adjusted_allocations[key]
+            for key in strategy_allocations.keys()
+        }
+    else:
+        # Use fixed strategy allocations (original behavior)
+        strategy_amounts = {
+            key: total_investing * allocation 
+            for key, allocation in strategy_allocations.items()
+        }
     
     return {
         "total_cash": total_cash,
@@ -968,7 +999,8 @@ def calculate_monthly_investments(api, margin_result, env="live"):
         "used_margin": used_margin,
         "total_investing": total_investing,
         "strategy_amounts": strategy_amounts,
-        "reserved_amounts": {}  # No reserved amounts anymore
+        "reserved_amounts": {},  # No reserved amounts anymore
+        "rebalance_result": rebalance_result  # Include rebalancing details for reference
     }
 
 
@@ -5199,6 +5231,399 @@ def get_sector_momentum_value(api):
         }
 
 
+def get_all_strategy_values(api):
+    """
+    Get current market value of all strategies from Alpaca positions.
+    Aggregates values from all strategy-specific functions into a single dict.
+    
+    This is used for contribution rebalancing to determine how far each strategy
+    is from its target allocation percentage.
+    
+    Args:
+        api: Alpaca API credentials
+    
+    Returns:
+        dict: {
+            "hfea": float,
+            "golden_hfea_lite": float,
+            "spxl_sma": float,
+            "rssb_wtip": float,
+            "nine_sig": float,
+            "dual_momentum": float,
+            "sector_momentum": float,
+            "total": float
+        }
+    """
+    try:
+        # Get all positions once to minimize API calls
+        positions = {p["symbol"]: float(p["market_value"]) for p in list_positions(api)}
+        
+        # HFEA: UPRO, TMF, KMLM
+        hfea_value = (
+            positions.get("UPRO", 0) +
+            positions.get("TMF", 0) +
+            positions.get("KMLM", 0)
+        )
+        
+        # Golden HFEA Lite: SSO, ZROZ, GLD
+        golden_hfea_lite_value = (
+            positions.get("SSO", 0) +
+            positions.get("ZROZ", 0) +
+            positions.get("GLD", 0)
+        )
+        
+        # SPXL SMA: SPXL, SGOV (holding fund)
+        spxl_sma_value = (
+            positions.get("SPXL", 0) +
+            positions.get(spxl_sma_holding_fund, 0)
+        )
+        
+        # RSSB/WTIP: RSSB, WTIP, BIL (holding fund)
+        rssb_wtip_value = (
+            positions.get("RSSB", 0) +
+            positions.get("WTIP", 0) +
+            positions.get(rssb_wtip_holding_fund, 0)
+        )
+        
+        # 9-Sig: TQQQ, AGG
+        nine_sig_value = (
+            positions.get("TQQQ", 0) +
+            positions.get("AGG", 0)
+        )
+        
+        # Dual Momentum: SPUU, EFO, BND
+        dual_momentum_value = (
+            positions.get("SPUU", 0) +
+            positions.get("EFO", 0) +
+            positions.get("BND", 0)
+        )
+        
+        # Sector Momentum: All sector ETFs + holding funds
+        sector_momentum_symbols = sector_momentum_config["sector_etfs"] + ["SCHZ", "SHV"]
+        sector_momentum_value = sum(
+            positions.get(symbol, 0) for symbol in sector_momentum_symbols
+        )
+        
+        total_value = (
+            hfea_value +
+            golden_hfea_lite_value +
+            spxl_sma_value +
+            rssb_wtip_value +
+            nine_sig_value +
+            dual_momentum_value +
+            sector_momentum_value
+        )
+        
+        return {
+            "hfea": hfea_value,
+            "golden_hfea_lite": golden_hfea_lite_value,
+            "spxl_sma": spxl_sma_value,
+            "rssb_wtip": rssb_wtip_value,
+            "nine_sig": nine_sig_value,
+            "dual_momentum": dual_momentum_value,
+            "sector_momentum": sector_momentum_value,
+            "total": total_value
+        }
+        
+    except Exception as e:
+        print(f"Error getting all strategy values: {e}")
+        return {
+            "hfea": 0,
+            "golden_hfea_lite": 0,
+            "spxl_sma": 0,
+            "rssb_wtip": 0,
+            "nine_sig": 0,
+            "dual_momentum": 0,
+            "sector_momentum": 0,
+            "total": 0
+        }
+
+
+def calculate_rebalanced_allocations(api, aggressiveness=None):
+    """
+    Calculate contribution allocations that tilt toward underweight strategies.
+    
+    The algorithm:
+    1. Get current portfolio value for each strategy
+    2. Calculate current % vs target % for each strategy
+    3. For underweight strategies, calculate how much they need to catch up
+    4. Apply aggressiveness multiplier to tilt contributions toward underweight
+    5. Normalize and apply max_single_strategy_pct cap
+    
+    Args:
+        api: Alpaca API credentials
+        aggressiveness: Override for rebalance_config["aggressiveness"]
+                       0.0 = disabled (use fixed %), 1.0 = proportional tilt, 2.0+ = aggressive
+    
+    Returns:
+        dict: {
+            "current_values": {strategy: value},
+            "current_percentages": {strategy: pct},
+            "target_percentages": {strategy: pct},
+            "deviations": {strategy: current - target},
+            "adjusted_allocations": {strategy_allo_key: new_pct}
+        }
+    """
+    if aggressiveness is None:
+        aggressiveness = rebalance_config["aggressiveness"]
+    
+    max_single_pct = rebalance_config["max_single_strategy_pct"]
+    
+    # Map from strategy name to allocation key in strategy_allocations
+    strategy_to_allo_key = {
+        "hfea": "hfea_allo",
+        "golden_hfea_lite": "golden_hfea_lite_allo",
+        "spxl_sma": "spxl_allo",
+        "rssb_wtip": "rssb_wtip_allo",
+        "nine_sig": "nine_sig_allo",
+        "dual_momentum": "dual_momentum_allo",
+        "sector_momentum": "sector_momentum_allo"
+    }
+    
+    # Get target percentages from strategy_allocations
+    target_percentages = {
+        strategy: strategy_allocations[allo_key]
+        for strategy, allo_key in strategy_to_allo_key.items()
+    }
+    
+    # Get current values for all strategies
+    strategy_values = get_all_strategy_values(api)
+    total_value = strategy_values["total"]
+    
+    # Calculate current percentages
+    current_percentages = {}
+    for strategy in strategy_to_allo_key.keys():
+        if total_value > 0:
+            current_percentages[strategy] = strategy_values[strategy] / total_value
+        else:
+            current_percentages[strategy] = 0
+    
+    # Calculate deviations (negative = underweight, positive = overweight)
+    deviations = {
+        strategy: current_percentages[strategy] - target_percentages[strategy]
+        for strategy in strategy_to_allo_key.keys()
+    }
+    
+    # If aggressiveness is 0, just return fixed allocations
+    if aggressiveness == 0:
+        adjusted_allocations = {
+            allo_key: strategy_allocations[allo_key]
+            for allo_key in strategy_allocations.keys()
+        }
+        return {
+            "current_values": {s: strategy_values[s] for s in strategy_to_allo_key.keys()},
+            "current_percentages": current_percentages,
+            "target_percentages": target_percentages,
+            "deviations": deviations,
+            "adjusted_allocations": adjusted_allocations,
+            "total_portfolio_value": total_value
+        }
+    
+    # Calculate underweight amounts (only consider underweight strategies)
+    # Underweight = how much below target the strategy is
+    underweight_amounts = {}
+    for strategy in strategy_to_allo_key.keys():
+        if deviations[strategy] < 0:
+            # Strategy is underweight - needs more allocation
+            underweight_amounts[strategy] = abs(deviations[strategy])
+        else:
+            # Strategy is at or above target - gets baseline allocation only
+            underweight_amounts[strategy] = 0
+    
+    # Apply aggressiveness multiplier to underweight amounts
+    # Higher aggressiveness = more concentration in underweight strategies
+    weighted_underweight = {
+        strategy: (underweight_amounts[strategy] ** aggressiveness) if underweight_amounts[strategy] > 0 else 0
+        for strategy in strategy_to_allo_key.keys()
+    }
+    
+    # Calculate adjusted allocations
+    # Base allocation + proportional share of underweight adjustment
+    total_weighted_underweight = sum(weighted_underweight.values())
+    
+    adjusted_allocations_raw = {}
+    for strategy, allo_key in strategy_to_allo_key.items():
+        base_allocation = target_percentages[strategy]
+        
+        if total_weighted_underweight > 0 and weighted_underweight[strategy] > 0:
+            # Underweight strategies get extra allocation proportional to their underweight
+            # The more underweight, the more extra allocation they get
+            underweight_share = weighted_underweight[strategy] / total_weighted_underweight
+            
+            # Calculate how much to shift from overweight to underweight
+            # We shift proportionally based on how much each overweight strategy exceeds target
+            overweight_total = sum(max(0, dev) for dev in deviations.values())
+            
+            if overweight_total > 0:
+                # Reduce overweight strategies and add to underweight
+                extra_allocation = overweight_total * underweight_share * aggressiveness
+                adjusted_allocations_raw[allo_key] = base_allocation + extra_allocation
+            else:
+                # No overweight strategies, just use underweight-proportional allocation
+                adjusted_allocations_raw[allo_key] = underweight_share
+        elif total_weighted_underweight > 0:
+            # Overweight strategy - reduce allocation proportionally
+            overweight_amount = max(0, deviations[strategy])
+            overweight_total = sum(max(0, dev) for dev in deviations.values())
+            
+            if overweight_total > 0:
+                reduction = (overweight_amount / overweight_total) * overweight_total * aggressiveness
+                adjusted_allocations_raw[allo_key] = max(0, base_allocation - reduction)
+            else:
+                adjusted_allocations_raw[allo_key] = base_allocation
+        else:
+            # Portfolio is perfectly balanced, use target allocations
+            adjusted_allocations_raw[allo_key] = base_allocation
+    
+    # Normalize to ensure allocations sum to 1.0
+    total_raw = sum(adjusted_allocations_raw.values())
+    if total_raw > 0:
+        adjusted_allocations_normalized = {
+            key: val / total_raw
+            for key, val in adjusted_allocations_raw.items()
+        }
+    else:
+        # Fallback to target allocations
+        adjusted_allocations_normalized = {
+            allo_key: strategy_allocations[allo_key]
+            for allo_key in strategy_allocations.keys()
+        }
+    
+    # Apply max_single_strategy_pct cap and redistribute excess
+    adjusted_allocations = adjusted_allocations_normalized.copy()
+    iterations = 0
+    max_iterations = 10
+    
+    while iterations < max_iterations:
+        excess = 0
+        strategies_at_cap = []
+        strategies_below_cap = []
+        
+        for key, val in adjusted_allocations.items():
+            if val > max_single_pct:
+                excess += val - max_single_pct
+                adjusted_allocations[key] = max_single_pct
+                strategies_at_cap.append(key)
+            else:
+                strategies_below_cap.append(key)
+        
+        if excess == 0:
+            break
+        
+        # Redistribute excess to strategies below cap
+        if strategies_below_cap:
+            redistribution_per_strategy = excess / len(strategies_below_cap)
+            for key in strategies_below_cap:
+                adjusted_allocations[key] += redistribution_per_strategy
+        
+        iterations += 1
+    
+    # Final normalization to handle any floating point drift
+    total_final = sum(adjusted_allocations.values())
+    if abs(total_final - 1.0) > 0.001:
+        adjusted_allocations = {
+            key: val / total_final
+            for key, val in adjusted_allocations.items()
+        }
+    
+    return {
+        "current_values": {s: strategy_values[s] for s in strategy_to_allo_key.keys()},
+        "current_percentages": current_percentages,
+        "target_percentages": target_percentages,
+        "deviations": deviations,
+        "adjusted_allocations": adjusted_allocations,
+        "total_portfolio_value": total_value
+    }
+
+
+def print_allocation_dashboard(rebalance_result, contribution_amount=None):
+    """
+    Print a dashboard showing current vs target allocations before monthly investments.
+    
+    Displays:
+    - Current value and percentage for each strategy
+    - Target percentage
+    - Deviation from target
+    - Adjusted allocation for this month's contribution
+    - Dollar amounts if contribution_amount is provided
+    
+    Args:
+        rebalance_result: Output from calculate_rebalanced_allocations()
+        contribution_amount: Optional total contribution amount to show dollar allocations
+    """
+    # Strategy display names for prettier output
+    strategy_display_names = {
+        "hfea": "HFEA",
+        "golden_hfea_lite": "Golden HFEA Lite",
+        "spxl_sma": "SPXL SMA",
+        "rssb_wtip": "RSSB/WTIP",
+        "nine_sig": "9-Sig",
+        "dual_momentum": "Dual Momentum",
+        "sector_momentum": "Sector Momentum"
+    }
+    
+    current_values = rebalance_result["current_values"]
+    current_pcts = rebalance_result["current_percentages"]
+    target_pcts = rebalance_result["target_percentages"]
+    deviations = rebalance_result["deviations"]
+    adjusted_allos = rebalance_result["adjusted_allocations"]
+    total_value = rebalance_result["total_portfolio_value"]
+    
+    print("\n" + "=" * 80)
+    print("                    PORTFOLIO ALLOCATION DASHBOARD")
+    print("=" * 80)
+    
+    # Header row
+    if contribution_amount:
+        print(f"{'Strategy':<20} {'Value':>10} {'Current':>9} {'Target':>9} {'Dev':>8} {'Adj Allo':>9} {'$ Allo':>10}")
+        print("-" * 80)
+    else:
+        print(f"{'Strategy':<20} {'Value':>10} {'Current':>9} {'Target':>9} {'Dev':>8} {'Adj Allo':>9}")
+        print("-" * 75)
+    
+    # Sort strategies by deviation (most underweight first)
+    sorted_strategies = sorted(
+        strategy_display_names.keys(),
+        key=lambda s: deviations.get(s, 0)
+    )
+    
+    for strategy in sorted_strategies:
+        display_name = strategy_display_names[strategy]
+        value = current_values.get(strategy, 0)
+        current_pct = current_pcts.get(strategy, 0)
+        target_pct = target_pcts.get(strategy, 0)
+        deviation = deviations.get(strategy, 0)
+        
+        # Find the adjusted allocation for this strategy
+        allo_key = f"{strategy}_allo" if strategy != "spxl_sma" else "spxl_allo"
+        adjusted_pct = adjusted_allos.get(allo_key, target_pct)
+        
+        # Format deviation with sign
+        dev_str = f"{deviation:+.1%}"
+        
+        if contribution_amount:
+            dollar_allo = contribution_amount * adjusted_pct
+            print(f"{display_name:<20} ${value:>9,.0f} {current_pct:>8.1%} {target_pct:>8.1%} {dev_str:>8} {adjusted_pct:>8.1%} ${dollar_allo:>9,.0f}")
+        else:
+            print(f"{display_name:<20} ${value:>9,.0f} {current_pct:>8.1%} {target_pct:>8.1%} {dev_str:>8} {adjusted_pct:>8.1%}")
+    
+    # Footer
+    print("-" * (80 if contribution_amount else 75))
+    print(f"{'TOTAL':<20} ${total_value:>9,.0f}")
+    
+    if contribution_amount:
+        print(f"\nMonthly Contribution: ${contribution_amount:,.2f}")
+    
+    # Show aggressiveness setting
+    aggressiveness = rebalance_config["aggressiveness"]
+    if aggressiveness == 0:
+        print(f"Rebalancing: DISABLED (using fixed allocations)")
+    else:
+        print(f"Rebalancing: ENABLED (aggressiveness={aggressiveness})")
+    
+    print("=" * (80 if contribution_amount else 75) + "\n")
+
+
 def monthly_dual_momentum_strategy(api, force_execute=False, investment_calc=None, margin_result=None, skip_order_wait=False, env="live"):
     """
     Dual Momentum Strategy implementation with SPUU/EFO/BND.
@@ -5984,14 +6409,22 @@ def monthly_invest_all_strategies(api, force_execute=False, skip_order_wait=Fals
     margin_result = check_margin_conditions(api, env=env)
     investment_calc = calculate_monthly_investments(api, margin_result, env)
     
-    print(f"Total investing power: ${investment_calc['total_investing']:.2f}")
-    print(f"  HFEA (17.5%): ${investment_calc['strategy_amounts']['hfea_allo']:.2f}")
-    print(f"  Golden HFEA Lite (17.5%): ${investment_calc['strategy_amounts']['golden_hfea_lite_allo']:.2f}")
-    print(f"  SPXL (35%): ${investment_calc['strategy_amounts']['spxl_allo']:.2f}")
-    print(f"  RSSB/WTIP (5%): ${investment_calc['strategy_amounts']['rssb_wtip_allo']:.2f}")
-    print(f"  9-Sig (5%): ${investment_calc['strategy_amounts']['nine_sig_allo']:.2f}")
-    print(f"  Dual Momentum (10%): ${investment_calc['strategy_amounts']['dual_momentum_allo']:.2f}")
-    print(f"  Sector Momentum (10%): ${investment_calc['strategy_amounts']['sector_momentum_allo']:.2f}")
+    # Get actual allocation percentages (may differ from targets if rebalancing is enabled)
+    total_investing = investment_calc['total_investing']
+    strategy_amounts = investment_calc['strategy_amounts']
+    
+    # Calculate actual percentages being used
+    def get_pct(key):
+        return (strategy_amounts[key] / total_investing * 100) if total_investing > 0 else 0
+    
+    print(f"Total investing power: ${total_investing:.2f}")
+    print(f"  HFEA ({get_pct('hfea_allo'):.1f}%): ${strategy_amounts['hfea_allo']:.2f}")
+    print(f"  Golden HFEA Lite ({get_pct('golden_hfea_lite_allo'):.1f}%): ${strategy_amounts['golden_hfea_lite_allo']:.2f}")
+    print(f"  SPXL ({get_pct('spxl_allo'):.1f}%): ${strategy_amounts['spxl_allo']:.2f}")
+    print(f"  RSSB/WTIP ({get_pct('rssb_wtip_allo'):.1f}%): ${strategy_amounts['rssb_wtip_allo']:.2f}")
+    print(f"  9-Sig ({get_pct('nine_sig_allo'):.1f}%): ${strategy_amounts['nine_sig_allo']:.2f}")
+    print(f"  Dual Momentum ({get_pct('dual_momentum_allo'):.1f}%): ${strategy_amounts['dual_momentum_allo']:.2f}")
+    print(f"  Sector Momentum ({get_pct('sector_momentum_allo'):.1f}%): ${strategy_amounts['sector_momentum_allo']:.2f}")
     
     # Run all six strategies with pre-calculated budgets
     results = {}

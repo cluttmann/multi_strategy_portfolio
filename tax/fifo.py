@@ -198,8 +198,8 @@ class FIFOEngine:
             trades.append(trade)
             self.realized_trades.append(trade)
 
-        # Floating-point tolerance: ignore sub-penny residuals
-        if remaining_to_sell > Decimal("0.0001"):
+        # Floating-point tolerance: ignore sub-penny residuals from fractional shares
+        if remaining_to_sell > Decimal("0.001"):
             print(
                 f"  ⚠ FIFO WARNING: Could not fully match sell of {qty} {symbol} on {date}. "
                 f"Unmatched: {remaining_to_sell} shares."
