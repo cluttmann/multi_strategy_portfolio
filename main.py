@@ -83,6 +83,13 @@ nine_sig_config = {
     "tolerance_amount": 25,  # Minimum trade amount to avoid tiny trades
 }
 
+# Dual Momentum Strategy configuration
+# Uses a 1% decision band to reduce whipsaws around flat/near-tie momentum values.
+dual_momentum_config = {
+    "absolute_momentum_threshold": 0.01,  # Require > +1% return to pass absolute gates
+    "relative_momentum_threshold": 0.01,  # Require SPY to exceed EFA by > 1% for SPUU
+}
+
 # Margin control configuration for automated leverage management
 # Enables up to +10% leverage only when market conditions are favorable
 margin_control_config = {
@@ -5246,7 +5253,7 @@ def print_allocation_dashboard(rebalance_result, contribution_amount=None):
 
 def monthly_dual_momentum_strategy(api, force_execute=False, investment_calc=None, margin_result=None, skip_order_wait=False, env="live"):
     """
-    Dual Momentum Strategy (SPUU/EFO/BND) — relative + absolute momentum.
+    Dual Momentum Strategy (SPUU/EFO/BND) using TestFolio's A/B/C decision tree.
     Sends exactly one Telegram message at the end summarizing the outcome.
     """
     if not force_execute and not check_trading_day(mode="monthly"):
@@ -5261,7 +5268,9 @@ def monthly_dual_momentum_strategy(api, force_execute=False, investment_calc=Non
     if investment_calc is None:
         investment_calc = calculate_monthly_investments(api, margin_result, env)
     
-    investment_amount = investment_calc["strategy_amounts"]["dual_momentum_allo"]
+    # Always evaluate monthly signals even when allocation is zero.
+    # This allows signal/state tracking without requiring new contribution capital.
+    investment_amount = investment_calc["strategy_amounts"].get("dual_momentum_allo", 0.0)
     
     balances = load_balances(env)
     dual_momentum_data = balances.get("dual_momentum", {})
@@ -5278,10 +5287,54 @@ def monthly_dual_momentum_strategy(api, force_execute=False, investment_calc=Non
         send_telegram_message(f"🔄 Dual Momentum (20%)\n❌ Failed to calculate momentum returns")
         return "Failed to calculate momentum returns"
     
-    # Apply Antonacci GEM logic via shared helper (also used by daily check)
-    target_position, winner, winner_return, winner_underlying = determine_dual_momentum_target(spy_return, efa_return)
+    abs_threshold = dual_momentum_config["absolute_momentum_threshold"]
+    rel_threshold = dual_momentum_config["relative_momentum_threshold"]
+
+    # Apply shared TestFolio decision tree logic with 1% tolerance bands.
+    target_position, winner, winner_return, winner_underlying = determine_dual_momentum_target(
+        spy_return,
+        efa_return,
+        absolute_threshold=abs_threshold,
+        relative_threshold=rel_threshold
+    )
+    signal_a = spy_return > abs_threshold
+    signal_b = efa_return > abs_threshold
+    signal_c = spy_return > (efa_return + rel_threshold)
+    check_date = datetime.datetime.now().strftime("%Y-%m-%d")
+
+    def save_dual_momentum_state(position, shares, invested, trade_date=None):
+        """
+        Persist monthly signal results even when no trade occurs.
+        """
+        payload = {
+            "total_invested": invested,
+            "current_position": position,
+            "shares_held": shares,
+            "last_momentum_check": {
+                "spy_return": spy_return,
+                "efa_return": efa_return,
+                "winner": winner,
+                "winner_underlying": winner_underlying,
+                "signal": target_position,
+                "signal_a_spy_positive": signal_a,
+                "signal_b_efa_positive": signal_b,
+                "signal_c_spy_above_efa": signal_c,
+                "absolute_threshold": abs_threshold,
+                "relative_threshold": rel_threshold,
+                "lookback_days": 252,
+                "source": "monthly_buy"
+            },
+            "last_signal_check_date": check_date
+        }
+        if trade_date:
+            payload["last_trade_date"] = trade_date
+        elif dual_momentum_data.get("last_trade_date"):
+            payload["last_trade_date"] = dual_momentum_data["last_trade_date"]
+        save_balance("dual_momentum", payload, env)
+
     position_changed = current_position != target_position
     trades_info = []
+    current_value_before_trades = get_dual_momentum_position_value(api)["total_value"]
     
     if position_changed:
         if current_position is not None and shares_held > 0:
@@ -5294,8 +5347,9 @@ def monthly_dual_momentum_strategy(api, force_execute=False, investment_calc=Non
                 send_telegram_message(f"🔄 Dual Momentum (20%)\n❌ Error selling {current_position}: {e}")
                 return f"Failed to sell {current_position}: {e}"
         
-        current_value = get_dual_momentum_position_value(api)["total_value"]
-        total_to_invest = current_value + investment_amount
+        # Use strategy value before any sells so monthly signal switches still work
+        # when there is no fresh allocation this month.
+        total_to_invest = current_value_before_trades + investment_amount
         
         if total_to_invest > 0:
             try:
@@ -5308,20 +5362,22 @@ def monthly_dual_momentum_strategy(api, force_execute=False, investment_calc=Non
                 
                 trades_info.append(f"Bought {shares_to_buy:.4f} {target_position} @ ${target_price:.2f}")
                 
-                save_balance("dual_momentum", {
-                    "total_invested": total_invested + investment_amount,
-                    "current_position": target_position,
-                    "shares_held": shares_to_buy,
-                    "last_trade_date": datetime.datetime.now().strftime("%Y-%m-%d"),
-                    "last_momentum_check": {
-                        "spy_return": spy_return, "efa_return": efa_return,
-                        "winner": winner, "winner_underlying": winner_underlying,
-                        "signal": target_position
-                    }
-                }, env)
+                save_dual_momentum_state(
+                    position=target_position,
+                    shares=shares_to_buy,
+                    invested=total_invested + investment_amount,
+                    trade_date=check_date
+                )
             except Exception as e:
                 send_telegram_message(f"🔄 Dual Momentum (20%)\n❌ Error buying {target_position}: {e}")
                 return f"Failed to buy {target_position}: {e}"
+        else:
+            trades_info.append("Signal updated; no capital available to allocate this month.")
+            save_dual_momentum_state(
+                position=target_position,
+                shares=0,
+                invested=total_invested
+            )
     else:
         if investment_amount > 0:
             try:
@@ -5334,20 +5390,22 @@ def monthly_dual_momentum_strategy(api, force_execute=False, investment_calc=Non
                 
                 trades_info.append(f"Bought {additional_shares:.4f} {target_position} @ ${target_price:.2f} (${investment_amount:.2f})")
                 
-                save_balance("dual_momentum", {
-                    "total_invested": total_invested + investment_amount,
-                    "current_position": target_position,
-                    "shares_held": shares_held + additional_shares,
-                    "last_trade_date": datetime.datetime.now().strftime("%Y-%m-%d"),
-                    "last_momentum_check": {
-                        "spy_return": spy_return, "efa_return": efa_return,
-                        "winner": winner, "winner_underlying": winner_underlying,
-                        "signal": target_position
-                    }
-                }, env)
+                save_dual_momentum_state(
+                    position=target_position,
+                    shares=shares_held + additional_shares,
+                    invested=total_invested + investment_amount,
+                    trade_date=check_date
+                )
             except Exception as e:
                 send_telegram_message(f"🔄 Dual Momentum (20%)\n❌ Error adding to {target_position}: {e}")
                 return f"Failed to add to {target_position}: {e}"
+        else:
+            trades_info.append("Signal checked; no monthly capital allocated.")
+            save_dual_momentum_state(
+                position=target_position,
+                shares=shares_held,
+                invested=total_invested
+            )
     
     # Single clean Telegram message
     final_position_value = get_dual_momentum_position_value(api)
@@ -5367,28 +5425,43 @@ def monthly_dual_momentum_strategy(api, force_execute=False, investment_calc=Non
     return f"Dual Momentum completed. Position: {target_position}, Return: {strategy_return:.2%}"
 
 
-def determine_dual_momentum_target(spy_return, efa_return):
+def determine_dual_momentum_target(
+    spy_return,
+    efa_return,
+    absolute_threshold=0.01,
+    relative_threshold=0.01
+):
     """
-    Pure Antonacci GEM decision logic — testable without any API calls.
+    TestFolio-aligned dual momentum decision tree — pure and testable.
     
-    Rules (Gary Antonacci Global Equities Momentum):
-      1. Relative momentum: compare SPY vs EFA 12-month (or N-day) returns
-      2. Absolute momentum: the WINNER's return must be > 0 to invest in equities
-         If the winner's return is <= 0, go to bonds regardless
+    The strategy intentionally follows this branch order:
+      Signal A: SPY return > absolute_threshold
+      Signal B: EFA return > absolute_threshold
+      Signal C: SPY return > (EFA return + relative_threshold)
+    
+      1) If A and B and C -> SPUU
+      2) Else if B -> EFO
+      3) Else -> BND (fallback)
     
     Args:
-        spy_return: SPY return over the lookback period (e.g. 0.05 = +5%)
-        efa_return: EFA return over the lookback period
+        spy_return: SPY return over the configured lookback period
+        efa_return: EFA return over the configured lookback period
+        absolute_threshold: Minimum return gate for SPY/EFA absolute checks
+        relative_threshold: Minimum spread required for SPY to beat EFA
     
     Returns:
         tuple: (target_position, winner, winner_return, winner_underlying)
             target_position: "SPUU", "EFO", or "BND"
-            winner: "SPUU" or "EFO" (relative momentum winner)
-            winner_return: return of the winning underlying asset
+            winner: "SPUU" or "EFO" (relative momentum winner, for logging/telemetry)
+            winner_return: return of the relative winner
             winner_underlying: "SPY" or "EFA"
     """
-    # Step 1: relative momentum — who has the higher return?
-    if spy_return > efa_return:
+    signal_a = spy_return > absolute_threshold
+    signal_b = efa_return > absolute_threshold
+    signal_c = spy_return > (efa_return + relative_threshold)
+
+    # Keep returning relative-winner metadata for existing logs/tests.
+    if signal_c:
         winner = "SPUU"
         winner_return = spy_return
         winner_underlying = "SPY"
@@ -5397,162 +5470,14 @@ def determine_dual_momentum_target(spy_return, efa_return):
         winner_return = efa_return
         winner_underlying = "EFA"
 
-    # Step 2: absolute momentum — winner must be positive to stay in equities
-    if winner_return > 0:
-        target_position = winner
+    if signal_a and signal_b and signal_c:
+        target_position = "SPUU"
+    elif signal_b:
+        target_position = "EFO"
     else:
         target_position = "BND"
 
     return target_position, winner, winner_return, winner_underlying
-
-
-def daily_check_dual_momentum(api, env="live"):
-    """
-    Daily dual momentum check using Antonacci's GEM rules with a 200-day lookback.
-    
-    Runs the full dual momentum decision logic every trading day. Switches positions
-    between SPUU, EFO, and BND as signals change intra-month. Does NOT handle monthly
-    investment contributions — those remain in monthly_dual_momentum_strategy.
-    
-    Lookback: 200 trading days (aligned with the 200-day SMA concept used across
-    other strategies), vs the monthly strategy which uses 252 days (12 months).
-    
-    Args:
-        api: Alpaca API credentials
-        env: Alpaca environment ("live" or "paper")
-    
-    Returns:
-        str: Result message
-    """
-    if not check_trading_day(mode="daily"):
-        return "Market closed today. Skipping daily dual momentum check."
-
-    print("=== Daily Dual Momentum Check (200-day lookback) ===")
-
-    # Calculate 200-day returns for the underlying assets
-    spy_return = calculate_12_month_returns(api, "SPY", lookback_days=200)
-    efa_return = calculate_12_month_returns(api, "EFA", lookback_days=200)
-
-    if spy_return is None or efa_return is None:
-        error_msg = "Daily Dual Momentum: Failed to calculate 200-day returns — skipping"
-        print(error_msg)
-        send_telegram_message(error_msg)
-        return error_msg
-
-    # Apply Antonacci GEM decision logic
-    target_position, winner, winner_return, winner_underlying = determine_dual_momentum_target(spy_return, efa_return)
-
-    print(f"SPY 200-day return: {spy_return:.2%}")
-    print(f"EFA 200-day return: {efa_return:.2%}")
-    print(f"Winner: {winner} ({winner_return:.2%}, underlying: {winner_underlying})")
-    print(f"Target position: {target_position}")
-
-    # Load current state from Firestore
-    balances = load_balances(env)
-    dual_momentum_data = balances.get("dual_momentum", {})
-    current_position = dual_momentum_data.get("current_position", None)
-    shares_held = dual_momentum_data.get("shares_held", 0)
-    total_invested = dual_momentum_data.get("total_invested", 0)
-
-    # No change needed — already in the correct position
-    if target_position == current_position:
-        print(f"Daily Dual Momentum: No change needed. Already holding {current_position}.")
-        return f"Daily Dual Momentum: No change needed. Holding {current_position} (SPY: {spy_return:.2%}, EFA: {efa_return:.2%})."
-
-    print(f"Daily Dual Momentum: Position change required: {current_position} -> {target_position}")
-
-    # Sell the current position
-    if current_position is not None and shares_held > 0:
-        try:
-            sell_order = submit_order(api, current_position, shares_held, "sell")
-            wait_for_order_fill(api, sell_order["id"])
-            print(f"Sold {shares_held:.4f} shares of {current_position}")
-            send_telegram_message(
-                f"Daily Dual Momentum: Sold {shares_held:.4f} shares of {current_position} "
-                f"(SPY 200d: {spy_return:.2%}, EFA 200d: {efa_return:.2%})"
-            )
-        except Exception as e:
-            error_msg = f"Daily Dual Momentum: Failed to sell {current_position}: {e}"
-            print(error_msg)
-            send_telegram_message(error_msg)
-            return error_msg
-
-    # Determine total value to reinvest (proceeds from sale + any uninvested cash already tracked)
-    position_data = get_dual_momentum_position_value(api)
-    total_to_invest = position_data["total_value"]
-
-    # Buy the new target position
-    if total_to_invest > 0:
-        try:
-            target_price = float(get_latest_trade(api, target_position))
-            shares_to_buy = total_to_invest / target_price
-
-            buy_order = submit_order(api, target_position, shares_to_buy, "buy")
-            wait_for_order_fill(api, buy_order["id"])
-            print(f"Bought {shares_to_buy:.4f} shares of {target_position} at ${target_price:.2f}")
-
-            # Determine reason for the switch for Telegram clarity
-            if target_position == "BND":
-                reason = f"absolute momentum negative ({winner} underlying {winner_return:.2%} ≤ 0%)"
-            else:
-                reason = f"relative winner: {winner} ({winner_return:.2%}), absolute momentum positive"
-
-            telegram_msg = (
-                f"Daily Dual Momentum — Position Switch\n\n"
-                f"200-day Returns:\n"
-                f"  SPY: {spy_return:.2%}  |  EFA: {efa_return:.2%}\n\n"
-                f"Decision: {current_position} → {target_position}\n"
-                f"Reason: {reason}\n\n"
-                f"Shares bought: {shares_to_buy:.4f} @ ${target_price:.2f}\n"
-                f"Total value rotated: ${total_to_invest:.2f}"
-            )
-            send_telegram_message(telegram_msg)
-
-            # Update Firestore
-            save_balance("dual_momentum", {
-                "total_invested": total_invested,
-                "current_position": target_position,
-                "shares_held": shares_to_buy,
-                "last_trade_date": datetime.datetime.now().strftime("%Y-%m-%d"),
-                "last_momentum_check": {
-                    "spy_return": spy_return,
-                    "efa_return": efa_return,
-                    "winner": winner,
-                    "winner_underlying": winner_underlying,
-                    "signal": target_position,
-                    "lookback_days": 200,
-                    "source": "daily_check"
-                }
-            }, env)
-
-            return (
-                f"Daily Dual Momentum: Switched {current_position} -> {target_position}. "
-                f"Bought {shares_to_buy:.4f} shares @ ${target_price:.2f}."
-            )
-
-        except Exception as e:
-            error_msg = f"Daily Dual Momentum: Failed to buy {target_position}: {e}"
-            print(error_msg)
-            send_telegram_message(error_msg)
-            return error_msg
-    else:
-        # No value to reinvest (e.g. no prior position held) — just update Firestore state
-        save_balance("dual_momentum", {
-            "total_invested": total_invested,
-            "current_position": target_position,
-            "shares_held": 0,
-            "last_trade_date": datetime.datetime.now().strftime("%Y-%m-%d"),
-            "last_momentum_check": {
-                "spy_return": spy_return,
-                "efa_return": efa_return,
-                "winner": winner,
-                "winner_underlying": winner_underlying,
-                "signal": target_position,
-                "lookback_days": 200,
-                "source": "daily_check"
-            }
-        }, env)
-        return f"Daily Dual Momentum: Target is {target_position} but no value to reinvest."
 
 
 def monthly_sector_momentum_strategy(api, force_execute=False, investment_calc=None, margin_result=None, skip_order_wait=False, env="live"):
@@ -6640,25 +6565,6 @@ def daily_trade_spxl_200sma(request):
     return result, 200
 
 
-@app.route("/daily_check_dual_momentum", methods=["POST"])
-def daily_check_dual_momentum_route(request):
-    """
-    Cloud Function endpoint for the daily Antonacci dual momentum check.
-    Runs full GEM logic with 200-day lookback every trading day.
-    Schedule: same as daily_trade_spxl_200sma (3:56 PM ET weekdays).
-    """
-    try:
-        api = set_alpaca_environment(env=alpaca_environment)
-        result = daily_check_dual_momentum(api, env=alpaca_environment)
-        print(result)
-        return jsonify({"result": result}), 200
-    except Exception as e:
-        error_message = f"Daily Dual Momentum error: {str(e)}"
-        print(error_message)
-        send_telegram_message(error_message)
-        return jsonify({"error": error_message}), 500
-
-
 @app.route("/daily_check_sector_momentum", methods=["POST"])
 def daily_check_sector_momentum_route(request):
     """
@@ -6761,8 +6667,6 @@ def run_local(action, env="paper", request="test", force_execute=False, investme
         return monthly_dual_momentum_strategy(api, force_execute=force_execute, skip_order_wait=True, env=env)
     elif action == "monthly_sector_momentum":
         return monthly_sector_momentum_strategy(api, force_execute=force_execute, skip_order_wait=True, env=env)
-    elif action == "daily_check_dual_momentum":
-        return daily_check_dual_momentum(api, env=env)
     elif action == "daily_check_sector_momentum":
         return daily_check_sector_momentum(api, env=env)
     elif action == "monthly_invest_rssb_sector_custom":
@@ -6796,7 +6700,6 @@ if __name__ == "__main__":
             "index_alert",
             "monthly_dual_momentum",
             "monthly_sector_momentum",
-            "daily_check_dual_momentum",
             "daily_check_sector_momentum",
             "monthly_invest_rssb_sector_custom",
             "test_monthly_buy_rssb_wtip"
@@ -6850,7 +6753,6 @@ if __name__ == "__main__":
 # python3 main.py --action index_alert --env paper  # For unified index alerts (use with request body)
 #
 # Daily momentum checks (same schedule as sell_spxl_below_200sma, 3:56 PM ET):
-# python3 main.py --action daily_check_dual_momentum --env paper
 # python3 main.py --action daily_check_sector_momentum --env paper
 #
 # Monthly momentum strategies:
