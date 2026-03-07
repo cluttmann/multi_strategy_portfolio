@@ -1,24 +1,20 @@
 """
-Unit tests for the Dual Momentum Strategy (Antonacci GEM rules).
+Unit tests for the Dual Momentum Strategy (TestFolio A/B/C decision tree).
 
 Tests the pure decision logic in determine_dual_momentum_target() which is shared
-between monthly_dual_momentum_strategy (252-day lookback) and
-daily_check_dual_momentum (200-day lookback).
+by monthly_dual_momentum_strategy (252-day lookback).
 
-Gary Antonacci's Global Equities Momentum (GEM) rules:
-  1. Relative momentum: compare SPY vs EFA return over the lookback period
-     - If SPY > EFA: winner is SPUU (leveraged US equities)
-     - If EFA >= SPY: winner is EFO (leveraged international equities)
-  2. Absolute momentum: the WINNER's return must be > 0 to invest in equities
-     - If winner_return > 0: invest in the winner
-     - If winner_return <= 0: invest in BND (bonds), regardless of which side won
+Decision tree under test:
+  Signal A: SPY lookback return > 1%
+  Signal B: EFA lookback return > 1%
+  Signal C: SPY lookback return > (EFA lookback return + 1%)
 
-Key difference from a SPY-only gate: if EFA wins the relative comparison but its
-return is negative, we still go to bonds. If SPY wins but is negative, same result.
-The winning asset itself must be in positive momentum.
+  Allocation 1 (SPUU): A AND B AND C
+  Allocation 2 (EFO):  Else if B
+  Fallback (BND):      Else
 
 Reference: Gary Antonacci, "Dual Momentum Investing" (2014)
-Backtest validated on Testfolio over 55 years (1970-2026), daily frequency.
+Branching validated against the user's TestFolio setup.
 """
 
 import sys
@@ -55,7 +51,7 @@ class TestDetermineTargetRelativeMomentum(unittest.TestCase):
         self.assertAlmostEqual(winner_return, 0.05)
 
     def test_efa_wins_when_equal(self):
-        """When returns are equal, EFA wins (not strictly greater than)."""
+        """When returns are equal, SPUU gate fails so EFO branch is selected."""
         target, winner, winner_return, winner_underlying = determine_dual_momentum_target(
             spy_return=0.05, efa_return=0.05
         )
@@ -65,7 +61,7 @@ class TestDetermineTargetRelativeMomentum(unittest.TestCase):
 
 
 class TestDetermineTargetAbsoluteMomentum(unittest.TestCase):
-    """Tests Antonacci's absolute momentum gate: winner must be positive."""
+    """Tests positive/negative handling in the TestFolio branch tree."""
 
     def test_positive_winner_return_stays_in_equities(self):
         """Winner with positive return -> invest in the equity winner."""
@@ -94,14 +90,15 @@ class TestDetermineTargetAbsoluteMomentum(unittest.TestCase):
 
 class TestDetermineTargetCombinedScenarios(unittest.TestCase):
     """
-    Full integration tests matching the Testfolio backtest setup.
+    Full integration tests matching the TestFolio setup.
 
-    Verified scenarios from the Antonacci/Testfolio setup:
-      Signal A: SPY 252-day return > 0  (absolute momentum)
-      Signal B: SPY 252-day return > VXUS 252-day return  (relative momentum)
-      Allocation 1 (SPUU): A AND B
-      Allocation 2 (EFO):  not B AND winner(EFA) > 0
-      Fallback (BND):      winner <= 0
+    Verified scenarios from the TestFolio setup:
+      Signal A: SPY 252-day return > 1%  (absolute momentum)
+      Signal B: EFA 252-day return > 1%  (absolute momentum)
+      Signal C: SPY 252-day return > EFA 252-day return + 1%  (relative momentum)
+      Allocation 1 (SPUU): A AND B AND C
+      Allocation 2 (EFO):  Else if B
+      Fallback (BND):      Else
     """
 
     def test_spy_positive_spy_wins_relative(self):
@@ -118,9 +115,8 @@ class TestDetermineTargetCombinedScenarios(unittest.TestCase):
 
     def test_spy_negative_efa_positive_efa_wins(self):
         """
-        SPY -2%, EFA +5% -> EFO (Antonacci rule).
-        EFA wins relative AND has positive absolute momentum, so we invest in EFO.
-        Note: this is the key difference vs a SPY-only gate which would send to BND.
+        SPY -2%, EFA +5% -> EFO.
+        Allocation 1 fails (A is false), but B is true so Allocation 2 is selected.
         """
         target, winner, winner_return, _ = determine_dual_momentum_target(-0.02, 0.05)
         self.assertEqual(winner, "EFO")
@@ -128,10 +124,10 @@ class TestDetermineTargetCombinedScenarios(unittest.TestCase):
         self.assertEqual(target, "EFO")
 
     def test_spy_positive_efa_negative_spy_wins(self):
-        """SPY +2%, EFA -3% -> SPUU: SPY wins relative and is positive."""
+        """SPY +2%, EFA -3% -> BND: B is false, so fallback applies."""
         target, winner, _, _ = determine_dual_momentum_target(0.02, -0.03)
         self.assertEqual(winner, "SPUU")
-        self.assertEqual(target, "SPUU")
+        self.assertEqual(target, "BND")
 
     def test_spy_negative_efa_negative_spy_wins_relative(self):
         """SPY -2%, EFA -5% -> BND: SPY wins relative but is negative -> bonds."""
@@ -156,6 +152,21 @@ class TestDetermineTargetCombinedScenarios(unittest.TestCase):
         """International outperformance: EFA leads, both positive -> EFO."""
         target, _, _, _ = determine_dual_momentum_target(0.10, 0.25)
         self.assertEqual(target, "EFO")
+
+    def test_below_absolute_threshold_falls_back_to_bnd(self):
+        """EFA at +0.9% fails B gate -> fallback BND."""
+        target, _, _, _ = determine_dual_momentum_target(0.03, 0.009)
+        self.assertEqual(target, "BND")
+
+    def test_relative_threshold_requires_full_one_percent_spread(self):
+        """SPY needs >1% lead over EFA to select SPUU; exact 1% spread keeps EFO."""
+        target, _, _, _ = determine_dual_momentum_target(0.05, 0.04)
+        self.assertEqual(target, "EFO")
+
+    def test_relative_threshold_crossing_selects_spuu(self):
+        """SPY lead above 1% spread passes C gate -> SPUU."""
+        target, _, _, _ = determine_dual_momentum_target(0.051, 0.04)
+        self.assertEqual(target, "SPUU")
 
 
 class TestDetermineTargetReturnValues(unittest.TestCase):
