@@ -88,9 +88,15 @@ This strategy compares the underlying assets for momentum signals but invests in
 #### **Approach in the Script:**
 - **Monthly Rebalancing**: On the first trading day of each month, the strategy:
   1. Calculates 12-month returns (252 trading days) for the underlying assets SPY and EFA
-  2. Identifies the relative momentum winner (which underlying asset has higher return)
-  3. Applies absolute momentum filter: if winner's return > 0%, invest in corresponding leveraged ETF (SPUU or EFO); otherwise invest in BND (bonds)
+  2. Applies the current TestFolio-aligned decision tree with a 1% tolerance band:
+     - **Signal A**: `SPY > 1%`
+     - **Signal B**: `EFA > 1%`
+     - **Signal C**: `SPY > EFA + 1%`
+     - **Allocation 1 (SPUU)**: `A AND B AND C`
+     - **Allocation 2 (EFO)**: `Else if B`
+     - **Fallback (BND)**: `Else`
   4. Executes position switch if signal changes, or adds new investment to existing position
+  5. Always runs monthly signal evaluation and persists signal state even when the monthly allocation for Dual Momentum is `0`
 
 - **Why Compare Underlying Assets**: By comparing the underlying assets (SPY vs EFA) rather than the leveraged ETFs themselves, the strategy gets cleaner momentum signals that aren't affected by leverage decay, rebalancing effects, or volatility in the leveraged products.
 
@@ -100,13 +106,21 @@ This strategy compares the underlying assets for momentum signals but invests in
 
 #### **Expected Returns:**
 - The Dual Momentum strategy aims to capture the best-performing markets (US or International) during bull markets while providing crash protection by moving to bonds during bear markets.
-- **Historical Performance**: Based on [backtesting from 2007-2024](https://testfol.io/tactical?s=7U59rfzvUXJ) using leveraged ETFs (SPUU/EFO/BND), the strategy has demonstrated strong risk-adjusted returns with reduced drawdowns compared to buy-and-hold approaches.
+- **Historical Performance**: Based on the current TestFolio setup and logic implemented in this repo, the strategy has demonstrated strong risk-adjusted returns with reduced drawdowns compared to broad market benchmarks.
+- **Reference Backtest**: [TestFolio tactical backtest (current implementation)](https://testfol.io/tactical?s=i7AJfaoEUxv)
 - The combination of relative and absolute momentum helps avoid extended periods of negative returns while maintaining exposure to trending markets.
 - **Behavioral Edge**: The strategy exploits persistent momentum anomalies that arise from behavioral biases like herding and anchoring, which cause trends to persist for 3-12 months.
 
+#### **Backtest Figures (Current Implementation):**
+The following figures are from the TestFolio run linked above and document the current strategy behavior and benchmark comparison.
+
+![Dual Momentum TestFolio strategy statistics](docs/images/dual-momentum-testfolio-stats.png)
+
+![Dual Momentum TestFolio benchmark comparison](docs/images/dual-momentum-testfolio-benchmark.png)
+
 #### **Research Sources:**
 This implementation is based on Gary Antonacci's research and community discussions:
-- [TestFol.io Backtest Results](https://testfol.io/tactical?s=7U59rfzvUXJ) - SPUU/EFO/BND leveraged implementation
+- [TestFolio tactical backtest (current implementation)](https://testfol.io/tactical?s=i7AJfaoEUxv) - SPUU/EFO/BND leveraged implementation with current monthly decision logic
 - [r/LETFs: Combining Dual Momentum with LETFs](https://www.reddit.com/r/LETFs/comments/rwcoxk/combining_dual_momentum_with_the_principles_of/)
 - [r/LETFs: Leveraged Dual Momentum Backtest](https://www.reddit.com/r/LETFs/comments/1jj4tad/leveraged_dual_momentum_backtest/)
 
