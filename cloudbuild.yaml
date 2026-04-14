@@ -143,22 +143,6 @@ steps:
     - --set-env-vars=GOOGLE_CLOUD_PROJECT=1098661711782,GOOGLE_CLOUD_PROJECT_ID=trading-436516
     waitFor: ['-'] # start in parallel and actually needs to be set, otherwise deployment is sequential
 
-  # Step 4f-daily: Deploy the daily_check_sector_momentum function
-  - name: 'gcr.io/cloud-builders/gcloud'
-    args:
-    - functions
-    - deploy
-    - daily_check_sector_momentum  # Daily SPY 200-SMA check (sector ETFs vs SCHZ bonds)
-    - --source=.
-    - --trigger-http
-    - --region=europe-west3
-    - --runtime=python310
-    - --timeout=540s
-    - --entry-point=daily_check_sector_momentum  # Entry point function in your Python code
-    - --memory=512MB
-    - --set-env-vars=GOOGLE_CLOUD_PROJECT=1098661711782,GOOGLE_CLOUD_PROJECT_ID=trading-436516
-    waitFor: ['-'] # start in parallel and actually needs to be set, otherwise deployment is sequential
-
   # Step 4e: Deploy the monthly_buy_rssb_wtip function
   - name: 'gcr.io/cloud-builders/gcloud'
     args:
@@ -353,28 +337,6 @@ steps:
       '--location', 'europe-west3',
       '--oidc-service-account-email', '1098661711782-compute@developer.gserviceaccount.com'
     ]
-    waitFor: ['-'] # start in parallel and actually needs to be set, otherwise deployment is sequential
-
-  # Create Cloud Scheduler job for 'daily_check_sector_momentum' (SPY 200-SMA, runs at same time as SPXL daily check)
-  - name: 'gcr.io/cloud-builders/gcloud'
-    entrypoint: 'bash'
-    args:
-      - '-c'
-      - |
-        gcloud scheduler jobs update http daily_check_sector_momentum \
-          --schedule='56 15 * * 1-5' \
-          --uri='https://europe-west3-trading-436516.cloudfunctions.net/daily_check_sector_momentum' \
-          --http-method='POST' \
-          --time-zone='America/New_York' \
-          --location='europe-west3' \
-          --oidc-service-account-email='1098661711782-compute@developer.gserviceaccount.com' \
-        || gcloud scheduler jobs create http daily_check_sector_momentum \
-          --schedule='56 15 * * 1-5' \
-          --uri='https://europe-west3-trading-436516.cloudfunctions.net/daily_check_sector_momentum' \
-          --http-method='POST' \
-          --time-zone='America/New_York' \
-          --location='europe-west3' \
-          --oidc-service-account-email='1098661711782-compute@developer.gserviceaccount.com'
     waitFor: ['-'] # start in parallel and actually needs to be set, otherwise deployment is sequential
 
   # Cloud Scheduler Job for S&P 500 ATH Drop Alert (try update first, then create if needed)

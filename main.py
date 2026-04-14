@@ -5961,226 +5961,6 @@ def monthly_sector_momentum_strategy(api, force_execute=False, investment_calc=N
     return f"Sector Momentum completed. Return: {strategy_return:.2%}"
 
 
-def daily_check_sector_momentum(api, env="live"):
-    """
-    Daily sector momentum check using the SPY 200-day SMA trend filter.
-    
-    Mirrors the SPY 200-SMA logic from daily_trade_sma (used for SPXL), applied to
-    the sector momentum strategy. Runs the full trend check every trading day:
-      - SPY below 200 SMA (with margin band): sell all sector ETFs, buy SCHZ bonds
-      - SPY above 200 SMA (with margin band): if in bonds with no sectors, sell SCHZ
-        and buy back the last known top-3 sectors from Firestore
-      - SPY within neutral band: no action
-    
-    Monthly strategy handles full sector re-ranking and contributions. This daily
-    check only handles the trend-driven rotation to/from bonds.
-    
-    Args:
-        api: Alpaca API credentials
-        env: Alpaca environment ("live" or "paper")
-    
-    Returns:
-        str: Result message
-    """
-    if not check_trading_day(mode="daily"):
-        return "Market closed today. Skipping daily sector momentum check."
-
-    print("=== Daily Sector Momentum Check (SPY 200 SMA) ===")
-
-    # Fetch SPY price and 200-day SMA (reuses same cached Firestore data as daily_trade_sma)
-    try:
-        spy_data = get_all_market_data("SPY", env=env)
-        if spy_data is None:
-            spy_data = update_market_data("SPY", env=env)
-
-        spy_price = spy_data["price"]
-        sma_200 = spy_data["sma200"]
-
-        if sma_200 is None:
-            error_msg = "Daily Sector Momentum: Failed to get SPY 200 SMA — skipping"
-            print(error_msg)
-            send_telegram_message(error_msg)
-            return error_msg
-
-        print(f"SPY: ${spy_price:.2f}, 200-SMA: ${sma_200:.2f}, margin: {margin:.1%}")
-
-    except Exception as e:
-        error_msg = f"Daily Sector Momentum: Error fetching SPY data: {e}"
-        print(error_msg)
-        send_telegram_message(error_msg)
-        return error_msg
-
-    bond_etf = sector_momentum_config["bond_etf"]          # SCHZ
-    sector_etfs = sector_momentum_config["sector_etfs"]
-    holding_fund_ticker = sector_momentum_config["holding_fund_ticker"]  # SHV
-
-    # --- BEARISH: SPY significantly below 200 SMA → rotate to bonds ---
-    if spy_price < sma_200 * (1 - margin):
-        actual_positions = get_sector_momentum_positions(api)
-
-        # Determine which sector ETFs are currently held
-        sector_positions_held = {t: s for t, s in actual_positions.items() if t in sector_etfs and s > 0}
-
-        if not sector_positions_held:
-            print("Daily Sector Momentum: SPY below 200 SMA but no sector ETFs held.")
-            return "Daily Sector Momentum: SPY below 200 SMA, no sector positions to sell."
-
-        trades_executed = []
-        total_proceeds = 0.0
-
-        # Sell all sector ETF positions
-        for ticker, shares in sector_positions_held.items():
-            whole_shares = int(shares)
-            if whole_shares > 0:
-                try:
-                    position_value = float(next(
-                        (p["market_value"] for p in list_positions(api) if p["symbol"] == ticker), 0
-                    ))
-                    sell_order = submit_order(api, ticker, whole_shares, "sell")
-                    wait_for_order_fill(api, sell_order["id"])
-                    total_proceeds += position_value
-                    trades_executed.append(f"Sold {whole_shares} shares of {ticker} (~${position_value:,.0f})")
-                    print(f"Sold {whole_shares} shares of {ticker}")
-                except Exception as e:
-                    error_msg = f"Daily Sector Momentum: Failed to sell {ticker}: {e}"
-                    print(error_msg)
-                    send_telegram_message(error_msg)
-                    return error_msg
-
-        # Also sell any SHV holding fund (small buffer position)
-        shv_shares = get_holding_fund_shares(api, holding_fund_ticker)
-        if shv_shares > 0:
-            try:
-                shv_price = float(get_latest_trade(api, holding_fund_ticker))
-                shv_value = shv_shares * shv_price
-                sell_order = submit_order(api, holding_fund_ticker, shv_shares, "sell")
-                wait_for_order_fill(api, sell_order["id"])
-                total_proceeds += shv_value
-                trades_executed.append(f"Sold {shv_shares:.4f} shares of {holding_fund_ticker} (~${shv_value:,.0f})")
-            except Exception as e:
-                print(f"Daily Sector Momentum: Warning — failed to sell {holding_fund_ticker}: {e}")
-
-        # Buy SCHZ bonds with proceeds
-        if total_proceeds > 0:
-            try:
-                schz_price = float(get_latest_trade(api, bond_etf))
-                schz_shares = total_proceeds / schz_price
-                buy_order = submit_order(api, bond_etf, schz_shares, "buy")
-                wait_for_order_fill(api, buy_order["id"])
-                trades_executed.append(f"Bought {schz_shares:.4f} shares of {bond_etf} (${total_proceeds:,.0f})")
-                print(f"Bought {schz_shares:.4f} shares of {bond_etf}")
-            except Exception as e:
-                error_msg = f"Daily Sector Momentum: Failed to buy {bond_etf}: {e}"
-                print(error_msg)
-                send_telegram_message(error_msg)
-                return error_msg
-
-        # Update Firestore
-        balances = load_balances(env)
-        sector_data = balances.get("sector_momentum", {})
-        save_balance("sector_momentum", {
-            "total_invested": sector_data.get("total_invested", 0),
-            "current_positions": {bond_etf: schz_shares if total_proceeds > 0 else 0},
-            "holding_fund_position": {holding_fund_ticker: 0},
-            "last_trade_date": datetime.datetime.now().strftime("%Y-%m-%d"),
-            "top_3_sectors": sector_data.get("top_3_sectors", []),  # preserve last known selection
-            "spy_above_sma": False,
-            "last_momentum_scores": sector_data.get("last_momentum_scores", {})
-        }, env)
-
-        telegram_msg = (
-            f"Daily Sector Momentum — Rotated to Bonds\n\n"
-            f"SPY ${spy_price:.2f} < 200 SMA ${sma_200:.2f} (margin {margin:.1%})\n\n"
-            f"Trades:\n" + "\n".join(f"  • {t}" for t in trades_executed)
-        )
-        send_telegram_message(telegram_msg)
-        return f"Daily Sector Momentum: Rotated to bonds. Sold {len(sector_positions_held)} sector ETF(s)."
-
-    # --- BULLISH: SPY significantly above 200 SMA → buy back sectors ---
-    elif spy_price > sma_200 * (1 + margin):
-        actual_positions = get_sector_momentum_positions(api)
-        sector_positions_held = {t: s for t, s in actual_positions.items() if t in sector_etfs and s > 0}
-
-        # Only act if we are currently in bonds with no sector ETFs
-        schz_position = next((p for p in list_positions(api) if p["symbol"] == bond_etf), None)
-        if sector_positions_held or not schz_position:
-            print("Daily Sector Momentum: SPY above 200 SMA. Already in sectors or no SCHZ to convert.")
-            return "Daily Sector Momentum: SPY above 200 SMA, already holding sectors or no SCHZ to convert."
-
-        # Load last known top 3 sectors from Firestore
-        balances = load_balances(env)
-        sector_data = balances.get("sector_momentum", {})
-        top_3_sectors = sector_data.get("top_3_sectors", [])
-
-        if not top_3_sectors:
-            msg = "Daily Sector Momentum: SPY above 200 SMA but no prior top-3 sectors in Firestore — skipping buy-back (monthly will handle next rebalance)."
-            print(msg)
-            send_telegram_message(msg)
-            return msg
-
-        # Sell SCHZ
-        schz_shares = float(schz_position["qty"])
-        schz_value = float(schz_position["market_value"])
-        try:
-            sell_order = submit_order(api, bond_etf, schz_shares, "sell")
-            wait_for_order_fill(api, sell_order["id"])
-            print(f"Sold {schz_shares:.4f} shares of {bond_etf} (${schz_value:,.0f})")
-        except Exception as e:
-            error_msg = f"Daily Sector Momentum: Failed to sell {bond_etf}: {e}"
-            print(error_msg)
-            send_telegram_message(error_msg)
-            return error_msg
-
-        # Allocate equally across last known top 3 sectors (33.33% each)
-        allocation_per_sector = schz_value / len(top_3_sectors)
-        trades_executed = [f"Sold {schz_shares:.4f} {bond_etf} (${schz_value:,.0f})"]
-        new_positions = {}
-
-        for ticker in top_3_sectors:
-            try:
-                price = float(get_latest_trade(api, ticker))
-                shares_to_buy = allocation_per_sector / price
-                whole_shares = int(shares_to_buy)  # sector ETFs are non-fractionable
-                if whole_shares > 0:
-                    buy_order = submit_order(api, ticker, whole_shares, "buy")
-                    wait_for_order_fill(api, buy_order["id"])
-                    new_positions[ticker] = whole_shares
-                    trades_executed.append(f"Bought {whole_shares} shares of {ticker} @ ${price:.2f}")
-                    print(f"Bought {whole_shares} shares of {ticker}")
-                else:
-                    print(f"Daily Sector Momentum: Skipping {ticker} — allocation ${allocation_per_sector:.0f} too small for 1 share @ ${price:.2f}")
-            except Exception as e:
-                error_msg = f"Daily Sector Momentum: Failed to buy {ticker}: {e}"
-                print(error_msg)
-                send_telegram_message(error_msg)
-                return error_msg
-
-        # Update Firestore
-        save_balance("sector_momentum", {
-            "total_invested": sector_data.get("total_invested", 0),
-            "current_positions": new_positions,
-            "holding_fund_position": {holding_fund_ticker: 0},
-            "last_trade_date": datetime.datetime.now().strftime("%Y-%m-%d"),
-            "top_3_sectors": top_3_sectors,
-            "spy_above_sma": True,
-            "last_momentum_scores": sector_data.get("last_momentum_scores", {})
-        }, env)
-
-        telegram_msg = (
-            f"Daily Sector Momentum — Rotated back to Sectors\n\n"
-            f"SPY ${spy_price:.2f} > 200 SMA ${sma_200:.2f} (margin {margin:.1%})\n"
-            f"Restored last top-3: {', '.join(top_3_sectors)}\n\n"
-            f"Trades:\n" + "\n".join(f"  • {t}" for t in trades_executed)
-        )
-        send_telegram_message(telegram_msg)
-        return f"Daily Sector Momentum: Rotated back to sectors {top_3_sectors}."
-
-    # --- NEUTRAL: within margin band → no action ---
-    else:
-        print(f"Daily Sector Momentum: SPY within neutral band (${spy_price:.2f} vs SMA ${sma_200:.2f}). No action.")
-        return f"Daily Sector Momentum: SPY within neutral band. No action."
-
-
 # Helper function to wait for an order to be filled
 def wait_for_order_fill(api, order_id, timeout=300, poll_interval=5):
     elapsed_time = 0
@@ -6565,25 +6345,6 @@ def daily_trade_spxl_200sma(request):
     return result, 200
 
 
-@app.route("/daily_check_sector_momentum", methods=["POST"])
-def daily_check_sector_momentum_route(request):
-    """
-    Cloud Function endpoint for the daily sector momentum SPY 200-SMA check.
-    Rotates between sector ETFs and SCHZ bonds based on SPY trend.
-    Schedule: same as daily_trade_spxl_200sma (3:56 PM ET weekdays).
-    """
-    try:
-        api = set_alpaca_environment(env=alpaca_environment)
-        result = daily_check_sector_momentum(api, env=alpaca_environment)
-        print(result)
-        return jsonify({"result": result}), 200
-    except Exception as e:
-        error_message = f"Daily Sector Momentum error: {str(e)}"
-        print(error_message)
-        send_telegram_message(error_message)
-        return jsonify({"error": error_message}), 500
-
-
 @app.route("/monthly_dual_momentum", methods=["POST"])
 def monthly_dual_momentum(request):
     """
@@ -6667,8 +6428,6 @@ def run_local(action, env="paper", request="test", force_execute=False, investme
         return monthly_dual_momentum_strategy(api, force_execute=force_execute, skip_order_wait=True, env=env)
     elif action == "monthly_sector_momentum":
         return monthly_sector_momentum_strategy(api, force_execute=force_execute, skip_order_wait=True, env=env)
-    elif action == "daily_check_sector_momentum":
-        return daily_check_sector_momentum(api, env=env)
     elif action == "monthly_invest_rssb_sector_custom":
         # Special occasion: RSSB/WTIP + Sector Momentum with $300 budget
         return monthly_invest_rssb_sector_momentum_custom(api, total_budget=300.0, force_execute=True, skip_order_wait=True, env=env)
@@ -6700,7 +6459,6 @@ if __name__ == "__main__":
             "index_alert",
             "monthly_dual_momentum",
             "monthly_sector_momentum",
-            "daily_check_sector_momentum",
             "monthly_invest_rssb_sector_custom",
             "test_monthly_buy_rssb_wtip"
         ],
@@ -6751,9 +6509,6 @@ if __name__ == "__main__":
 # python3 main.py --action sell_spxl_below_200sma --env paper
 # python3 main.py --action buy_spxl_above_200sma --env paper
 # python3 main.py --action index_alert --env paper  # For unified index alerts (use with request body)
-#
-# Daily momentum checks (same schedule as sell_spxl_below_200sma, 3:56 PM ET):
-# python3 main.py --action daily_check_sector_momentum --env paper
 #
 # Monthly momentum strategies:
 # python3 main.py --action monthly_dual_momentum --env paper --force
