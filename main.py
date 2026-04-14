@@ -25,15 +25,9 @@ strategy_allocations = {
     "sector_momentum_allo": 0.10,  # 10% to Sector Momentum strategy
 }
 
-# Strategy would be to allocate 50% to the SPXL SMA 200 Strategy and 50% to HFEA
-
-# tqqq_investment_amount = monthly_invest * 0.1
-
 upro_allocation = 0.45
 tmf_allocation = 0.25
 kmlm_allocation = 0.3
-# Based on this https://www.reddit.com/r/LETFs/comments/1dyl49a/2024_rletfs_best_portfolio_competition_results/
-# and this: https://testfol.io/?d=eJyNT9tKw0AQ%2FZUyzxGStBUaEEGkL1otog8iJYzJJF072a2TtbWE%2FLsTQy8igss%2B7M45cy4NlOxekecoWNWQNFB7FJ%2Fm6AkSiCaT0VkY6YUAyOb7eRzGx3m%2FsUGGJAr1BID5W2psweiNs5AUyDUFkGG9LNhtIQmPn7QQelfFZ0LhnaqJYza2TLfG5h33PGwDWDvxhWPjNOJLAxarLsUV2WxZoax0zdgN1f7abEyuOZXm5UM9hbQc2oymvc2ds6Rsb7IVSS%2FWvxWr1zsvCq5JMrL%2Bu027CCAXLDVzGxyMn%2BYP94Ob2e1s8Dib%2Ft%2F80PFv%2B0u%2BGJ5GGI072wNnVXH1eYoPwx%2B4Z%2F9bIx6ftli0X39%2BpPY%3D
 
 # Golden HFEA Lite allocation (SSO/ZROZ/GLD at 50/25/25)
 sso_allocation = 0.50
@@ -112,33 +106,23 @@ rebalance_config = {
 
 # Sector Momentum Strategy configuration
 # Using 2x leveraged ETFs for enhanced returns
+_sector_names = {
+    "ROM": "Technology",
+    "UYG": "Financials",
+    "DIG": "Energy",
+    "RXL": "Healthcare",
+    "UXI": "Industrials",
+    "UGE": "Consumer Staples",
+    "UCC": "Consumer Discretionary",
+    "UPW": "Utilities",
+    "UYM": "Materials",
+    "URE": "Real Estate",
+    "LTL": "Communication Services",
+}
+
 sector_momentum_config = {
-    "sector_etfs": [
-        "ROM",   # Technology (2x leveraged - ProShares Ultra Technology)
-        "UYG",   # Financials (2x leveraged - ProShares Ultra Financials)
-        "DIG",   # Energy (2x leveraged - ProShares Ultra Energy)
-        "RXL",   # Healthcare (2x leveraged - ProShares Ultra Health Care)
-        "UXI",   # Industrials (2x leveraged - ProShares Ultra Industrials)
-        "UGE",   # Consumer Staples (2x leveraged - ProShares Ultra Consumer Staples)
-        "UCC",   # Consumer Discretionary (2x leveraged - ProShares Ultra Cons. Discretionary)
-        "UPW",   # Utilities (2x leveraged - ProShares Ultra Utilities)
-        "UYM",   # Materials (2x leveraged - ProShares Ultra Materials)
-        "URE",   # Real Estate (2x leveraged - ProShares Ultra Real Estate)
-        "LTL"    # Communication Services (2x leveraged - ProShares Ultra Comm. Services)
-    ],
-    "sector_names": {
-        "ROM": "Technology",
-        "UYG": "Financials", 
-        "DIG": "Energy",
-        "RXL": "Healthcare",
-        "UXI": "Industrials",
-        "UGE": "Consumer Staples",
-        "UCC": "Consumer Discretionary",
-        "UPW": "Utilities",
-        "UYM": "Materials",
-        "URE": "Real Estate",
-        "LTL": "Communication Services"
-    },
+    "sector_etfs": list(_sector_names.keys()),
+    "sector_names": _sector_names,
     "bond_etf": "SCHZ",  # Bond ETF for bearish periods
     "momentum_weights": {
         "1_month": 0.40,   # 40% weight for 1-month momentum
@@ -187,120 +171,47 @@ def get_firestore_client():
 CACHE_DURATION_MINUTES = 5  # Cache freshness window
 
 
-def get_cached_market_data(symbol, data_type, env="live"):
-    """
-    Get cached market data from Firestore to avoid redundant Alpaca API calls.
-    Cache expires after 5 minutes. Works across all Cloud Functions.
-    
-    Args:
-        symbol: Market symbol (e.g., "SPY", "URTH", "EEM", "EFA")
-        data_type: "price", "sma200", "sma255", or state fields
-        env: Environment ("live" or "paper") - determines Firestore collection
-    
-    Returns:
-        Cached value or None if not cached/expired/unavailable
-    """
-    try:
-        # Normalize symbol for Firestore document ID (remove special chars)
-        doc_id = symbol.replace("^", "").replace(".", "_")
-        
-        doc_ref = get_firestore_client().collection(f"market-data-{env}").document(doc_id)
-        doc = doc_ref.get()
-        
-        if not doc.exists:
-            return None
-        
-        data = doc.to_dict()
-        
-        # Check if cache is still fresh
-        timestamp = data.get("timestamp")
-        if timestamp:
-            # Convert both to naive UTC for comparison (handles timezone-aware Firestore timestamps)
-            if hasattr(timestamp, 'tzinfo') and timestamp.tzinfo is not None:
-                timestamp = timestamp.replace(tzinfo=None)
-            
-            now_utc = datetime.datetime.utcnow()
-            age_seconds = (now_utc - timestamp).total_seconds()
-            
-            if age_seconds > (CACHE_DURATION_MINUTES * 60):
-                return None  # Expired
-        
-        # Return the requested data type
-        return data.get(data_type)
-        
-    except Exception as e:
-        print(f"Warning: Could not read market data cache for {symbol}.{data_type}: {e}")
-        return None
+def normalize_symbol(symbol):
+    """Normalize a symbol for use as a Firestore document ID."""
+    return symbol.replace("^", "").replace(".", "_")
 
 
 def get_all_market_data(symbol, env="live"):
     """
-    Get ALL market data for a symbol efficiently.
-    Use this when you need multiple metrics (price, sma200, sma255, states).
-    If cache is stale, fetches fresh and calculates all metrics at once.
-    
-    Args:
-        symbol: Stock symbol (e.g., "SPY", "URTH")
-        env: Environment ("live" or "paper") - determines Firestore collection
-    
-    Returns:
-        dict with all market data: price, sma200, sma255, sma200_state, sma255_state, timestamp
-        Or None if cache is stale (triggers update)
-    
-    Example:
-        data = get_all_market_data("SPY", env="live")
-        if data is None:
-            data = update_market_data("SPY", env="live")
-        spy_price = data["price"]
-        spy_sma = data["sma200"]
+    Get ALL market data for a symbol from Firestore cache.
+    Returns None if cache is stale or missing (caller should call update_market_data).
     """
     try:
-        # Normalize symbol for Firestore document ID
-        doc_id = symbol.replace("^", "").replace(".", "_")
-        
+        doc_id = normalize_symbol(symbol)
         doc_ref = get_firestore_client().collection(f"market-data-{env}").document(doc_id)
         doc = doc_ref.get()
-        
+
         if not doc.exists:
             return None
-        
+
         data = doc.to_dict()
-        
-        # Check if cache is still fresh
+
         timestamp = data.get("timestamp")
         if timestamp:
-            # Convert both to naive UTC for comparison (handles timezone-aware Firestore timestamps)
+            # Handle timezone-aware Firestore timestamps
             if hasattr(timestamp, 'tzinfo') and timestamp.tzinfo is not None:
                 timestamp = timestamp.replace(tzinfo=None)
-            
-            now_utc = datetime.datetime.utcnow()
-            age_seconds = (now_utc - timestamp).total_seconds()
-            
+
+            age_seconds = (datetime.datetime.utcnow() - timestamp).total_seconds()
             if age_seconds > (CACHE_DURATION_MINUTES * 60):
-                return None  # Expired - caller should update
-        
+                return None
+
         return data
-        
+
     except Exception as e:
         print(f"Warning: Could not read market data for {symbol}: {e}")
         return None
 
 
 def set_cached_market_data(symbol, data_type, value, env="live"):
-    """
-    Cache market data to Firestore to avoid redundant Alpaca API calls.
-    Accessible across all Cloud Functions. Automatically expires after 5 minutes.
-    
-    Args:
-        symbol: Market symbol
-        data_type: "price", "sma200", or "sma255"
-        value: Data value to cache
-        env: Environment ("live" or "paper") - determines Firestore collection
-    """
+    """Cache a single market data field to Firestore."""
     try:
-        # Normalize symbol for Firestore document ID (remove special chars)
-        doc_id = symbol.replace("^", "").replace(".", "_")
-        
+        doc_id = normalize_symbol(symbol)
         doc_ref = get_firestore_client().collection(f"market-data-{env}").document(doc_id)
         
         # Get existing data or create new
@@ -328,226 +239,123 @@ def get_auth_headers(api):
 
 
 def get_retry_session(max_retries=3, backoff_factor=1.0, timeout=30):
-    """
-    Create a requests session with retry logic for handling SSL errors and connection issues.
-    
-    Args:
-        max_retries: Maximum number of retry attempts (default: 3)
-        backoff_factor: Backoff multiplier for retries (default: 1.0)
-        timeout: Request timeout in seconds (default: 30)
-    
-    Returns:
-        requests.Session with retry adapter configured
-    """
+    """Create a requests session with retry logic for SSL errors and connection issues."""
     from urllib3.util.retry import Retry
     from requests.adapters import HTTPAdapter
-    
-    # Configure retry strategy
-    # Retry on connection errors, read errors, and 5xx server errors
+
     retry_strategy = Retry(
         total=max_retries,
         backoff_factor=backoff_factor,
-        status_forcelist=[500, 502, 503, 504],  # Retry on server errors
-        allowed_methods=["GET", "POST"],  # Only retry safe methods
-        raise_on_status=False,  # Don't raise on status, let requests handle it
-        connect=max_retries,  # Retry on connection errors
-        read=max_retries,  # Retry on read errors
+        status_forcelist=[500, 502, 503, 504],
+        allowed_methods=["GET", "POST", "DELETE"],
+        raise_on_status=False,
+        connect=max_retries,
+        read=max_retries,
     )
-    
-    # Create session with retry adapter
+
     session = requests.Session()
     adapter = HTTPAdapter(max_retries=retry_strategy)
     session.mount("https://", adapter)
     session.mount("http://", adapter)
-    
     return session
 
 
-def get_alpaca_historical_bars(api, symbol, days=400):
+def alpaca_request_with_retry(method, url, headers, max_retries=5, timeout=60, label="request", raise_on_fail=False, **kwargs):
     """
-    Fetch historical daily bars from Alpaca using IEX feed.
-    Primary data source for all SMA calculations (no rate limiting).
-    Includes explicit SSL error handling with retries.
-    
-    Args:
-        api: Alpaca API credentials dict
-        symbol: Stock symbol (e.g., "SPY", "URTH")
-        days: Number of calendar days of history to fetch (default 400 for 200-day SMA)
-    
-    Returns:
-        List of closing prices (most recent last), or None on error
+    Make an HTTP request with SSL retry logic and exponential backoff.
+    Shared by all Alpaca API calls to avoid duplicating retry boilerplate.
     """
-    from datetime import datetime, timedelta
     from requests.exceptions import SSLError, ConnectionError, RequestException
     from urllib3.exceptions import SSLError as URLLib3SSLError, MaxRetryError
-    
-    market_data_base_url = "https://data.alpaca.markets"
-    
+
+    session = get_retry_session(max_retries=2, backoff_factor=1.0, timeout=timeout)
+
+    for attempt in range(max_retries):
+        try:
+            response = session.request(method, url, headers=headers, timeout=timeout, **kwargs)
+            response.raise_for_status()
+            return response
+
+        except (SSLError, URLLib3SSLError, ConnectionError, MaxRetryError) as e:
+            if attempt < max_retries - 1:
+                wait_time = 2 ** attempt
+                print(f"SSL/Connection error for {label} (attempt {attempt + 1}/{max_retries}): {e}. Retrying in {wait_time}s...")
+                time.sleep(wait_time)
+                continue
+            if raise_on_fail:
+                raise Exception(f"{label} failed after {max_retries} attempts: {e}")
+            print(f"{label} failed after {max_retries} attempts: {e}")
+            return None
+
+        except RequestException as e:
+            if 'SSL' in str(e) and attempt < max_retries - 1:
+                wait_time = 2 ** attempt
+                print(f"SSL-related error for {label} (attempt {attempt + 1}/{max_retries}): {e}. Retrying in {wait_time}s...")
+                time.sleep(wait_time)
+                continue
+            if raise_on_fail:
+                raise Exception(f"{label} failed: {e}")
+            print(f"{label} failed: {e}")
+            return None
+
+        except Exception as e:
+            if 'SSL' in str(e) and attempt < max_retries - 1:
+                wait_time = 2 ** attempt
+                print(f"SSL error (unexpected) for {label} (attempt {attempt + 1}/{max_retries}): {e}. Retrying in {wait_time}s...")
+                time.sleep(wait_time)
+                continue
+            if raise_on_fail:
+                raise
+            print(f"Unexpected error for {label}: {e}")
+            return None
+
+    return None
+
+
+def get_alpaca_historical_bars(api, symbol, days=400):
+    """Fetch historical daily bars from Alpaca IEX feed. Returns list of closing prices or None."""
+    from datetime import datetime, timedelta
+
     end_date = datetime.now()
     start_date = end_date - timedelta(days=days)
-    
-    url = f"{market_data_base_url}/v2/stocks/{symbol}/bars"
+
+    url = f"https://data.alpaca.markets/v2/stocks/{symbol}/bars"
     params = {
         "start": start_date.strftime("%Y-%m-%d"),
         "end": end_date.strftime("%Y-%m-%d"),
         "timeframe": "1Day",
         "limit": 10000,
         "adjustment": "split",
-        "feed": "iex"  # Use IEX feed (included with Basic subscription)
+        "feed": "iex",
     }
-    
-    # Manual retry loop for SSL errors with exponential backoff
-    # Note: urllib3 retry happens first, then we retry manually if it fails
-    max_retries = 5
-    for attempt in range(max_retries):
-        try:
-            # Use retry session with fewer retries since we're doing manual retries
-            session = get_retry_session(max_retries=2, backoff_factor=1.0, timeout=60)
-            response = session.get(
-                url,
-                headers=get_auth_headers(api),
-                params=params,
-                timeout=60  # Longer timeout for large data requests
-            )
-            response.raise_for_status()
-            
-            data = response.json()
-            bars = data.get("bars", [])
-            
-            if not bars:
-                print(f"No Alpaca bars returned for {symbol}")
-                return None
-            
-            # Extract closing prices
-            closes = [bar['c'] for bar in bars]
-            print(f"Fetched {len(closes)} bars for {symbol} from Alpaca IEX feed")
-            return closes
-            
-        except (SSLError, URLLib3SSLError, ConnectionError, MaxRetryError) as e:
-            # SSL, connection error, or retry exhaustion - retry with exponential backoff
-            # Check if it's an SSL-related error (even if wrapped in MaxRetryError)
-            is_ssl_error = (
-                isinstance(e, (SSLError, URLLib3SSLError)) or
-                (isinstance(e, MaxRetryError) and 
-                 (hasattr(e, 'reason') and isinstance(e.reason, (SSLError, URLLib3SSLError))) or
-                 'SSL' in str(e) or 'SSL' in str(type(e)))
-            )
-            
-            if attempt < max_retries - 1:
-                wait_time = 2 ** attempt  # Exponential backoff: 1s, 2s, 4s, 8s, 16s
-                error_type = "SSL/Connection" if is_ssl_error else "Connection"
-                print(f"{error_type} error for {symbol} (attempt {attempt + 1}/{max_retries}): {e}. Retrying in {wait_time}s...")
-                time.sleep(wait_time)
-                continue
-            else:
-                print(f"Alpaca historical fetch failed for {symbol} after {max_retries} attempts: {e}")
-                return None
-        except RequestException as e:
-            # Check if it's an SSL-related RequestException
-            if 'SSL' in str(e) or isinstance(getattr(e, 'args', [None])[0] if e.args else None, (SSLError, URLLib3SSLError)):
-                # SSL-related request error - retry
-                if attempt < max_retries - 1:
-                    wait_time = 2 ** attempt
-                    print(f"SSL-related request error for {symbol} (attempt {attempt + 1}/{max_retries}): {e}. Retrying in {wait_time}s...")
-                    time.sleep(wait_time)
-                    continue
-            # Other request errors - don't retry
-            print(f"Alpaca historical fetch failed for {symbol}: {e}")
-            return None
-        except Exception as e:
-            # Check if it's an SSL-related error in the message
-            if 'SSL' in str(e) or 'SSLError' in str(type(e)):
-                if attempt < max_retries - 1:
-                    wait_time = 2 ** attempt
-                    print(f"SSL error (unexpected type) for {symbol} (attempt {attempt + 1}/{max_retries}): {e}. Retrying in {wait_time}s...")
-                    time.sleep(wait_time)
-                    continue
-            # Unexpected errors
-            print(f"Unexpected error fetching Alpaca data for {symbol}: {e}")
-            return None
-    
-    return None
+
+    response = alpaca_request_with_retry(
+        "GET", url, headers=get_auth_headers(api),
+        params=params, label=f"historical bars for {symbol}"
+    )
+    if response is None:
+        return None
+
+    bars = response.json().get("bars", [])
+    if not bars:
+        print(f"No Alpaca bars returned for {symbol}")
+        return None
+
+    closes = [bar['c'] for bar in bars]
+    print(f"Fetched {len(closes)} bars for {symbol} from Alpaca IEX feed")
+    return closes
 
 
 def get_latest_trade(api, symbol):
-    """
-    Get latest trade price from Alpaca.
-    No fallback - raises error if Alpaca data unavailable.
-    Includes explicit SSL error handling with retries.
-    
-    Args:
-        api: Alpaca API credentials dict
-        symbol: Stock symbol
-    
-    Returns:
-        Latest trade price
-    """
-    from requests.exceptions import SSLError, ConnectionError, RequestException
-    from urllib3.exceptions import SSLError as URLLib3SSLError, MaxRetryError
-    
+    """Get latest trade price from Alpaca. Raises on failure."""
     symbol = symbol.upper()
-    market_data_base_url = "https://data.alpaca.markets"
-    url = f"{market_data_base_url}/v2/stocks/{symbol}/trades/latest"
-    
-    # Manual retry loop for SSL errors with exponential backoff
-    # Note: urllib3 retry happens first, then we retry manually if it fails
-    max_retries = 5
-    for attempt in range(max_retries):
-        try:
-            # Use retry session with fewer retries since we're doing manual retries
-            session = get_retry_session(max_retries=2, backoff_factor=1.0, timeout=60)
-            response = session.get(
-                url,
-                headers=get_auth_headers(api),
-                timeout=60
-            )
-            response.raise_for_status()
-            return response.json()["trade"]["p"]
-            
-        except (SSLError, URLLib3SSLError, ConnectionError, MaxRetryError) as e:
-            # SSL, connection error, or retry exhaustion - retry with exponential backoff
-            # Check if it's an SSL-related error (even if wrapped in MaxRetryError)
-            is_ssl_error = (
-                isinstance(e, (SSLError, URLLib3SSLError)) or
-                (isinstance(e, MaxRetryError) and 
-                 (hasattr(e, 'reason') and isinstance(e.reason, (SSLError, URLLib3SSLError))) or
-                 'SSL' in str(e) or 'SSL' in str(type(e)))
-            )
-            
-            if attempt < max_retries - 1:
-                wait_time = 2 ** attempt  # Exponential backoff: 1s, 2s, 4s, 8s, 16s
-                error_type = "SSL/Connection" if is_ssl_error else "Connection"
-                print(f"{error_type} error for {symbol} latest trade (attempt {attempt + 1}/{max_retries}): {e}. Retrying in {wait_time}s...")
-                time.sleep(wait_time)
-                continue
-            else:
-                error_msg = f"Error fetching latest trade for {symbol} after {max_retries} attempts: {e}"
-                print(error_msg)
-                raise Exception(error_msg)
-        except RequestException as e:
-            # Check if it's an SSL-related RequestException
-            if 'SSL' in str(e) or isinstance(getattr(e, 'args', [None])[0] if e.args else None, (SSLError, URLLib3SSLError)):
-                # SSL-related request error - retry
-                if attempt < max_retries - 1:
-                    wait_time = 2 ** attempt
-                    print(f"SSL-related request error for {symbol} latest trade (attempt {attempt + 1}/{max_retries}): {e}. Retrying in {wait_time}s...")
-                    time.sleep(wait_time)
-                    continue
-            # Other request errors - don't retry
-            error_msg = f"Request error fetching latest trade for {symbol}: {e}"
-            print(error_msg)
-            raise Exception(error_msg)
-        except Exception as e:
-            # Check if it's an SSL-related error in the message
-            if 'SSL' in str(e) or 'SSLError' in str(type(e)):
-                if attempt < max_retries - 1:
-                    wait_time = 2 ** attempt
-                    print(f"SSL error (unexpected type) for {symbol} latest trade (attempt {attempt + 1}/{max_retries}): {e}. Retrying in {wait_time}s...")
-                    time.sleep(wait_time)
-                    continue
-            # Unexpected errors - re-raise
-            print(f"Unexpected error fetching latest trade for {symbol}: {e}")
-            raise
+    url = f"https://data.alpaca.markets/v2/stocks/{symbol}/trades/latest"
+
+    response = alpaca_request_with_retry(
+        "GET", url, headers=get_auth_headers(api),
+        label=f"latest trade for {symbol}", raise_on_fail=True
+    )
+    return response.json()["trade"]["p"]
 
 
 def get_sma(api, symbol, period):
@@ -647,10 +455,8 @@ def is_running_in_cloud():
     )
 
 
-# Function to get secrets from Google Secret Manager
 def get_secret(secret_name):
-    # We're on Google Cloud
-    print(os.getenv("GOOGLE_CLOUD_PROJECT"))
+    """Get a secret from Google Secret Manager."""
     client = secretmanager.SecretManagerServiceClient()
     project_id = os.getenv("GOOGLE_CLOUD_PROJECT")
     name = f"projects/{project_id}/secrets/{secret_name}/versions/latest"
@@ -658,62 +464,41 @@ def get_secret(secret_name):
     return response.payload.data.decode("UTF-8")
 
 
-# Function to dynamically set environment (live or paper)
-def set_alpaca_environment(env, use_secret_manager=True):
-    if use_secret_manager and is_running_in_cloud():
-        print("cloud")
-        # On Google Cloud, use Secret Manager
-        if env == "live":
-            API_KEY = get_secret("ALPACA_API_KEY_LIVE")
-            SECRET_KEY = get_secret("ALPACA_SECRET_KEY_LIVE")
-            BASE_URL = "https://api.alpaca.markets"
-        else:
-            API_KEY = get_secret("ALPACA_API_KEY_PAPER")
-            SECRET_KEY = get_secret("ALPACA_SECRET_KEY_PAPER")
-            BASE_URL = "https://paper-api.alpaca.markets"
-    else:
-        # Running locally, use .env file (override=True ensures .env takes precedence)
-        load_dotenv(override=True)
-        if env == "live":
-            API_KEY = os.getenv("ALPACA_API_KEY_LIVE")
-            SECRET_KEY = os.getenv("ALPACA_SECRET_KEY_LIVE")
-            BASE_URL = "https://api.alpaca.markets"
-        else:
-            API_KEY = os.getenv("ALPACA_API_KEY_PAPER")
-            SECRET_KEY = os.getenv("ALPACA_SECRET_KEY_PAPER")
-            BASE_URL = "https://paper-api.alpaca.markets"
+def get_secret_or_env(secret_name, env_var_name=None):
+    """Get a value from Secret Manager (cloud) or .env file (local)."""
+    if is_running_in_cloud():
+        return get_secret(secret_name)
+    load_dotenv(override=True)
+    return os.getenv(env_var_name or secret_name)
 
-    # Return credentials dictionary instead of Alpaca API object
-    return {"API_KEY": API_KEY, "SECRET_KEY": SECRET_KEY, "BASE_URL": BASE_URL}
+
+def set_alpaca_environment(env, use_secret_manager=True):
+    """Set up Alpaca API credentials for the given environment."""
+    suffix = "LIVE" if env == "live" else "PAPER"
+    base_url = "https://api.alpaca.markets" if env == "live" else "https://paper-api.alpaca.markets"
+
+    if use_secret_manager and is_running_in_cloud():
+        API_KEY = get_secret(f"ALPACA_API_KEY_{suffix}")
+        SECRET_KEY = get_secret(f"ALPACA_SECRET_KEY_{suffix}")
+    else:
+        load_dotenv(override=True)
+        API_KEY = os.getenv(f"ALPACA_API_KEY_{suffix}")
+        SECRET_KEY = os.getenv(f"ALPACA_SECRET_KEY_{suffix}")
+
+    return {"API_KEY": API_KEY, "SECRET_KEY": SECRET_KEY, "BASE_URL": base_url}
 
 
 def get_telegram_secrets():
-    if is_running_in_cloud():
-        telegram_key = get_secret("TELEGRAM_KEY")
-        chat_id = get_secret("TELEGRAM_CHAT_ID")
-    else:
-        load_dotenv(override=True)
-        telegram_key = os.getenv("TELEGRAM_KEY")
-        chat_id = os.getenv("TELEGRAM_CHAT_ID")
-
-    return telegram_key, chat_id
+    return (
+        get_secret_or_env("TELEGRAM_KEY"),
+        get_secret_or_env("TELEGRAM_CHAT_ID"),
+    )
 
 
 def get_fred_rate():
-    """
-    Fetch the current Federal Funds Target Rate (Upper Limit) from FRED API.
-    
-    Returns:
-        float: Current FRED rate as a decimal (e.g., 0.0525 for 5.25%), or None on error
-    """
+    """Fetch the current Federal Funds Target Rate (Upper Limit) from FRED API."""
     try:
-        # Get FRED API key from Secret Manager or env
-        if is_running_in_cloud():
-            fred_key = get_secret("FREDKEY")
-        else:
-            load_dotenv(override=True)
-            fred_key = os.getenv("FREDKEY")
-        
+        fred_key = get_secret_or_env("FREDKEY")
         if not fred_key:
             print("FRED API key not found")
             return None
@@ -1157,57 +942,21 @@ def get_quarterly_nine_sig_contributions(env="live"):
 
 
 def check_spy_30_down_rule():
-    """
-    Check if SPY has dropped 30% from all-time high using Alpaca data.
-    Uses 2-year period to capture recent all-time highs and crashes.
-    """
+    """Check if SPY has dropped 30% from its 2-year all-time high."""
     try:
-        # Get API credentials
         api = set_alpaca_environment(env=alpaca_environment)
-        
-        # Fetch 2 years of SPY data from Alpaca
-        from datetime import datetime, timedelta
-        
-        market_data_base_url = "https://data.alpaca.markets"
-        end_date = datetime.now()
-        start_date = end_date - timedelta(days=730)  # 2 years
-        
-        url = f"{market_data_base_url}/v2/stocks/SPY/bars"
-        params = {
-            "start": start_date.strftime("%Y-%m-%d"),
-            "end": end_date.strftime("%Y-%m-%d"),
-            "timeframe": "1Day",
-            "limit": 10000,
-            "adjustment": "split",
-            "feed": "iex"
-        }
-        
-        # Use retry session to handle SSL errors
-        session = get_retry_session(max_retries=3, backoff_factor=2.0, timeout=30)
-        response = session.get(
-            url,
-            headers=get_auth_headers(api),
-            params=params,
-            timeout=30
-        )
-        response.raise_for_status()
-        
-        data = response.json()
-        bars = data.get("bars", [])
-        
-        if len(bars) < 10:  # Need sufficient data
-            print(f"Insufficient SPY data for 30-down rule: {len(bars)} bars")
+        bars = get_alpaca_historical_bars(api, "SPY", days=730)
+
+        if not bars or len(bars) < 10:
+            print(f"Insufficient SPY data for 30-down rule")
             return False
-        
-        # Get all-time high and current close from bars
-        all_time_high = max(bar['h'] for bar in bars)
-        current_close = bars[-1]['c']
-        
-        # Check if current is 30% below the all-time high
+
+        # bars are closing prices; use max as proxy for ATH
+        all_time_high = max(bars)
+        current_close = bars[-1]
         drop_percentage = (all_time_high - current_close) / all_time_high
-        
         return drop_percentage >= 0.30
-        
+
     except Exception as e:
         print(f"Error checking SPY 30 down rule: {e}")
         return False
@@ -1232,37 +981,25 @@ def count_ignored_sell_signals(env="live"):
         return 0
 
 
-def get_nine_sig_positions(api):
-    """
-    Get current 9-Sig strategy positions from Alpaca account.
-    
-    Args:
-        api: Alpaca API credentials dict
-    
-    Returns:
-        dict: Dictionary with ticker -> shares held for 9-Sig symbols (TQQQ, AGG)
-    """
+def get_strategy_positions(api, symbols, strategy_name="strategy"):
+    """Get positions from Alpaca filtered to a specific strategy's symbols."""
     try:
-        # Get all positions using the list_positions function
         positions = list_positions(api)
-        
-        # Filter for 9-Sig symbols only
-        nine_sig_positions = {}
-        nine_sig_symbols = ["TQQQ", "AGG"]
-        
-        # positions is a list of dicts from Alpaca API
+        result = {}
         for position in positions:
             ticker = position.get("symbol")
             qty = float(position.get("qty", 0))
-            if ticker in nine_sig_symbols and qty > 0:
-                nine_sig_positions[ticker] = qty
-        
-        print(f"Current 9-Sig positions from Alpaca: {nine_sig_positions}")
-        return nine_sig_positions
-        
+            if ticker in symbols and qty > 0:
+                result[ticker] = qty
+        print(f"Current {strategy_name} positions from Alpaca: {result}")
+        return result
     except Exception as e:
-        print(f"Error getting 9-Sig positions: {e}")
+        print(f"Error getting {strategy_name} positions: {e}")
         return {}
+
+
+def get_nine_sig_positions(api):
+    return get_strategy_positions(api, STRATEGY_SYMBOLS["nine_sig"], "9-Sig")
 
 
 def sync_nine_sig_positions_from_alpaca(api, env="live"):
@@ -2206,36 +1943,7 @@ def make_monthly_buys(api, force_execute=False, investment_calc=None, margin_res
 
 
 def get_hfea_positions(api):
-    """
-    Get current HFEA positions from Alpaca account.
-    
-    Args:
-        api: Alpaca API credentials dict
-    
-    Returns:
-        dict: Dictionary with ticker -> shares held for HFEA symbols (UPRO, TMF, KMLM)
-    """
-    try:
-        # Get all positions using the list_positions function
-        positions = list_positions(api)
-        
-        # Filter for HFEA symbols only
-        hfea_positions = {}
-        hfea_symbols = ["UPRO", "TMF", "KMLM"]
-        
-        # positions is a list of dicts from Alpaca API
-        for position in positions:
-            ticker = position.get("symbol")
-            qty = float(position.get("qty", 0))
-            if ticker in hfea_symbols and qty > 0:
-                hfea_positions[ticker] = qty
-        
-        print(f"Current HFEA positions from Alpaca: {hfea_positions}")
-        return hfea_positions
-        
-    except Exception as e:
-        print(f"Error getting HFEA positions: {e}")
-        return {}
+    return get_strategy_positions(api, STRATEGY_SYMBOLS["hfea"], "HFEA")
 
 
 def sync_hfea_positions_from_alpaca(api, env="live"):
@@ -2546,36 +2254,7 @@ def get_holding_fund_value(api, ticker):
 
 
 def get_spxl_sma_positions(api):
-    """
-    Get current SPXL SMA strategy positions from Alpaca account.
-    
-    Args:
-        api: Alpaca API credentials dict
-    
-    Returns:
-        dict: Dictionary with ticker -> shares held for SPXL SMA symbols (SPXL, SGOV)
-    """
-    try:
-        # Get all positions using the list_positions function
-        positions = list_positions(api)
-        
-        # Filter for SPXL SMA symbols only
-        spxl_sma_positions = {}
-        spxl_sma_symbols = ["SPXL", spxl_sma_holding_fund]
-        
-        # positions is a list of dicts from Alpaca API
-        for position in positions:
-            ticker = position.get("symbol")
-            qty = float(position.get("qty", 0))
-            if ticker in spxl_sma_symbols and qty > 0:
-                spxl_sma_positions[ticker] = qty
-        
-        print(f"Current SPXL SMA positions from Alpaca: {spxl_sma_positions}")
-        return spxl_sma_positions
-        
-    except Exception as e:
-        print(f"Error getting SPXL SMA positions: {e}")
-        return {}
+    return get_strategy_positions(api, STRATEGY_SYMBOLS["spxl_sma"], "SPXL SMA")
 
 
 def get_spxl_sma_value(api):
@@ -3469,7 +3148,7 @@ def update_market_data(symbol, env="live"):
     }
     
     # Save everything to Firestore at once
-    doc_id = symbol.replace("^", "").replace(".", "_")
+    doc_id = normalize_symbol(symbol)
     doc_ref = get_firestore_client().collection(f"market-data-{env}").document(doc_id)
     
     # Get existing data (to preserve alert tracking fields)
@@ -3959,222 +3638,37 @@ def send_telegram_message(message):
         return None
 
 
-def send_margin_summary_message(margin_result, strategy_name, action_taken, investment_calc=None):
-    """
-    Send consolidated monthly margin summary to Telegram.
-    
-    Args:
-        margin_result: Dict from check_margin_conditions() with gate results and metrics
-        strategy_name: Name of the strategy (e.g., "HFEA", "SPXL SMA", "9-Sig")
-        action_taken: Description of action taken (e.g., "Bought X shares", "Skipped - insufficient funds")
-        investment_calc: Optional dict from calculate_monthly_investments() with investment breakdown
-    """
-    metrics = margin_result.get("metrics", {})
-    gate_results = margin_result.get("gate_results", {})
-    errors = margin_result.get("errors", [])
-    
-    # Build the message
-    message_parts = [f"📊 {strategy_name} Monthly Update\n"]
-    
-    # Check for errors first
-    if errors:
-        message_parts.append("⚠️ ERRORS DETECTED - Defaulting to Cash-Only Mode")
-        for error in errors:
-            message_parts.append(f"  • {error}")
-        message_parts.append("")
-    
-    # Market Trend
-    spx_price = metrics.get("spx_price", 0)
-    spx_sma = metrics.get("spx_sma", 0)
-    trend_emoji = "✅" if gate_results.get("market_trend", False) else "❌"
-    message_parts.append(f"Market Trend: {trend_emoji} SPX ${spx_price:.2f} (200-SMA: ${spx_sma:.2f})")
-    
-    # Margin Rate
-    margin_rate = metrics.get("margin_rate", 0)
-    fred_rate = metrics.get("fred_rate", 0)
-    spread = metrics.get("spread", 0)
-    rate_emoji = "✅" if gate_results.get("margin_rate", False) else "❌"
-    message_parts.append(f"Margin Rate: {rate_emoji} {margin_rate*100:.1f}% (FRED {fred_rate*100:.1f}% + {spread*100:.1f}%)")
-    
-    # Buffer
-    buffer = metrics.get("buffer", 0)
-    buffer_emoji = "✅" if gate_results.get("buffer", False) else "❌"
-    message_parts.append(f"Buffer: {buffer_emoji} {buffer*100:.1f}%")
-    
-    # Leverage
-    leverage = metrics.get("leverage", 0)
-    leverage_emoji = "✅" if gate_results.get("leverage", False) else "❌"
-    message_parts.append(f"Leverage: {leverage_emoji} {leverage:.2f}x")
-    
-    # Decision
-    message_parts.append("")
-    if margin_result.get("allowed", False):
-        message_parts.append("Decision: 🟢 Margin ENABLED (+10%)")
-    else:
-        message_parts.append("Decision: 🔴 Cash-Only Mode")
-    
-    # Investment Calculation (if provided)
-    if investment_calc:
-        message_parts.append("\n💰 Monthly Investment Calculation:")
-        message_parts.append(f"Total Cash: ${investment_calc['total_cash']:,.2f}")
-        if investment_calc['total_reserved'] > 0:
-            message_parts.append(f"Reserved (bearish): ${investment_calc['total_reserved']:,.2f}")
-            # Show which strategies are reserved
-            for key, value in investment_calc['reserved_amounts'].items():
-                message_parts.append(f"  • {key}: ${value:,.2f}")
-        message_parts.append(f"Available: ${investment_calc['total_available']:,.2f}")
-        if investment_calc['margin_approved'] > 0:
-            message_parts.append(f"Margin Approved: ${investment_calc['margin_approved']:,.2f}")
-        message_parts.append("━━━━━━━━━━━━━━━━━━━━━━")
-        message_parts.append(f"Total Investing: ${investment_calc['total_investing']:,.2f}")
-        
-        # Show this strategy's allocation
-        strategy_key = None
-        if "HFEA" in strategy_name:
-            strategy_key = "hfea_allo"
-            pct = "47.5%"
-        elif "9-Sig" in strategy_name:
-            strategy_key = "nine_sig_allo"
-            pct = "5%"
-        elif "SMA" in strategy_name:
-            strategy_key = "spxl_allo"
-            pct = "47.5%"
-        
-        if strategy_key and strategy_key in investment_calc['strategy_amounts']:
-            message_parts.append(f"\nThis Strategy ({pct}): ${investment_calc['strategy_amounts'][strategy_key]:,.2f}")
-    
-    # Account Info
-    equity = metrics.get("equity", 0)
-    portfolio_value = metrics.get("portfolio_value", 0)
-    message_parts.append(f"\nAccount: Equity ${equity:,.2f} | Portfolio ${portfolio_value:,.2f}")
-    
-    # Action Taken
-    message_parts.append(f"\nAction: {action_taken}")
-    
-    # Send the consolidated message
-    full_message = "\n".join(message_parts)
-    send_telegram_message(full_message)
-
-
-# Function to get the chat title
-def get_chat_title():
-    telegram_key, chat_id = get_telegram_secrets()
-    url = f"https://api.telegram.org/bot{telegram_key}/getChat?chat_id={chat_id}"
-    response = requests.get(url)
-    chat_info = response.json()
-
-    if chat_info["ok"]:
-        return chat_info["result"].get("title", "")
-    else:
-        return None
-
-
 def get_index_data(index_symbol):
-    """
-    Fetch the all-time high and current price for an index using Alpaca.
-    Uses 5 years of data (maximum available with Basic subscription).
-    Includes explicit SSL error handling with retries.
-    
-    Args:
-        index_symbol: Stock symbol (e.g., "SPY", "URTH")
-    
-    Returns:
-        tuple: (current_price, all_time_high)
-    """
+    """Fetch the all-time high and current price for an index using 5 years of Alpaca data."""
     from datetime import datetime, timedelta
-    from requests.exceptions import SSLError, ConnectionError, RequestException
-    from urllib3.exceptions import SSLError as URLLib3SSLError, MaxRetryError
-    
-    # Get API credentials
+
     api = set_alpaca_environment(env=alpaca_environment)
-    
-    # Fetch 5 years of data from Alpaca (max available with Basic plan)
-    market_data_base_url = "https://data.alpaca.markets"
+
     end_date = datetime.now()
-    start_date = end_date - timedelta(days=1825)  # 5 years
-    
-    url = f"{market_data_base_url}/v2/stocks/{index_symbol}/bars"
+    start_date = end_date - timedelta(days=1825)
+
+    url = f"https://data.alpaca.markets/v2/stocks/{index_symbol}/bars"
     params = {
         "start": start_date.strftime("%Y-%m-%d"),
         "end": end_date.strftime("%Y-%m-%d"),
         "timeframe": "1Day",
         "limit": 10000,
         "adjustment": "split",
-        "feed": "iex"
+        "feed": "iex",
     }
-    
-    # Manual retry loop for SSL errors with exponential backoff
-    # Note: urllib3 retry happens first, then we retry manually if it fails
-    max_retries = 5
-    for attempt in range(max_retries):
-        try:
-            # Use retry session with fewer retries since we're doing manual retries
-            # This prevents urllib3 from exhausting all retries before we can handle it
-            session = get_retry_session(max_retries=2, backoff_factor=1.0, timeout=60)
-            response = session.get(
-                url,
-                headers=get_auth_headers(api),
-                params=params,
-                timeout=60  # Longer timeout for large data requests
-            )
-            response.raise_for_status()
-            
-            data = response.json()
-            bars = data.get("bars", [])
-            
-            if not bars:
-                raise ValueError(f"No Alpaca data returned for {index_symbol}")
-            
-            # Get all-time high and current close from bars
-            all_time_high = max(bar['h'] for bar in bars)
-            current_price = bars[-1]['c']
-            
-            return current_price, all_time_high
-            
-        except (SSLError, URLLib3SSLError, ConnectionError, MaxRetryError) as e:
-            # SSL, connection error, or retry exhaustion - retry with exponential backoff
-            # Check if it's an SSL-related error (even if wrapped in MaxRetryError)
-            is_ssl_error = (
-                isinstance(e, (SSLError, URLLib3SSLError)) or
-                (isinstance(e, MaxRetryError) and 
-                 (hasattr(e, 'reason') and isinstance(e.reason, (SSLError, URLLib3SSLError))) or
-                 'SSL' in str(e) or 'SSL' in str(type(e)))
-            )
-            
-            if attempt < max_retries - 1:
-                wait_time = 2 ** attempt  # Exponential backoff: 1s, 2s, 4s, 8s, 16s
-                error_type = "SSL/Connection" if is_ssl_error else "Connection"
-                print(f"{error_type} error for {index_symbol} (attempt {attempt + 1}/{max_retries}): {e}. Retrying in {wait_time}s...")
-                time.sleep(wait_time)
-                continue
-            else:
-                error_msg = f"Error fetching index data for {index_symbol} after {max_retries} attempts: {e}"
-                print(error_msg)
-                raise Exception(error_msg)
-        except RequestException as e:
-            # Check if it's an SSL-related RequestException
-            if 'SSL' in str(e) or isinstance(getattr(e, 'args', [None])[0] if e.args else None, (SSLError, URLLib3SSLError)):
-                # SSL-related request error - retry
-                if attempt < max_retries - 1:
-                    wait_time = 2 ** attempt
-                    print(f"SSL-related request error for {index_symbol} (attempt {attempt + 1}/{max_retries}): {e}. Retrying in {wait_time}s...")
-                    time.sleep(wait_time)
-                    continue
-            # Other request errors - don't retry
-            error_msg = f"Request error fetching index data for {index_symbol}: {e}"
-            print(error_msg)
-            raise Exception(error_msg)
-        except Exception as e:
-            # Check if it's an SSL-related error in the message
-            if 'SSL' in str(e) or 'SSLError' in str(type(e)):
-                if attempt < max_retries - 1:
-                    wait_time = 2 ** attempt
-                    print(f"SSL error (unexpected type) for {index_symbol} (attempt {attempt + 1}/{max_retries}): {e}. Retrying in {wait_time}s...")
-                    time.sleep(wait_time)
-                    continue
-            # Unexpected errors - re-raise
-            print(f"Unexpected error fetching index data for {index_symbol}: {e}")
-            raise
+
+    response = alpaca_request_with_retry(
+        "GET", url, headers=get_auth_headers(api),
+        params=params, label=f"index data for {index_symbol}", raise_on_fail=True
+    )
+
+    bars = response.json().get("bars", [])
+    if not bars:
+        raise ValueError(f"No Alpaca data returned for {index_symbol}")
+
+    all_time_high = max(bar['h'] for bar in bars)
+    current_price = bars[-1]['c']
+    return current_price, all_time_high
 
 
 def get_index_sma_state(index_symbol, sma_period, env="live"):
@@ -4192,7 +3686,7 @@ def get_index_sma_state(index_symbol, sma_period, env="live"):
     """
     try:
         # Normalize symbol for Firestore document ID
-        doc_id = index_symbol.replace("^", "").replace(".", "_")
+        doc_id = normalize_symbol(index_symbol)
         
         doc_ref = get_firestore_client().collection(f"market-data-{env}").document(doc_id)
         doc = doc_ref.get()
@@ -4235,7 +3729,7 @@ def save_index_sma_state(index_symbol, sma_period, state, price, sma_value, env=
     """
     try:
         # Normalize symbol for Firestore document ID
-        doc_id = index_symbol.replace("^", "").replace(".", "_")
+        doc_id = normalize_symbol(index_symbol)
         
         doc_ref = get_firestore_client().collection(f"market-data-{env}").document(doc_id)
         
@@ -4314,7 +3808,7 @@ def was_last_hour_alert_sent_today(index_symbol, sma_period, env="live"):
     """
     try:
         # Normalize symbol for Firestore document ID
-        doc_id = index_symbol.replace("^", "").replace(".", "_")
+        doc_id = normalize_symbol(index_symbol)
         
         doc_ref = get_firestore_client().collection(f"market-data-{env}").document(doc_id)
         doc = doc_ref.get()
@@ -4359,7 +3853,7 @@ def mark_last_hour_alert_sent(index_symbol, sma_period, env="live"):
     """
     try:
         # Normalize symbol for Firestore document ID
-        doc_id = index_symbol.replace("^", "").replace(".", "_")
+        doc_id = normalize_symbol(index_symbol)
         
         doc_ref = get_firestore_client().collection(f"market-data-{env}").document(doc_id)
         
@@ -4758,40 +4252,9 @@ def rank_sectors_by_momentum(api):
 
 
 def get_sector_momentum_positions(api):
-    """
-    Get current sector ETF positions from Alpaca account.
-    
-    Args:
-        api: Alpaca API credentials dict
-    
-    Returns:
-        dict: Dictionary with ticker -> shares held for sector ETFs only
-    """
-    try:
-        # Get all positions using the list_positions function
-        positions = list_positions(api)
-        
-        # Filter for sector ETFs only
-        sector_positions = {}
-        sector_etfs = sector_momentum_config["sector_etfs"]
-        bond_etf = sector_momentum_config["bond_etf"]
-        
-        # Include both sector ETFs and bond ETF
-        allowed_tickers = sector_etfs + [bond_etf]
-        
-        # positions is a list of dicts from Alpaca API
-        for position in positions:
-            ticker = position.get("symbol")
-            qty = float(position.get("qty", 0))
-            if ticker in allowed_tickers and qty > 0:
-                sector_positions[ticker] = qty
-        
-        print(f"Current sector momentum positions: {sector_positions}")
-        return sector_positions
-        
-    except Exception as e:
-        print(f"Error getting sector momentum positions: {e}")
-        return {}
+    # Include sector ETFs + bond ETF (excludes holding fund SHV from position tracking)
+    symbols = sector_momentum_config["sector_etfs"] + [sector_momentum_config["bond_etf"]]
+    return get_strategy_positions(api, symbols, "sector momentum")
 
 
 def get_sector_momentum_value(api):
@@ -6384,22 +5847,6 @@ def index_alert(request):
     return check_unified_index_alert(request, env=alpaca_environment)
 
 
-# @app.route('/monthly_buy_tqqq', methods=['POST'])
-# def monthly_buy_tqqq(request):
-#     api = set_alpaca_environment(env=alpaca_environment)  # or 'paper' based on your needs
-#     return make_monthly_buy_tqqq(api)
-
-# @app.route('/sell_tqqq_below_200sma', methods=['POST'])
-# def sell_tqqq_below_200sma(request):
-#     api = set_alpaca_environment(env=alpaca_environment)  # or 'paper' based on your needs
-#     return sell_tqqq_if_below_200sma(api)
-
-# @app.route('/buy_tqqq_above_200sma', methods=['POST'])
-# def buy_tqqq_above_200sma(request):
-#     api = set_alpaca_environment(env=alpaca_environment)  # or 'paper' based on your needs
-#     return buy_tqqq_if_above_200sma(api)
-
-
 def run_local(action, env="paper", request="test", force_execute=False, investment_amount=None):
     api = set_alpaca_environment(env=env, use_secret_manager=False)
     if action == "monthly_invest_all":
@@ -6418,9 +5865,7 @@ def run_local(action, env="paper", request="test", force_execute=False, investme
         return execute_quarterly_nine_sig_signal(api, force_execute=force_execute, env=env)
     elif action == "monthly_buy_spxl":
         return monthly_buying_sma(api, "SPXL", force_execute=force_execute, env=env)
-    elif action == "sell_spxl_below_200sma":
-        return daily_trade_sma(api, "SPXL", env=env)
-    elif action == "buy_spxl_above_200sma":
+    elif action in ("sell_spxl_below_200sma", "buy_spxl_above_200sma"):
         return daily_trade_sma(api, "SPXL", env=env)
     elif action == "index_alert":
         return check_unified_index_alert(request, env=env)
@@ -6492,26 +5937,3 @@ if __name__ == "__main__":
     # Run the function locally
     result = run_local(action=args.action, env=args.env, force_execute=args.force, investment_amount=args.investment_amount)
     print(f"\nResult: {result}\n")
-    # save_balance("SPXL_SMA", 100)
-
-# local execution:
-# RECOMMENDED - Run all monthly strategies with coordinated budgets:
-# python3 main.py --action monthly_invest_all --env paper --force
-#
-# Individual strategy execution (for testing):
-# python3 main.py --action monthly_buy_hfea --env paper --force
-# python3 main.py --action monthly_buy_spxl --env paper --force
-# python3 main.py --action monthly_nine_sig_contributions --env paper --force
-#
-# Other actions:
-# python3 main.py --action rebalance_hfea --env paper
-# python3 main.py --action quarterly_nine_sig_signal --env paper --force
-# python3 main.py --action sell_spxl_below_200sma --env paper
-# python3 main.py --action buy_spxl_above_200sma --env paper
-# python3 main.py --action index_alert --env paper  # For unified index alerts (use with request body)
-#
-# Monthly momentum strategies:
-# python3 main.py --action monthly_dual_momentum --env paper --force
-# python3 main.py --action monthly_sector_momentum --env paper --force
-
-# consider shifting to short term bonds when 200sma is below https://app.alpaca.markets/trade/BIL?asset_class=stocks
