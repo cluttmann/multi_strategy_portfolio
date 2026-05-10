@@ -16,12 +16,13 @@ app = Flask(__name__)
 # Strategy allocation percentages for dynamic monthly investment calculation
 # Investment amounts are calculated dynamically each month based on available cash and margin
 strategy_allocations = {
-    "hfea_allo": 0.175,           # 17.5% to HFEA
-    "spxl_allo": 0.20,            # 20% to SPXL SMA
+    "hfea_allo": 0.15,            # 15% to HFEA (down 2.5% to fund regime_sso)
+    "spxl_allo": 0.15,            # 15% to SPXL SMA (down 5% to fund regime_sso)
     "rssb_wtip_allo": 0.20,       # 20% to RSSB/WTIP strategy
     "nine_sig_allo": 0.075,       # 7.5% to 9-Sig strategy
     "dual_momentum_allo": 0.225,  # 22.5% to Dual Momentum strategy
     "sector_momentum_allo": 0.125, # 12.5% to Sector Momentum strategy
+    "regime_sso_allo": 0.075,     # 7.5% to SSO/SHV regime detector (NEW)
 }
 
 upro_allocation = 0.45
@@ -48,6 +49,7 @@ spxl_sma_holding_fund = "SGOV"  # iShares 0-3 Month Treasury Bond ETF
 # - 9-Sig: TQQQ, AGG
 # - Dual Momentum: SPUU, EFO, BND
 # - Sector Momentum: ROM, UYG, DIG, RXL, UXI, UGE, UCC, UPW, UYM, URE, LTL, SCHZ, SHV (SHV is holding fund)
+# - Regime SSO: SSO (when in market), SHV (when defensive)
 
 # Strategy ticker ownership mapping for cost basis recalculation
 STRATEGY_SYMBOLS = {
@@ -56,7 +58,8 @@ STRATEGY_SYMBOLS = {
     "rssb_wtip": ["RSSB", "WTIP", "BIL"],
     "nine_sig": ["TQQQ", "AGG"],
     "dual_momentum": ["SPUU", "EFO", "BND"],
-    "sector_momentum": ["ROM", "UYG", "DIG", "RXL", "UXI", "UGE", "UCC", "UPW", "UYM", "URE", "LTL", "SCHZ", "SHV"]
+    "sector_momentum": ["ROM", "UYG", "DIG", "RXL", "UXI", "UGE", "UCC", "UPW", "UYM", "URE", "LTL", "SCHZ", "SHV"],
+    "regime_sso": ["SSO", "SHV"],
 }
 
 alpaca_environment = "live"
@@ -135,6 +138,44 @@ sector_momentum_config = {
     "spy_sma_period": 200,         # SPY 200-day SMA for trend filter
     "holding_fund_ticker": "SHV",  # Holding fund for accumulating funds when sector ETFs can't be bought
     "holding_fund_max": 250.0,     # $250 maximum
+}
+
+# Regime detection (SSO/SHV) configuration
+# Composite score from 7 macro signals; rotates between SSO (2x S&P 500) and SHV (T-bills)
+# based on Reddit /r/LETFs methodology by u/Neat_Bug1775. Each signal contributes -1/0/+1
+# to the composite (range roughly -7..+7). Designed for ~1.4 executions/year — intentionally
+# slow and noise-resistant.
+regime_sso_config = {
+    "risk_asset": "SSO",                # 2x leveraged S&P 500
+    "safe_asset": "SHV",                # 1-3 month Treasury bond ETF
+    "spy_sma_period": 200,              # Signal 1: SPY trend
+    "sma_hysteresis_days": 3,           # 3-day confirmation to filter whipsaws
+    "breadth_sma_period": 50,           # Signal 2: % of S&P 500 stocks > 50-SMA
+    "breadth_high_threshold": 0.60,     # > 60% bullish
+    "breadth_low_threshold": 0.40,      # < 40% bearish
+    "vix_low": 18.0,                    # Signal 3: VIX < 18 = calm
+    "vix_high": 25.0,                   # VIX > 25 = stress
+    "adx_period": 14,                   # Signal 4: ADX over 14 days
+    "adx_strong": 25.0,                 # ADX > 25 = strong trend
+    "credit_sma_period": 50,            # Signal 5: HYG/LQD ratio vs its 50-SMA
+    "canary_sma_period": 50,            # Signal 7: HYG/EEM/IWM vs 50-SMA
+    "news_lookback_hours": 24,          # Signal 6: 24h of news
+    "news_min_articles": 20,            # Need ≥20 articles for a meaningful sentiment read
+    "news_pos_threshold": 0.10,         # VADER compound > 0.10 = bullish
+    "news_neg_threshold": -0.10,        # VADER compound < -0.10 = bearish
+    "fed_hike_lookback_days": 90,       # Fed-policy filter window
+    "fed_hike_threshold_bps": 50,       # >50bp hike in 90 days = aggressive cycle
+    # Exit thresholds
+    "slow_exit_days": 15,               # Score ≤ 0 for 15 days → SHV
+    "slow_exit_score": 0,
+    "fast_exit_days": 3,                # Score ≤ -3 for 3 days → SHV
+    "fast_exit_score": -3,
+    # Re-entry thresholds (three independent paths, fastest wins)
+    "credit_vix_recovery_weeks": 4,     # Path A: 4 weeks of credit improving + VIX declining + score positive
+    "nlp_acceleration_score_days": 7,   # Path B: score ≥ +3 for 7 days
+    "nlp_acceleration_sentiment_weeks": 2,  # ... AND positive sentiment 2 weeks
+    "standard_reentry_days": 15,        # Path C: score ≥ +3 for 15 days (always-on fallback)
+    "reentry_score": 3,
 }
 
 # Firestore client - initialized lazily to respect .env file
@@ -4129,6 +4170,7 @@ def get_all_strategy_values(api):
             "nine_sig": float,
             "dual_momentum": float,
             "sector_momentum": float,
+            "regime_sso": float,
             "total": float
         }
     """
@@ -4169,19 +4211,41 @@ def get_all_strategy_values(api):
             positions.get("BND", 0)
         )
         
-        # Sector Momentum: All sector ETFs + holding funds
-        sector_momentum_symbols = sector_momentum_config["sector_etfs"] + ["SCHZ", "SHV"]
+        # Sector Momentum: All sector ETFs + SCHZ holding fund. NOTE: SHV is shared
+        # with regime_sso, so we deliberately don't include it here — sector_momentum's
+        # SHV holdings (if any) get attributed to regime_sso. Sector_momentum rarely
+        # accumulates SHV in practice; the rare case is acceptable accounting drift.
+        sector_momentum_symbols = sector_momentum_config["sector_etfs"] + ["SCHZ"]
         sector_momentum_value = sum(
             positions.get(symbol, 0) for symbol in sector_momentum_symbols
         )
-        
+
+        # Regime SSO: SSO when in market, SHV when defensive. Use Firestore-tracked
+        # share counts × latest price so we don't double-count with sector_momentum's
+        # SHV holding fund.
+        regime_state = regime_sso_state(env="live")
+        sso_qty = regime_state.get("sso_shares", 0) or 0
+        shv_qty = regime_state.get("shv_shares", 0) or 0
+        regime_sso_value = 0.0
+        if sso_qty > 0:
+            try:
+                regime_sso_value += sso_qty * float(get_latest_trade(api, "SSO"))
+            except Exception:
+                pass
+        if shv_qty > 0:
+            try:
+                regime_sso_value += shv_qty * float(get_latest_trade(api, "SHV"))
+            except Exception:
+                pass
+
         total_value = (
             hfea_value +
             spxl_sma_value +
             rssb_wtip_value +
             nine_sig_value +
             dual_momentum_value +
-            sector_momentum_value
+            sector_momentum_value +
+            regime_sso_value
         )
 
         return {
@@ -4191,6 +4255,7 @@ def get_all_strategy_values(api):
             "nine_sig": nine_sig_value,
             "dual_momentum": dual_momentum_value,
             "sector_momentum": sector_momentum_value,
+            "regime_sso": regime_sso_value,
             "total": total_value
         }
 
@@ -4203,6 +4268,7 @@ def get_all_strategy_values(api):
             "nine_sig": 0,
             "dual_momentum": 0,
             "sector_momentum": 0,
+            "regime_sso": 0,
             "total": 0
         }
 
@@ -4244,7 +4310,8 @@ def calculate_rebalanced_allocations(api, aggressiveness=None):
         "rssb_wtip": "rssb_wtip_allo",
         "nine_sig": "nine_sig_allo",
         "dual_momentum": "dual_momentum_allo",
-        "sector_momentum": "sector_momentum_allo"
+        "sector_momentum": "sector_momentum_allo",
+        "regime_sso": "regime_sso_allo",
     }
     
     # Get target percentages from strategy_allocations
@@ -4448,7 +4515,8 @@ def print_allocation_dashboard(rebalance_result, contribution_amount=None):
         "rssb_wtip": "RSSB/WTIP",
         "nine_sig": "9-Sig",
         "dual_momentum": "Dual Momentum",
-        "sector_momentum": "Sector Momentum"
+        "sector_momentum": "Sector Momentum",
+        "regime_sso": "Regime SSO",
     }
     
     current_values = rebalance_result["current_values"]
@@ -5223,6 +5291,633 @@ def monthly_sector_momentum_strategy(api, force_execute=False, investment_calc=N
     return f"Sector Momentum completed. Return: {strategy_return:.2%}"
 
 
+# ════════════════════════════════════════════════════════════════════
+# REGIME DETECTION (SSO/SHV) — full 7-signal composite system
+# Methodology: r/LETFs u/Neat_Bug1775. Composite score from 7 macro
+# signals; rotates SSO ↔ SHV. Designed to fire ~1.4x/year.
+# ════════════════════════════════════════════════════════════════════
+
+_vader_analyzer = None
+
+
+def _get_vader():
+    """Lazy-init VADER sentiment analyzer (avoids import on cold start of unrelated functions)."""
+    global _vader_analyzer
+    if _vader_analyzer is None:
+        from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+        _vader_analyzer = SentimentIntensityAnalyzer()
+    return _vader_analyzer
+
+
+def get_fred_series(series_id, limit=300):
+    """Fetch a FRED series. Returns observations list (newest first) or None."""
+    fred_key = get_secret_or_env("FREDKEY")
+    if not fred_key:
+        return None
+    url = (f"https://api.stlouisfed.org/fred/series/observations?"
+           f"series_id={series_id}&api_key={fred_key}&file_type=json"
+           f"&sort_order=desc&limit={limit}")
+    try:
+        resp = requests.get(url, timeout=15)
+        resp.raise_for_status()
+        return resp.json().get("observations", [])
+    except Exception as e:
+        print(f"FRED fetch failed for {series_id}: {e}")
+        return None
+
+
+def get_vix_data(days=60):
+    """Returns (latest_vix, list_of_recent_vix newest-first) from FRED VIXCLS."""
+    obs = get_fred_series("VIXCLS", limit=days)
+    if not obs:
+        return None, []
+    values = []
+    for o in obs:
+        try:
+            values.append(float(o["value"]))
+        except (ValueError, KeyError, TypeError):
+            continue
+    if not values:
+        return None, []
+    return values[0], values
+
+
+def is_aggressive_rate_hiking_cycle():
+    """Fed-policy filter: True if Fed Funds Target rose ≥50bp over last 90 days."""
+    obs = get_fred_series("DFEDTARU", limit=120)
+    if not obs:
+        return False
+    rates = []
+    for o in obs:
+        try:
+            rates.append(float(o["value"]))
+        except (ValueError, KeyError, TypeError):
+            continue
+    if len(rates) < 2:
+        return False
+    threshold_bps = regime_sso_config["fed_hike_threshold_bps"]
+    older_idx = min(regime_sso_config["fed_hike_lookback_days"], len(rates) - 1)
+    delta_pct = rates[0] - rates[older_idx]
+    return (delta_pct * 100) >= threshold_bps
+
+
+def get_sp500_constituents(env="live"):
+    """List of S&P 500 tickers (Wikipedia), cached daily in Firestore."""
+    cache_doc_id = "sp500_constituents"
+    today = datetime.datetime.now().strftime("%Y-%m-%d")
+    try:
+        doc = (get_firestore_client()
+               .collection(f"market-data-{env}")
+               .document(cache_doc_id).get())
+        if doc.exists:
+            data = doc.to_dict()
+            if data.get("date") == today and data.get("tickers"):
+                return data["tickers"]
+    except Exception:
+        pass
+    try:
+        from bs4 import BeautifulSoup
+        url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
+        resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "html.parser")
+        table = soup.find("table", {"id": "constituents"})
+        tickers = []
+        for row in table.find_all("tr")[1:]:
+            cell = row.find("td")
+            if cell:
+                t = cell.get_text(strip=True).replace(".", "-")
+                tickers.append(t)
+        if not tickers:
+            return []
+        try:
+            (get_firestore_client()
+             .collection(f"market-data-{env}")
+             .document(cache_doc_id).set({"date": today, "tickers": tickers}))
+        except Exception:
+            pass
+        return tickers
+    except Exception as e:
+        print(f"S&P 500 constituents fetch failed: {e}")
+        return []
+
+
+def compute_market_breadth(api, env="live", sample_size=150):
+    """% of S&P 500 stocks above their 50-SMA. Sampled to control API cost."""
+    tickers = get_sp500_constituents(env=env)
+    if not tickers:
+        return None
+    if sample_size and sample_size < len(tickers):
+        step = max(1, len(tickers) // sample_size)
+        tickers = tickers[::step][:sample_size]
+    period = regime_sso_config["breadth_sma_period"]
+    above = 0
+    valid = 0
+    for sym in tickers:
+        try:
+            bars = get_alpaca_historical_bars(api, sym, days=period + 30)
+            if bars is None or len(bars) < period:
+                continue
+            closes = [float(b["c"]) for b in bars[-period:]]
+            sma = sum(closes) / period
+            valid += 1
+            if closes[-1] > sma:
+                above += 1
+        except Exception:
+            continue
+    if valid == 0:
+        return None
+    return above / valid
+
+
+def compute_adx_from_bars(bars, period=14):
+    """ADX from a list of OHLC bars in Alpaca format."""
+    if len(bars) < period * 2 + 1:
+        return None
+    highs = [float(b["h"]) for b in bars]
+    lows = [float(b["l"]) for b in bars]
+    closes = [float(b["c"]) for b in bars]
+    tr = [max(highs[i] - lows[i],
+              abs(highs[i] - closes[i-1]),
+              abs(lows[i] - closes[i-1])) for i in range(1, len(bars))]
+    plus_dm = []
+    minus_dm = []
+    for i in range(1, len(bars)):
+        up = highs[i] - highs[i-1]
+        down = lows[i-1] - lows[i]
+        plus_dm.append(up if up > down and up > 0 else 0)
+        minus_dm.append(down if down > up and down > 0 else 0)
+
+    def wilder(vals, n):
+        if len(vals) < n:
+            return []
+        first = sum(vals[:n])
+        out = [first]
+        for v in vals[n:]:
+            out.append(out[-1] - out[-1] / n + v)
+        return out
+
+    atr = wilder(tr, period)
+    plus_smoothed = wilder(plus_dm, period)
+    minus_smoothed = wilder(minus_dm, period)
+    if not atr or not plus_smoothed or not minus_smoothed:
+        return None
+    plus_di = [100 * p / a if a > 0 else 0 for p, a in zip(plus_smoothed, atr)]
+    minus_di = [100 * m / a if a > 0 else 0 for m, a in zip(minus_smoothed, atr)]
+    dx = [100 * abs(p - m) / (p + m) if (p + m) > 0 else 0 for p, m in zip(plus_di, minus_di)]
+    if len(dx) < period:
+        return None
+    adx_initial = sum(dx[:period]) / period
+    adx_values = [adx_initial]
+    for d in dx[period:]:
+        adx_values.append((adx_values[-1] * (period - 1) + d) / period)
+    return adx_values[-1]
+
+
+def get_alpaca_news(api, hours_back=24, limit=80):
+    """Fetch recent macro news from Alpaca's news API."""
+    headers = get_auth_headers(api)
+    after = (datetime.datetime.utcnow() - datetime.timedelta(hours=hours_back)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    url = "https://data.alpaca.markets/v1beta1/news"
+    articles = []
+    next_token = None
+    while len(articles) < limit:
+        params = {"start": after, "limit": min(50, limit - len(articles))}
+        if next_token:
+            params["page_token"] = next_token
+        try:
+            r = requests.get(url, headers=headers, params=params, timeout=15)
+            r.raise_for_status()
+            data = r.json()
+        except Exception as e:
+            print(f"Alpaca news fetch failed: {e}")
+            break
+        items = data.get("news", [])
+        if not items:
+            break
+        articles.extend(items)
+        next_token = data.get("next_page_token")
+        if not next_token:
+            break
+    return articles
+
+
+def score_news_sentiment(articles):
+    """VADER-scored compound sentiment averaged over articles. Returns (avg, n)."""
+    if not articles:
+        return 0.0, 0
+    analyzer = _get_vader()
+    scores = []
+    for a in articles:
+        text = f"{a.get('headline','')}. {a.get('summary','')}"
+        if not text.strip():
+            continue
+        scores.append(analyzer.polarity_scores(text)["compound"])
+    if not scores:
+        return 0.0, 0
+    return sum(scores) / len(scores), len(scores)
+
+
+# --- The 7 signals (each returns -1, 0, or +1) ---
+
+
+def signal_price_trend(api, env="live"):
+    """Signal 1: SPY vs 200-SMA with margin band as soft hysteresis."""
+    spy_data = get_all_market_data("SPY", env=env)
+    if spy_data is None:
+        spy_data = update_market_data("SPY", env=env)
+    if not spy_data:
+        return 0
+    price = spy_data.get("price")
+    sma = spy_data.get("sma200")
+    if not price or not sma:
+        return 0
+    ratio = price / sma
+    if ratio > 1.005:
+        return 1
+    if ratio < 0.995:
+        return -1
+    return 0
+
+
+def signal_market_breadth(api, env="live"):
+    """Signal 2: % of S&P 500 stocks above 50-SMA."""
+    pct = compute_market_breadth(api, env=env, sample_size=150)
+    if pct is None:
+        return 0
+    if pct > regime_sso_config["breadth_high_threshold"]:
+        return 1
+    if pct < regime_sso_config["breadth_low_threshold"]:
+        return -1
+    return 0
+
+
+def signal_volatility_regime():
+    """Signal 3: VIX level."""
+    latest, history = get_vix_data(days=10)
+    if latest is None:
+        return 0
+    if latest < regime_sso_config["vix_low"]:
+        return 1
+    if latest > regime_sso_config["vix_high"]:
+        return -1
+    return 0
+
+
+def signal_trend_strength(api):
+    """Signal 4: ADX > 25 confirms trend; direction inherited from price trend."""
+    bars = get_alpaca_historical_bars(api, "SPY", days=60)
+    if not bars or len(bars) < 30:
+        return 0
+    adx = compute_adx_from_bars(bars, period=regime_sso_config["adx_period"])
+    if adx is None:
+        return 0
+    if adx > regime_sso_config["adx_strong"]:
+        return signal_price_trend(api)
+    return 0
+
+
+def signal_credit_spread(api):
+    """Signal 5: HYG/LQD ratio vs its 50-SMA. Rising ratio = risk-on."""
+    period = regime_sso_config["credit_sma_period"]
+    hyg = get_alpaca_historical_bars(api, "HYG", days=period + 20)
+    lqd = get_alpaca_historical_bars(api, "LQD", days=period + 20)
+    if not hyg or not lqd or len(hyg) < period or len(lqd) < period:
+        return 0
+    n = min(len(hyg), len(lqd))
+    hyg_closes = [float(b["c"]) for b in hyg[-n:]]
+    lqd_closes = [float(b["c"]) for b in lqd[-n:]]
+    ratios = [h / l for h, l in zip(hyg_closes, lqd_closes) if l > 0]
+    if len(ratios) < period:
+        return 0
+    sma = sum(ratios[-period:]) / period
+    latest = ratios[-1]
+    if latest > sma * 1.002:
+        return 1
+    if latest < sma * 0.998:
+        return -1
+    return 0
+
+
+def signal_news_sentiment(api):
+    """Signal 6: VADER sentiment of last 24h Alpaca news."""
+    cfg = regime_sso_config
+    articles = get_alpaca_news(api, hours_back=cfg["news_lookback_hours"], limit=80)
+    if len(articles) < cfg["news_min_articles"]:
+        return 0
+    avg, _ = score_news_sentiment(articles)
+    if avg > cfg["news_pos_threshold"]:
+        return 1
+    if avg < cfg["news_neg_threshold"]:
+        return -1
+    return 0
+
+
+def signal_canary_universe(api):
+    """Signal 7: HYG, EEM, IWM all below/above 50-SMA = liquidity signal."""
+    period = regime_sso_config["canary_sma_period"]
+    above = 0
+    below = 0
+    valid = 0
+    for sym in ("HYG", "EEM", "IWM"):
+        bars = get_alpaca_historical_bars(api, sym, days=period + 20)
+        if not bars or len(bars) < period:
+            continue
+        closes = [float(b["c"]) for b in bars[-period:]]
+        sma = sum(closes) / period
+        valid += 1
+        if closes[-1] > sma:
+            above += 1
+        else:
+            below += 1
+    if valid < 3:
+        return 0
+    if below >= 3:
+        return -1
+    if above >= 3:
+        return 1
+    return 0
+
+
+def compute_regime_score(api, env="live"):
+    """Run all 7 signals + the Fed filter. Returns score dict."""
+    s1 = signal_price_trend(api, env=env)
+    s2 = signal_market_breadth(api, env=env)
+    s3 = signal_volatility_regime()
+    s4 = signal_trend_strength(api)
+    s5 = signal_credit_spread(api)
+    s6 = signal_news_sentiment(api)
+    s7 = signal_canary_universe(api)
+    composite = s1 + s2 + s3 + s4 + s5 + s6 + s7
+    return {
+        "price_trend": s1,
+        "market_breadth": s2,
+        "volatility_regime": s3,
+        "trend_strength": s4,
+        "credit_spread": s5,
+        "news_sentiment": s6,
+        "canary_universe": s7,
+        "composite": composite,
+        "fed_hike_filter": is_aggressive_rate_hiking_cycle(),
+        "computed_at": datetime.datetime.utcnow().isoformat(),
+    }
+
+
+# --- State management ---
+
+
+def save_regime_score(score, env="live"):
+    today = datetime.datetime.now().strftime("%Y-%m-%d")
+    try:
+        get_firestore_client().collection(f"regime-scores-{env}").document(today).set(score)
+    except Exception as e:
+        print(f"Failed to persist regime score: {e}")
+
+
+def load_recent_regime_scores(days=40, env="live"):
+    """Returns list of score dicts in chronological order (oldest → newest)."""
+    try:
+        docs = (get_firestore_client()
+                .collection(f"regime-scores-{env}")
+                .order_by("computed_at", direction=firestore.Query.DESCENDING)
+                .limit(days).stream())
+        rows = [d.to_dict() for d in docs]
+        rows.reverse()
+        return rows
+    except Exception as e:
+        print(f"Failed to load recent regime scores: {e}")
+        return []
+
+
+def regime_sso_state(env="live"):
+    """Read the strategy's persisted state, defaulting to in-market."""
+    try:
+        doc = (get_firestore_client()
+               .collection(f"strategy-balances-{env}")
+               .document("regime_sso").get())
+        if doc.exists:
+            d = doc.to_dict() or {}
+            d.setdefault("position", "SSO")
+            return d
+    except Exception:
+        pass
+    return {"position": "SSO", "last_change_date": None,
+            "sso_shares": 0, "shv_shares": 0, "total_invested": 0}
+
+
+def save_regime_sso_state(state, env="live"):
+    try:
+        get_firestore_client().collection(f"strategy-balances-{env}").document("regime_sso").set(state)
+    except Exception as e:
+        print(f"Failed to save regime_sso state: {e}")
+
+
+def evaluate_regime_decision(history, current_position):
+    """
+    Decide what to do given recent score history and current position.
+    Returns one of: HOLD, EXIT_SLOW, EXIT_FAST, REENTER_CREDIT_VIX, REENTER_NLP, REENTER_STD.
+    """
+    cfg = regime_sso_config
+    if not history:
+        return "HOLD"
+    composites = [h.get("composite", 0) for h in history]
+
+    if current_position == "SSO":
+        if len(composites) >= cfg["fast_exit_days"]:
+            recent = composites[-cfg["fast_exit_days"]:]
+            if all(c <= cfg["fast_exit_score"] for c in recent):
+                return "EXIT_FAST"
+        if len(composites) >= cfg["slow_exit_days"]:
+            recent = composites[-cfg["slow_exit_days"]:]
+            if all(c <= cfg["slow_exit_score"] for c in recent):
+                return "EXIT_SLOW"
+        return "HOLD"
+
+    # Defensive (SHV): block re-entries if Fed is in aggressive hiking cycle
+    if history[-1].get("fed_hike_filter"):
+        return "HOLD"
+
+    # Path A: Credit-VIX recovery (~4 weeks of credit + vol both non-negative + score positive)
+    days_a = cfg["credit_vix_recovery_weeks"] * 5
+    if len(history) >= days_a:
+        recent = history[-days_a:]
+        if (all(h.get("credit_spread", 0) >= 0 for h in recent) and
+                all(h.get("volatility_regime", 0) >= 0 for h in recent) and
+                composites[-1] > 0):
+            return "REENTER_CREDIT_VIX"
+
+    # Path B: NLP-accelerated (score ≥ +3 for 7 days AND positive sentiment 2 weeks)
+    days_b_score = cfg["nlp_acceleration_score_days"]
+    days_b_sent = cfg["nlp_acceleration_sentiment_weeks"] * 5
+    if len(history) >= max(days_b_score, days_b_sent):
+        recent_score = composites[-days_b_score:]
+        recent_sent = history[-days_b_sent:]
+        if (all(c >= cfg["reentry_score"] for c in recent_score) and
+                all(h.get("news_sentiment", 0) >= 0 for h in recent_sent)):
+            return "REENTER_NLP"
+
+    # Path C: Standard mechanical (score ≥ +3 for 15 days)
+    days_c = cfg["standard_reentry_days"]
+    if len(composites) >= days_c:
+        recent = composites[-days_c:]
+        if all(c >= cfg["reentry_score"] for c in recent):
+            return "REENTER_STD"
+
+    return "HOLD"
+
+
+def execute_regime_rotation(api, target, env="live"):
+    """Rotate the regime_sso strategy holdings between SSO and SHV."""
+    risk = regime_sso_config["risk_asset"]
+    safe = regime_sso_config["safe_asset"]
+    state = regime_sso_state(env=env)
+    held_sso = state.get("sso_shares", 0)
+    held_shv = state.get("shv_shares", 0)
+
+    if target == safe and held_sso > 0:
+        try:
+            order = submit_order(api, risk, held_sso, "sell")
+            wait_for_order_fill(api, order["id"])
+            order_info = get_order(api, order["id"])
+            proceeds = float(order_info.get("filled_avg_price") or 0) * held_sso
+            if proceeds > 0:
+                shv_price = float(get_latest_trade(api, safe))
+                shv_qty = proceeds / shv_price
+                buy_order = submit_order(api, safe, shv_qty, "buy")
+                wait_for_order_fill(api, buy_order["id"])
+                held_shv += shv_qty
+                held_sso = 0
+            send_telegram_message(f"🛡️ regime_sso: SSO → SHV (defensive rotation, ${proceeds:,.2f} reallocated)")
+        except Exception as e:
+            send_telegram_message(f"🧭 regime_sso\n❌ Rotation SSO→SHV failed: {e}")
+            return f"Rotation failed: {e}"
+    elif target == risk and held_shv > 0:
+        try:
+            order = submit_order(api, safe, held_shv, "sell")
+            wait_for_order_fill(api, order["id"])
+            order_info = get_order(api, order["id"])
+            proceeds = float(order_info.get("filled_avg_price") or 0) * held_shv
+            if proceeds > 0:
+                sso_price = float(get_latest_trade(api, risk))
+                sso_qty = proceeds / sso_price
+                buy_order = submit_order(api, risk, sso_qty, "buy")
+                wait_for_order_fill(api, buy_order["id"])
+                held_sso += sso_qty
+                held_shv = 0
+            send_telegram_message(f"📈 regime_sso: SHV → SSO (re-entry, ${proceeds:,.2f} reallocated)")
+        except Exception as e:
+            send_telegram_message(f"🧭 regime_sso\n❌ Rotation SHV→SSO failed: {e}")
+            return f"Rotation failed: {e}"
+
+    state.update({
+        "position": target,
+        "last_change_date": datetime.datetime.now().strftime("%Y-%m-%d"),
+        "sso_shares": held_sso,
+        "shv_shares": held_shv,
+    })
+    save_regime_sso_state(state, env=env)
+    return f"Rotated to {target}"
+
+
+def daily_regime_check(api, env="live"):
+    """Compute today's score, persist, evaluate and rotate if needed."""
+    try:
+        score = compute_regime_score(api, env=env)
+    except Exception as e:
+        send_telegram_message(f"🧭 regime_sso\n❌ Score computation failed: {e}")
+        return f"Score failed: {e}"
+    save_regime_score(score, env=env)
+    history = load_recent_regime_scores(days=40, env=env)
+    state = regime_sso_state(env=env)
+    current = state.get("position", "SSO")
+    decision = evaluate_regime_decision(history, current)
+
+    if decision in ("EXIT_SLOW", "EXIT_FAST"):
+        execute_regime_rotation(api, regime_sso_config["safe_asset"], env=env)
+    elif decision in ("REENTER_CREDIT_VIX", "REENTER_NLP", "REENTER_STD"):
+        execute_regime_rotation(api, regime_sso_config["risk_asset"], env=env)
+
+    msg = (f"🧭 regime_sso daily | score {score['composite']:+d} | pos {current} | {decision}\n"
+           f"  trend {score['price_trend']:+d}  breadth {score['market_breadth']:+d}  "
+           f"vol {score['volatility_regime']:+d}  adx {score['trend_strength']:+d}\n"
+           f"  credit {score['credit_spread']:+d}  news {score['news_sentiment']:+d}  "
+           f"canary {score['canary_universe']:+d}  fed_hike={score['fed_hike_filter']}")
+    print(msg)
+    if decision != "HOLD":
+        send_telegram_message(msg)
+    return {"score": score, "decision": decision, "position_before": current}
+
+
+def make_monthly_buys_regime_sso(api, force_execute=False, investment_calc=None,
+                                  margin_result=None, skip_order_wait=False, env="live"):
+    """Add this month's allocation to whichever asset (SSO or SHV) the regime is in."""
+    if not force_execute and not check_trading_day(mode="monthly"):
+        return "Not first trading day of the month"
+
+    if margin_result is None:
+        margin_result = check_margin_conditions(api, env=env)
+    if investment_calc is None:
+        investment_calc = calculate_monthly_investments(api, margin_result, env)
+
+    investment_amount = investment_calc["strategy_amounts"].get("regime_sso_allo", 0)
+    target_margin = margin_result["target_margin"]
+    metrics = margin_result["metrics"]
+    leverage = metrics.get("leverage", 1.0)
+    buying_power = investment_calc["total_available"] + investment_calc["margin_approved"]
+
+    def _skip(reason):
+        msg = f"🧭 regime_sso (7.5%) — ${investment_amount:,.2f}\n⏭ {reason}"
+        send_telegram_message(msg)
+        print(reason)
+        return reason
+
+    # When margin gates fail and leverage > 1, skip; otherwise we still buy
+    # (SHV is a bond, SSO is leveraged so we apply the projected-leverage check below).
+    if target_margin == 0 and leverage > 1.0:
+        return _skip(f"Skipped — deleveraging required ({leverage:.2f}x)")
+    if buying_power < investment_amount:
+        return _skip(f"Skipped — insufficient buying power (${buying_power:,.2f})")
+    if investment_amount < margin_control_config["min_investment"]:
+        return _skip(f"Skipped — ${investment_amount:.2f} below $1.00 minimum")
+
+    state = regime_sso_state(env=env)
+    target = state.get("position", "SSO")
+
+    # Projected leverage check only applies when buying SSO (leveraged ETF)
+    if target == "SSO" and target_margin > 0:
+        portfolio_value = metrics.get("portfolio_value", 0)
+        equity = metrics.get("equity", 0)
+        if portfolio_value > 0 and equity > 0:
+            projected_leverage = (portfolio_value + investment_amount) / equity
+            if projected_leverage >= margin_control_config["max_leverage"]:
+                return _skip(f"Skipped — projected leverage {projected_leverage:.3f}x exceeds limit")
+
+    try:
+        price = float(get_latest_trade(api, target))
+        qty = investment_amount / price
+        order = submit_order(api, target, qty, "buy")
+        if not skip_order_wait:
+            wait_for_order_fill(api, order["id"])
+    except Exception as e:
+        send_telegram_message(f"🧭 regime_sso\n❌ Error buying {target}: {e}")
+        return f"Failed to buy {target}: {e}"
+
+    if target == "SSO":
+        state["sso_shares"] = state.get("sso_shares", 0) + qty
+    else:
+        state["shv_shares"] = state.get("shv_shares", 0) + qty
+    state["total_invested"] = state.get("total_invested", 0) + investment_amount
+    state["last_buy_date"] = datetime.datetime.now().strftime("%Y-%m-%d")
+    save_regime_sso_state(state, env=env)
+
+    send_telegram_message(
+        f"🧭 regime_sso (7.5%) — ${investment_amount:,.2f}\n"
+        f"Bought {qty:.4f} {target} @ ${price:.2f}\n"
+        f"Position: {target}"
+    )
+    return f"regime_sso bought {qty:.4f} {target}"
+
+
 # Helper function to wait for an order to be filled
 def wait_for_order_fill(api, order_id, timeout=300, poll_interval=5):
     elapsed_time = 0
@@ -5297,6 +5992,7 @@ def monthly_invest_all_strategies(api, force_execute=False, skip_order_wait=Fals
     print(f"  9-Sig ({get_pct('nine_sig_allo'):.1f}%): ${strategy_amounts['nine_sig_allo']:.2f}")
     print(f"  Dual Momentum ({get_pct('dual_momentum_allo'):.1f}%): ${strategy_amounts['dual_momentum_allo']:.2f}")
     print(f"  Sector Momentum ({get_pct('sector_momentum_allo'):.1f}%): ${strategy_amounts['sector_momentum_allo']:.2f}")
+    print(f"  Regime SSO ({get_pct('regime_sso_allo'):.1f}%): ${strategy_amounts['regime_sso_allo']:.2f}")
     
     # Send one shared account status message to Telegram before executing strategies
     metrics = margin_result.get("metrics", {})
@@ -5321,12 +6017,13 @@ def monthly_invest_all_strategies(api, force_execute=False, skip_order_wait=Fals
     # Show per-strategy budget breakdown
     account_msg += "Budget per strategy:\n"
     for label, key in [
-        ("HFEA 17.5%", "hfea_allo"),
-        ("SPXL SMA 20%", "spxl_allo"),
+        ("HFEA 15%", "hfea_allo"),
+        ("SPXL SMA 15%", "spxl_allo"),
         ("RSSB/WTIP 20%", "rssb_wtip_allo"),
         ("9-Sig 7.5%", "nine_sig_allo"),
         ("Dual Momentum 22.5%", "dual_momentum_allo"),
         ("Sector Momentum 12.5%", "sector_momentum_allo"),
+        ("Regime SSO 7.5%", "regime_sso_allo"),
     ]:
         account_msg += f"  • {label}: ${strategy_amounts[key]:,.2f}\n"
     
@@ -5352,6 +6049,7 @@ def monthly_invest_all_strategies(api, force_execute=False, skip_order_wait=Fals
     _run("nine_sig", "9-Sig", lambda: make_monthly_nine_sig_contributions(api, force_execute, investment_calc, margin_result, skip_order_wait, env))
     _run("dual_momentum", "Dual Momentum", lambda: monthly_dual_momentum_strategy(api, force_execute, investment_calc, margin_result, skip_order_wait, env))
     _run("sector_momentum", "Sector Momentum", lambda: monthly_sector_momentum_strategy(api, force_execute, investment_calc, margin_result, skip_order_wait, env))
+    _run("regime_sso", "Regime SSO", lambda: make_monthly_buys_regime_sso(api, force_execute, investment_calc, margin_result, skip_order_wait, env))
 
     print("\n=== All Monthly Strategies Complete ===")
 
@@ -5364,6 +6062,7 @@ def monthly_invest_all_strategies(api, force_execute=False, skip_order_wait=Fals
         "nine_sig": "9-Sig",
         "dual_momentum": "Dual Momentum",
         "sector_momentum": "Sector Momentum",
+        "regime_sso": "Regime SSO",
     }
     for key, label in label_map.items():
         outcome = results.get(key, "(no result)")
@@ -5441,6 +6140,7 @@ def monthly_invest_rssb_sector_momentum_custom(api, total_budget=300.0, force_ex
             "spxl_allo": 0,
             "nine_sig_allo": 0,
             "dual_momentum_allo": 0,
+            "regime_sso_allo": 0,
         },
         "reserved_amounts": {}
     }
@@ -5523,6 +6223,7 @@ def test_monthly_buy_rssb_wtip(api, investment_amount=10.0, force_execute=True, 
             "nine_sig_allo": 0,
             "dual_momentum_allo": 0,
             "sector_momentum_allo": 0,
+            "regime_sso_allo": 0,
         },
         "reserved_amounts": {}
     }
@@ -5648,6 +6349,18 @@ def monthly_sector_momentum(request):
         return jsonify({"error": error_message}), 500
 
 
+@app.route("/daily_regime_check", methods=["POST"])
+def daily_regime_check_route(request):
+    api = set_alpaca_environment(env=alpaca_environment)
+    return daily_regime_check(api, env=alpaca_environment)
+
+
+@app.route("/monthly_buy_regime_sso", methods=["POST"])
+def monthly_buy_regime_sso(request):
+    api = set_alpaca_environment(env=alpaca_environment)
+    return make_monthly_buys_regime_sso(api, env=alpaca_environment)
+
+
 @app.route("/index_alert", methods=["POST"])
 def index_alert(request):
     return check_unified_index_alert(request, env=alpaca_environment)
@@ -5701,6 +6414,7 @@ def audit_monthly_run(api, env="live", lookback_days=14):
         "9-Sig": ["TQQQ", "AGG"],
         "Dual Momentum": ["SPUU", "EFO", "BND"],
         "Sector Momentum": list(sector_momentum_config["sector_etfs"]) + ["SCHZ", "SHV"],
+        "Regime SSO": ["SSO", "SHV"],
     }
 
     strategy_activity = {label: [] for label in expected_symbols}
@@ -5764,6 +6478,10 @@ def run_local(action, env="paper", request="test", force_execute=False, investme
         return monthly_dual_momentum_strategy(api, force_execute=force_execute, skip_order_wait=True, env=env)
     elif action == "monthly_sector_momentum":
         return monthly_sector_momentum_strategy(api, force_execute=force_execute, skip_order_wait=True, env=env)
+    elif action == "monthly_buy_regime_sso":
+        return make_monthly_buys_regime_sso(api, force_execute=force_execute, skip_order_wait=True, env=env)
+    elif action == "daily_regime_check":
+        return daily_regime_check(api, env=env)
     elif action == "monthly_invest_rssb_sector_custom":
         # Special occasion: RSSB/WTIP + Sector Momentum with $300 budget
         return monthly_invest_rssb_sector_momentum_custom(api, total_budget=300.0, force_execute=True, skip_order_wait=True, env=env)
@@ -5793,6 +6511,8 @@ if __name__ == "__main__":
             "index_alert",
             "monthly_dual_momentum",
             "monthly_sector_momentum",
+            "monthly_buy_regime_sso",
+            "daily_regime_check",
             "monthly_invest_rssb_sector_custom",
             "test_monthly_buy_rssb_wtip"
         ],

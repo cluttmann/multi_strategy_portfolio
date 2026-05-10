@@ -175,6 +175,38 @@ steps:
     - --set-env-vars=GOOGLE_CLOUD_PROJECT=1098661711782,GOOGLE_CLOUD_PROJECT_ID=trading-436516
     waitFor: ['-'] # start in parallel and actually needs to be set, otherwise deployment is sequential
 
+  # Step 5b: Deploy daily_regime_check (SSO/SHV regime detector daily run)
+  - name: 'gcr.io/cloud-builders/gcloud'
+    args:
+    - functions
+    - deploy
+    - daily_regime_check
+    - --source=.
+    - --trigger-http
+    - --region=europe-west3
+    - --runtime=python310
+    - --timeout=540s
+    - --entry-point=daily_regime_check_route
+    - --memory=1024MB
+    - --set-env-vars=GOOGLE_CLOUD_PROJECT=1098661711782,GOOGLE_CLOUD_PROJECT_ID=trading-436516
+    waitFor: ['-']
+
+  # Step 5c: Deploy monthly_buy_regime_sso (regime detector monthly contribution)
+  - name: 'gcr.io/cloud-builders/gcloud'
+    args:
+    - functions
+    - deploy
+    - monthly_buy_regime_sso
+    - --source=.
+    - --trigger-http
+    - --region=europe-west3
+    - --runtime=python310
+    - --timeout=540s
+    - --entry-point=monthly_buy_regime_sso
+    - --memory=512MB
+    - --set-env-vars=GOOGLE_CLOUD_PROJECT=1098661711782,GOOGLE_CLOUD_PROJECT_ID=trading-436516
+    waitFor: ['-']
+
   # Step 6: Deploy the unified index_alert Cloud Function with Alpaca and Telegram settings
   - name: 'gcr.io/cloud-builders/gcloud'
     args:
@@ -408,6 +440,35 @@ steps:
             --time-zone='America/New_York' \
             --location='europe-west3' \
             --oidc-service-account-email='1098661711782-compute@developer.gserviceaccount.com'
+        fi
+    waitFor: ['-']
+
+  # Cloud Scheduler for the daily regime detection check (SSO/SHV).
+  # Runs every weekday at 4:30 PM ET — 30 min after market close so end-of-day
+  # data is settled. Trades execute next morning if a rotation triggers.
+  - name: 'gcr.io/cloud-builders/gcloud'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        if gcloud scheduler jobs describe daily_regime_check --location=europe-west3 >/dev/null 2>&1; then
+          gcloud scheduler jobs update http daily_regime_check \
+            --schedule='30 16 * * 1-5' \
+            --uri='https://europe-west3-trading-436516.cloudfunctions.net/daily_regime_check' \
+            --http-method='POST' \
+            --time-zone='America/New_York' \
+            --location='europe-west3' \
+            --oidc-service-account-email='1098661711782-compute@developer.gserviceaccount.com' \
+            --attempt-deadline='300s'
+        else
+          gcloud scheduler jobs create http daily_regime_check \
+            --schedule='30 16 * * 1-5' \
+            --uri='https://europe-west3-trading-436516.cloudfunctions.net/daily_regime_check' \
+            --http-method='POST' \
+            --time-zone='America/New_York' \
+            --location='europe-west3' \
+            --oidc-service-account-email='1098661711782-compute@developer.gserviceaccount.com' \
+            --attempt-deadline='300s'
         fi
     waitFor: ['-']
 
