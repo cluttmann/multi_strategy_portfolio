@@ -49,7 +49,7 @@ spxl_sma_holding_fund = "SGOV"  # iShares 0-3 Month Treasury Bond ETF
 # - 9-Sig: TQQQ, AGG
 # - Dual Momentum: SPUU, EFO, BND
 # - Sector Momentum: ROM, UYG, DIG, RXL, UXI, UGE, UCC, UPW, UYM, URE, LTL, SCHZ, SHV (SHV is holding fund)
-# - Regime SSO: SSO (when in market), SHV (when defensive)
+# - Regime SSO: SSO (when in market), USFR (when defensive — floating-rate Treasury)
 
 # Strategy ticker ownership mapping for cost basis recalculation
 STRATEGY_SYMBOLS = {
@@ -59,7 +59,7 @@ STRATEGY_SYMBOLS = {
     "nine_sig": ["TQQQ", "AGG"],
     "dual_momentum": ["SPUU", "EFO", "BND"],
     "sector_momentum": ["ROM", "UYG", "DIG", "RXL", "UXI", "UGE", "UCC", "UPW", "UYM", "URE", "LTL", "SCHZ", "SHV"],
-    "regime_sso": ["SSO", "SHV"],
+    "regime_sso": ["SSO", "USFR"],
 }
 
 alpaca_environment = "live"
@@ -147,7 +147,7 @@ sector_momentum_config = {
 # slow and noise-resistant.
 regime_sso_config = {
     "risk_asset": "SSO",                # 2x leveraged S&P 500
-    "safe_asset": "SHV",                # 1-3 month Treasury bond ETF
+    "safe_asset": "USFR",               # WisdomTree Floating Rate Treasury (cash-like, no duration risk; SHV is taken by sector_momentum)
     "spy_sma_period": 200,              # Signal 1: SPY trend
     "sma_hysteresis_days": 3,           # 3-day confirmation to filter whipsaws
     "breadth_sma_period": 50,           # Signal 2: % of S&P 500 stocks > 50-SMA
@@ -4220,21 +4220,23 @@ def get_all_strategy_values(api):
             positions.get(symbol, 0) for symbol in sector_momentum_symbols
         )
 
-        # Regime SSO: SSO when in market, SHV when defensive. Use Firestore-tracked
-        # share counts × latest price so we don't double-count with sector_momentum's
-        # SHV holding fund.
+        # Regime SSO: SSO when in market, USFR when defensive. Tracked via the
+        # strategy's own Firestore state so the safe-asset value never collides
+        # with another strategy's holdings.
         regime_state = regime_sso_state(env="live")
-        sso_qty = regime_state.get("sso_shares", 0) or 0
-        shv_qty = regime_state.get("shv_shares", 0) or 0
+        risk_asset = regime_sso_config["risk_asset"]
+        safe_asset = regime_sso_config["safe_asset"]
+        risk_qty = regime_state.get("risk_shares", 0) or regime_state.get("sso_shares", 0) or 0
+        safe_qty = regime_state.get("safe_shares", 0) or 0
         regime_sso_value = 0.0
-        if sso_qty > 0:
+        if risk_qty > 0:
             try:
-                regime_sso_value += sso_qty * float(get_latest_trade(api, "SSO"))
+                regime_sso_value += risk_qty * float(get_latest_trade(api, risk_asset))
             except Exception:
                 pass
-        if shv_qty > 0:
+        if safe_qty > 0:
             try:
-                regime_sso_value += shv_qty * float(get_latest_trade(api, "SHV"))
+                regime_sso_value += safe_qty * float(get_latest_trade(api, safe_asset))
             except Exception:
                 pass
 
@@ -5691,18 +5693,21 @@ def load_recent_regime_scores(days=40, env="live"):
 
 def regime_sso_state(env="live"):
     """Read the strategy's persisted state, defaulting to in-market."""
+    risk = regime_sso_config["risk_asset"]
     try:
         doc = (get_firestore_client()
                .collection(f"strategy-balances-{env}")
                .document("regime_sso").get())
         if doc.exists:
             d = doc.to_dict() or {}
-            d.setdefault("position", "SSO")
+            d.setdefault("position", risk)
+            d.setdefault("risk_shares", d.get("sso_shares", 0))
+            d.setdefault("safe_shares", d.get("shv_shares", 0))
             return d
     except Exception:
         pass
-    return {"position": "SSO", "last_change_date": None,
-            "sso_shares": 0, "shv_shares": 0, "total_invested": 0}
+    return {"position": risk, "last_change_date": None,
+            "risk_shares": 0, "safe_shares": 0, "total_invested": 0}
 
 
 def save_regime_sso_state(state, env="live"):
@@ -5767,53 +5772,53 @@ def evaluate_regime_decision(history, current_position):
 
 
 def execute_regime_rotation(api, target, env="live"):
-    """Rotate the regime_sso strategy holdings between SSO and SHV."""
+    """Rotate the regime_sso strategy holdings between risk_asset and safe_asset."""
     risk = regime_sso_config["risk_asset"]
     safe = regime_sso_config["safe_asset"]
     state = regime_sso_state(env=env)
-    held_sso = state.get("sso_shares", 0)
-    held_shv = state.get("shv_shares", 0)
+    held_risk = state.get("risk_shares", 0) or 0
+    held_safe = state.get("safe_shares", 0) or 0
 
-    if target == safe and held_sso > 0:
+    if target == safe and held_risk > 0:
         try:
-            order = submit_order(api, risk, held_sso, "sell")
+            order = submit_order(api, risk, held_risk, "sell")
             wait_for_order_fill(api, order["id"])
             order_info = get_order(api, order["id"])
-            proceeds = float(order_info.get("filled_avg_price") or 0) * held_sso
+            proceeds = float(order_info.get("filled_avg_price") or 0) * held_risk
             if proceeds > 0:
-                shv_price = float(get_latest_trade(api, safe))
-                shv_qty = proceeds / shv_price
-                buy_order = submit_order(api, safe, shv_qty, "buy")
+                safe_price = float(get_latest_trade(api, safe))
+                safe_qty = proceeds / safe_price
+                buy_order = submit_order(api, safe, safe_qty, "buy")
                 wait_for_order_fill(api, buy_order["id"])
-                held_shv += shv_qty
-                held_sso = 0
-            send_telegram_message(f"🛡️ regime_sso: SSO → SHV (defensive rotation, ${proceeds:,.2f} reallocated)")
+                held_safe += safe_qty
+                held_risk = 0
+            send_telegram_message(f"🛡️ regime_sso: {risk} → {safe} (defensive rotation, ${proceeds:,.2f} reallocated)")
         except Exception as e:
-            send_telegram_message(f"🧭 regime_sso\n❌ Rotation SSO→SHV failed: {e}")
+            send_telegram_message(f"🧭 regime_sso\n❌ Rotation {risk}→{safe} failed: {e}")
             return f"Rotation failed: {e}"
-    elif target == risk and held_shv > 0:
+    elif target == risk and held_safe > 0:
         try:
-            order = submit_order(api, safe, held_shv, "sell")
+            order = submit_order(api, safe, held_safe, "sell")
             wait_for_order_fill(api, order["id"])
             order_info = get_order(api, order["id"])
-            proceeds = float(order_info.get("filled_avg_price") or 0) * held_shv
+            proceeds = float(order_info.get("filled_avg_price") or 0) * held_safe
             if proceeds > 0:
-                sso_price = float(get_latest_trade(api, risk))
-                sso_qty = proceeds / sso_price
-                buy_order = submit_order(api, risk, sso_qty, "buy")
+                risk_price = float(get_latest_trade(api, risk))
+                risk_qty = proceeds / risk_price
+                buy_order = submit_order(api, risk, risk_qty, "buy")
                 wait_for_order_fill(api, buy_order["id"])
-                held_sso += sso_qty
-                held_shv = 0
-            send_telegram_message(f"📈 regime_sso: SHV → SSO (re-entry, ${proceeds:,.2f} reallocated)")
+                held_risk += risk_qty
+                held_safe = 0
+            send_telegram_message(f"📈 regime_sso: {safe} → {risk} (re-entry, ${proceeds:,.2f} reallocated)")
         except Exception as e:
-            send_telegram_message(f"🧭 regime_sso\n❌ Rotation SHV→SSO failed: {e}")
+            send_telegram_message(f"🧭 regime_sso\n❌ Rotation {safe}→{risk} failed: {e}")
             return f"Rotation failed: {e}"
 
     state.update({
         "position": target,
         "last_change_date": datetime.datetime.now().strftime("%Y-%m-%d"),
-        "sso_shares": held_sso,
-        "shv_shares": held_shv,
+        "risk_shares": held_risk,
+        "safe_shares": held_safe,
     })
     save_regime_sso_state(state, env=env)
     return f"Rotated to {target}"
@@ -5881,10 +5886,11 @@ def make_monthly_buys_regime_sso(api, force_execute=False, investment_calc=None,
         return _skip(f"Skipped — ${investment_amount:.2f} below $1.00 minimum")
 
     state = regime_sso_state(env=env)
-    target = state.get("position", "SSO")
+    risk = regime_sso_config["risk_asset"]
+    target = state.get("position", risk)
 
-    # Projected leverage check only applies when buying SSO (leveraged ETF)
-    if target == "SSO" and target_margin > 0:
+    # Projected leverage check only applies when buying the risk_asset (leveraged ETF)
+    if target == risk and target_margin > 0:
         portfolio_value = metrics.get("portfolio_value", 0)
         equity = metrics.get("equity", 0)
         if portfolio_value > 0 and equity > 0:
@@ -5902,10 +5908,10 @@ def make_monthly_buys_regime_sso(api, force_execute=False, investment_calc=None,
         send_telegram_message(f"🧭 regime_sso\n❌ Error buying {target}: {e}")
         return f"Failed to buy {target}: {e}"
 
-    if target == "SSO":
-        state["sso_shares"] = state.get("sso_shares", 0) + qty
+    if target == risk:
+        state["risk_shares"] = state.get("risk_shares", 0) + qty
     else:
-        state["shv_shares"] = state.get("shv_shares", 0) + qty
+        state["safe_shares"] = state.get("safe_shares", 0) + qty
     state["total_invested"] = state.get("total_invested", 0) + investment_amount
     state["last_buy_date"] = datetime.datetime.now().strftime("%Y-%m-%d")
     save_regime_sso_state(state, env=env)
@@ -6414,7 +6420,7 @@ def audit_monthly_run(api, env="live", lookback_days=14):
         "9-Sig": ["TQQQ", "AGG"],
         "Dual Momentum": ["SPUU", "EFO", "BND"],
         "Sector Momentum": list(sector_momentum_config["sector_etfs"]) + ["SCHZ", "SHV"],
-        "Regime SSO": ["SSO", "SHV"],
+        "Regime SSO": [regime_sso_config["risk_asset"], regime_sso_config["safe_asset"]],
     }
 
     strategy_activity = {label: [] for label in expected_symbols}
