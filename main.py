@@ -16,13 +16,12 @@ app = Flask(__name__)
 # Strategy allocation percentages for dynamic monthly investment calculation
 # Investment amounts are calculated dynamically each month based on available cash and margin
 strategy_allocations = {
-    "hfea_allo": 0.15,            # 15% to HFEA (down 2.5% to fund regime_sso)
-    "spxl_allo": 0.15,            # 15% to SPXL SMA (down 5% to fund regime_sso)
-    "rssb_wtip_allo": 0.20,       # 20% to RSSB/WTIP strategy
-    "nine_sig_allo": 0.075,       # 7.5% to 9-Sig strategy
-    "dual_momentum_allo": 0.225,  # 22.5% to Dual Momentum strategy
-    "sector_momentum_allo": 0.125, # 12.5% to Sector Momentum strategy
-    "regime_sso_allo": 0.075,     # 7.5% to SSO/SHV regime detector (NEW)
+    "hfea_allo": 0.1714,           # 17.14% to HFEA
+    "spxl_allo": 0.1714,           # 17.14% to SPXL SMA
+    "rssb_wtip_allo": 0.2286,      # 22.86% to RSSB/WTIP strategy
+    "nine_sig_allo": 0.0857,       # 8.57% to 9-Sig strategy
+    "dual_momentum_allo": 0.2572,  # 25.72% to Dual Momentum strategy
+    "regime_sso_allo": 0.0857,     # 8.57% to SSO/USFR regime detector
 }
 
 upro_allocation = 0.45
@@ -48,7 +47,6 @@ spxl_sma_holding_fund = "SGOV"  # iShares 0-3 Month Treasury Bond ETF
 # - RSSB/WTIP: RSSB, WTIP, BIL (BIL is holding fund for uninvested WTIP amounts)
 # - 9-Sig: TQQQ, AGG
 # - Dual Momentum: SPUU, EFO, BND
-# - Sector Momentum: ROM, UYG, DIG, RXL, UXI, UGE, UCC, UPW, UYM, URE, LTL, SCHZ, SHV (SHV is holding fund)
 # - Regime SSO: SSO (when in market), USFR (when defensive — floating-rate Treasury)
 
 # Strategy ticker ownership mapping for cost basis recalculation
@@ -58,7 +56,6 @@ STRATEGY_SYMBOLS = {
     "rssb_wtip": ["RSSB", "WTIP", "BIL"],
     "nine_sig": ["TQQQ", "AGG"],
     "dual_momentum": ["SPUU", "EFO", "BND"],
-    "sector_momentum": ["ROM", "UYG", "DIG", "RXL", "UXI", "UGE", "UCC", "UPW", "UYM", "URE", "LTL", "SCHZ", "SHV"],
     "regime_sso": ["SSO", "USFR"],
 }
 
@@ -101,45 +98,6 @@ rebalance_config = {
     "min_floor_pct_of_target": 0.50,  # Each strategy receives at least this fraction of its target (e.g. 9-Sig at 7.5% gets ≥ 3.75%) so aggressive tilts can't starve a small allocation entirely
 }
 
-# Sector Momentum Strategy configuration
-# Using 2x leveraged ETFs for enhanced returns
-_sector_names = {
-    "ROM": "Technology",
-    "UYG": "Financials",
-    "DIG": "Energy",
-    "RXL": "Healthcare",
-    "UXI": "Industrials",
-    "UGE": "Consumer Staples",
-    "UCC": "Consumer Discretionary",
-    "UPW": "Utilities",
-    "UYM": "Materials",
-    "URE": "Real Estate",
-    "LTL": "Communication Services",
-}
-
-sector_momentum_config = {
-    "sector_etfs": list(_sector_names.keys()),
-    "sector_names": _sector_names,
-    "bond_etf": "SCHZ",  # Bond ETF for bearish periods
-    "momentum_weights": {
-        "1_month": 0.40,   # 40% weight for 1-month momentum
-        "3_month": 0.20,   # 20% weight for 3-month momentum
-        "6_month": 0.20,   # 20% weight for 6-month momentum
-        "12_month": 0.20   # 20% weight for 12-month momentum
-    },
-    "lookback_periods": {
-        "1_month": 21,     # 21 trading days
-        "3_month": 63,     # 63 trading days
-        "6_month": 126,    # 126 trading days
-        "12_month": 252    # 252 trading days
-    },
-    "top_sectors_count": 3,         # Select top 3 sectors
-    "target_allocation_per_sector": 0.3333,  # 33.33% each
-    "spy_sma_period": 200,         # SPY 200-day SMA for trend filter
-    "holding_fund_ticker": "SHV",  # Holding fund for accumulating funds when sector ETFs can't be bought
-    "holding_fund_max": 250.0,     # $250 maximum
-}
-
 # Regime detection (SSO/SHV) configuration
 # Composite score from 7 macro signals; rotates between SSO (2x S&P 500) and SHV (T-bills)
 # based on Reddit /r/LETFs methodology by u/Neat_Bug1775. Each signal contributes -1/0/+1
@@ -147,7 +105,7 @@ sector_momentum_config = {
 # slow and noise-resistant.
 regime_sso_config = {
     "risk_asset": "SSO",                # 2x leveraged S&P 500
-    "safe_asset": "USFR",               # WisdomTree Floating Rate Treasury (cash-like, no duration risk; SHV is taken by sector_momentum)
+    "safe_asset": "USFR",               # WisdomTree Floating Rate Treasury (cash-like, no duration risk)
     "spy_sma_period": 200,              # Signal 1: SPY trend
     "sma_hysteresis_days": 3,           # 3-day confirmation to filter whipsaws
     "breadth_sma_period": 50,           # Signal 2: % of S&P 500 stocks > 50-SMA
@@ -2219,7 +2177,7 @@ def get_spxl_sma_value(api):
         
         # Get invested amount from Firestore
         balances = load_balances()
-        # Use lowercase to match other strategies (nine_sig, sector_momentum, etc.)
+        # Use lowercase to match other strategies (nine_sig, dual_momentum, etc.)
         # Try both for backward compatibility during migration
         spxl_data = balances.get("spxl_sma", {}) or balances.get("SPXL_SMA", {})
         invested_amount = spxl_data.get("total_invested", 0)
@@ -3990,172 +3948,6 @@ def calculate_12_month_returns(api, symbol, lookback_days=252):
         return None
 
 
-def calculate_multi_period_momentum(api, ticker):
-    """
-    Calculate multi-period momentum score for a sector ETF.
-    
-    Uses weighted combination of 1-month (40%), 3-month (20%), 6-month (20%), and 12-month (20%) returns.
-    
-    Args:
-        api: Alpaca API credentials
-        ticker: Sector ETF ticker (e.g., 'XLK', 'XLF')
-    
-    Returns:
-        float: Weighted composite momentum score or None if error
-    """
-    try:
-        # Get current price
-        current_price = float(get_latest_trade(api, ticker))
-        
-        # Get historical bars (need 252+ days for 12-month calculation)
-        bars = get_alpaca_historical_bars(api, ticker, days=400)
-        
-        if len(bars) < 252:
-            print(f"Warning: Only {len(bars)} days of data available for {ticker}")
-            return None
-        
-        # Calculate returns for each period
-        returns = {}
-        weights = sector_momentum_config["momentum_weights"]
-        periods = sector_momentum_config["lookback_periods"]
-        
-        for period_name, days in periods.items():
-            try:
-                # Get price from N days ago
-                price_n_days_ago = bars[-(days + 1)]  # +1 because we want exactly N days ago
-                
-                if price_n_days_ago == 0:
-                    print(f"Warning: Zero price {days} days ago for {ticker}")
-                    return None
-                
-                # Calculate return
-                period_return = (current_price / price_n_days_ago) - 1
-                returns[period_name] = period_return
-                
-            except Exception as e:
-                print(f"Error calculating {period_name} return for {ticker}: {e}")
-                return None
-        
-        # Calculate weighted composite score
-        composite_score = (
-            weights["1_month"] * returns["1_month"] +
-            weights["3_month"] * returns["3_month"] +
-            weights["6_month"] * returns["6_month"] +
-            weights["12_month"] * returns["12_month"]
-        )
-        
-        return composite_score
-        
-    except Exception as e:
-        print(f"Error calculating multi-period momentum for {ticker}: {e}")
-        return None
-
-
-def rank_sectors_by_momentum(api):
-    """
-    Rank all sector ETFs by their multi-period momentum scores.
-    
-    Args:
-        api: Alpaca API credentials
-    
-    Returns:
-        list: List of tuples (ticker, momentum_score) sorted by score descending
-    """
-    print("Calculating momentum scores for all sector ETFs...")
-    
-    sector_scores = []
-    sector_etfs = sector_momentum_config["sector_etfs"]
-    
-    for ticker in sector_etfs:
-        print(f"Calculating momentum for {ticker}...")
-        momentum_score = calculate_multi_period_momentum(api, ticker)
-        
-        if momentum_score is not None:
-            sector_scores.append((ticker, momentum_score))
-            print(f"{ticker}: {momentum_score:.4f} ({momentum_score:.2%})")
-        else:
-            print(f"Warning: Could not calculate momentum for {ticker}")
-    
-    # Sort by momentum score (descending)
-    sector_scores.sort(key=lambda x: x[1], reverse=True)
-    
-    print("\nSector momentum rankings:")
-    for i, (ticker, score) in enumerate(sector_scores, 1):
-        print(f"{i:2d}. {ticker}: {score:.4f} ({score:.2%})")
-    
-    return sector_scores
-
-
-def get_sector_momentum_positions(api):
-    # Include sector ETFs + bond ETF (excludes holding fund SHV from position tracking)
-    symbols = sector_momentum_config["sector_etfs"] + [sector_momentum_config["bond_etf"]]
-    return get_strategy_positions(api, symbols, "sector momentum")
-
-
-def get_sector_momentum_value(api):
-    """
-    Calculate total value of sector momentum strategy positions.
-    
-    Args:
-        api: Alpaca API credentials
-    
-    Returns:
-        dict: Dictionary with total_value, position_breakdown, and invested_amount
-    """
-    try:
-        # Get current positions
-        positions = get_sector_momentum_positions(api)
-        
-        if not positions:
-            return {
-                "total_value": 0,
-                "position_breakdown": {},
-                "invested_amount": 0
-            }
-        
-        # Calculate current value for each position
-        position_breakdown = {}
-        total_value = 0
-        
-        for ticker, shares in positions.items():
-            try:
-                current_price = float(get_latest_trade(api, ticker))
-                position_value = shares * current_price
-                position_breakdown[ticker] = {
-                    "shares": shares,
-                    "price": current_price,
-                    "value": position_value
-                }
-                total_value += position_value
-                
-            except Exception as e:
-                print(f"Error calculating value for {ticker}: {e}")
-                position_breakdown[ticker] = {
-                    "shares": shares,
-                    "price": 0,
-                    "value": 0
-                }
-        
-        # Get invested amount from Firestore
-        balances = load_balances()
-        sector_data = balances.get("sector_momentum", {})
-        invested_amount = sector_data.get("total_invested", 0)
-        
-        return {
-            "total_value": total_value,
-            "position_breakdown": position_breakdown,
-            "invested_amount": invested_amount
-        }
-        
-    except Exception as e:
-        print(f"Error calculating sector momentum value: {e}")
-        return {
-            "total_value": 0,
-            "position_breakdown": {},
-            "invested_amount": 0
-        }
-
-
 def get_all_strategy_values(api):
     """
     Get current market value of all strategies from Alpaca positions.
@@ -4174,7 +3966,6 @@ def get_all_strategy_values(api):
             "rssb_wtip": float,
             "nine_sig": float,
             "dual_momentum": float,
-            "sector_momentum": float,
             "regime_sso": float,
             "total": float
         }
@@ -4216,15 +4007,6 @@ def get_all_strategy_values(api):
             positions.get("BND", 0)
         )
         
-        # Sector Momentum: All sector ETFs + SCHZ holding fund. NOTE: SHV is shared
-        # with regime_sso, so we deliberately don't include it here — sector_momentum's
-        # SHV holdings (if any) get attributed to regime_sso. Sector_momentum rarely
-        # accumulates SHV in practice; the rare case is acceptable accounting drift.
-        sector_momentum_symbols = sector_momentum_config["sector_etfs"] + ["SCHZ"]
-        sector_momentum_value = sum(
-            positions.get(symbol, 0) for symbol in sector_momentum_symbols
-        )
-
         # Regime SSO: SSO when in market, USFR when defensive. Tracked via the
         # strategy's own Firestore state so the safe-asset value never collides
         # with another strategy's holdings.
@@ -4251,7 +4033,6 @@ def get_all_strategy_values(api):
             rssb_wtip_value +
             nine_sig_value +
             dual_momentum_value +
-            sector_momentum_value +
             regime_sso_value
         )
 
@@ -4261,7 +4042,6 @@ def get_all_strategy_values(api):
             "rssb_wtip": rssb_wtip_value,
             "nine_sig": nine_sig_value,
             "dual_momentum": dual_momentum_value,
-            "sector_momentum": sector_momentum_value,
             "regime_sso": regime_sso_value,
             "total": total_value
         }
@@ -4274,7 +4054,6 @@ def get_all_strategy_values(api):
             "rssb_wtip": 0,
             "nine_sig": 0,
             "dual_momentum": 0,
-            "sector_momentum": 0,
             "regime_sso": 0,
             "total": 0
         }
@@ -4317,7 +4096,6 @@ def calculate_rebalanced_allocations(api, aggressiveness=None):
         "rssb_wtip": "rssb_wtip_allo",
         "nine_sig": "nine_sig_allo",
         "dual_momentum": "dual_momentum_allo",
-        "sector_momentum": "sector_momentum_allo",
         "regime_sso": "regime_sso_allo",
     }
     
@@ -4522,7 +4300,6 @@ def print_allocation_dashboard(rebalance_result, contribution_amount=None):
         "rssb_wtip": "RSSB/WTIP",
         "nine_sig": "9-Sig",
         "dual_momentum": "Dual Momentum",
-        "sector_momentum": "Sector Momentum",
         "regime_sso": "Regime SSO",
     }
     
@@ -4816,486 +4593,6 @@ def determine_dual_momentum_target(
 
     return target_position, winner, winner_return, winner_underlying
 
-
-def monthly_sector_momentum_strategy(api, force_execute=False, investment_calc=None, margin_result=None, skip_order_wait=False, env="live"):
-    """
-    Sector Momentum Rotation Strategy implementation.
-    
-    Invests in top 3 performing sector ETFs based on multi-period momentum,
-    with SPY 200-SMA trend filtering. Switches to SCHZ bonds when SPY < 200-SMA.
-    
-    Args:
-        api: Alpaca API credentials
-        force_execute: Bypass trading day check for testing
-        investment_calc: Pre-calculated investment amounts (from orchestrator) - optional
-        margin_result: Pre-calculated margin conditions (from orchestrator) - optional
-    
-    Returns:
-        str: Result message
-    """
-    if not force_execute and not check_trading_day(mode="monthly"):
-        print("Not first trading day of the month")
-        return "Not first trading day of the month"
-    
-    if force_execute:
-        print("Sector Momentum: Force execution enabled - bypassing trading day check")
-    
-    # If not provided by orchestrator, calculate independently
-    if margin_result is None:
-        margin_result = check_margin_conditions(api, env=env)
-    
-    if investment_calc is None:
-        investment_calc = calculate_monthly_investments(api, margin_result, env)
-    
-    investment_amount = investment_calc["strategy_amounts"]["sector_momentum_allo"]
-    
-    # Load current strategy state from Firestore
-    balances = load_balances(env)
-    sector_data = balances.get("sector_momentum", {})
-    total_invested = sector_data.get("total_invested", 0)
-    current_positions = sector_data.get("current_positions", {})
-    holding_fund_position = sector_data.get("holding_fund_position", {})
-    
-    # Get holding fund (SHV) current value and shares from Alpaca
-    holding_fund_ticker = sector_momentum_config["holding_fund_ticker"]
-    holding_fund_max = sector_momentum_config["holding_fund_max"]
-    shv_shares = get_holding_fund_shares(api, holding_fund_ticker)
-    shv_value = get_holding_fund_value(api, holding_fund_ticker)
-    shv_price = float(get_latest_trade(api, holding_fund_ticker)) if shv_value > 0 or investment_amount > 0 else 0
-    
-    print(f"Sector Momentum Strategy - Investment: ${investment_amount:.2f}")
-    print(f"Current positions: {current_positions}")
-    print(f"Total invested: ${total_invested:.2f}")
-    print(f"{holding_fund_ticker} holding fund: {shv_shares:.6f} shares (${shv_value:.2f})")
-    
-    # Check SPY 200-SMA trend filter using cached market data
-    print("Checking SPY 200-SMA trend filter...")
-    try:
-        # Get all SPY market data at once (efficient single fetch/read)
-        spy_data = get_all_market_data("SPY", env=env)
-        if spy_data is None:
-            spy_data = update_market_data("SPY", env=env)
-        
-        spy_price = spy_data["price"]
-        spy_sma = spy_data["sma200"]
-        
-        if spy_sma is None:
-            error_msg = "Failed to get SPY SMA - skipping strategy"
-            print(error_msg)
-            send_telegram_message(f"🔀 Sector Momentum (10%)\n❌ {error_msg}")
-            return error_msg
-        
-        # Use 1% margin band for consistent trend filtering with SPXL strategy
-        spy_above_sma_current = spy_price > spy_sma * (1 + margin)
-        print(f"SPY: ${spy_price:.2f}, 200-SMA: ${spy_sma:.2f}, Margin: {margin:.1%}, Above SMA: {spy_above_sma_current}")
-        
-    except Exception as e:
-        error_msg = f"Error checking SPY SMA: {e}"
-        print(error_msg)
-        send_telegram_message(f"🔀 Sector Momentum (10%)\n❌ {error_msg}")
-        return error_msg
-    
-    # Get actual current positions from Alpaca (not just Firestore)
-    actual_positions = get_sector_momentum_positions(api)
-    
-    # Calculate current strategy value from actual Alpaca positions
-    # Total available = current sector positions + SHV holding fund + new investment
-    current_value_data = get_sector_momentum_value(api)
-    current_sector_value = current_value_data["total_value"]  # Only sector positions, not SHV
-    total_to_allocate = current_sector_value + shv_value + investment_amount
-    
-    print(f"Current sector positions value: ${current_sector_value:.2f}")
-    print(f"SHV holding fund: ${shv_value:.2f}")
-    print(f"New investment: ${investment_amount:.2f}")
-    print(f"Total to allocate: ${total_to_allocate:.2f}")
-    
-    trades_executed = []
-    
-    if spy_above_sma_current:
-        # Sector Mode: Invest in top 3 sectors
-        print("SPY above 200-SMA: Proceeding with sector selection")
-        
-        # Rank sectors by momentum
-        sector_rankings = rank_sectors_by_momentum(api)
-        
-        if len(sector_rankings) < 3:
-            error_msg = "Not enough sectors with valid momentum data"
-            print(error_msg)
-            send_telegram_message(f"🔀 Sector Momentum (10%)\n❌ {error_msg}")
-            return error_msg
-        
-        # Select top 3 sectors
-        top_3_sectors = [ticker for ticker, score in sector_rankings[:3]]
-        print(f"Top 3 sectors: {top_3_sectors}")
-        
-        # Calculate target allocation per sector (33.33% each)
-        # This includes: current positions + SHV + new investment, all allocated to top 3 sectors
-        target_allocation_per_sector = total_to_allocate * sector_momentum_config["target_allocation_per_sector"]
-        print(f"Target allocation per sector: ${target_allocation_per_sector:.2f} (33.33% of ${total_to_allocate:.2f})")
-        
-        # Sell sectors not in top 3 (use actual positions from Alpaca)
-        sectors_to_sell = [ticker for ticker in actual_positions.keys() if ticker not in top_3_sectors]
-        
-        # Reallocate pending investments from dropped sectors to new top 3
-        for ticker in sectors_to_sell:
-            shares_to_sell = actual_positions[ticker]
-            if shares_to_sell > 0:
-                try:
-                    # Round down to whole shares (Alpaca doesn't allow fractional short sales)
-                    whole_shares_to_sell = int(shares_to_sell)
-                    if whole_shares_to_sell > 0:
-                        sell_order = submit_order(api, ticker, whole_shares_to_sell, "sell")
-                        if not skip_order_wait:
-                            wait_for_order_fill(api, sell_order["id"])
-                        if whole_shares_to_sell < shares_to_sell:
-                            trades_executed.append(f"Sold {whole_shares_to_sell:.0f} shares of {ticker} (dropped from top 3, rounded down from {shares_to_sell:.4f})")
-                            print(f"Sold {whole_shares_to_sell:.0f} shares of {ticker} (rounded down from {shares_to_sell:.4f})")
-                        else:
-                            trades_executed.append(f"Sold {whole_shares_to_sell:.0f} shares of {ticker} (dropped from top 3)")
-                            print(f"Sold {whole_shares_to_sell:.0f} shares of {ticker}")
-                    else:
-                        print(f"Skipping sell of {ticker}: {shares_to_sell:.4f} shares is less than 1 whole share")
-                except Exception as e:
-                    error_msg = f"Failed to sell {ticker}: {e}"
-                    print(error_msg)
-                    send_telegram_message(f"🔀 Sector Momentum (10%)\n❌ {error_msg}")
-                    return error_msg
-        
-        
-        # Rebalance to target allocations for top 3 sectors (use actual positions from Alpaca)
-        # Strategy: MINIMIZE SELLS to avoid taxable events
-        # 1. First, use new investment + SHV to buy underweight sectors
-        # 2. Only sell overweight sectors if absolutely necessary after using all new funds
-        sector_etfs = sector_momentum_config["sector_etfs"]
-        bond_etf = sector_momentum_config["bond_etf"]
-        
-        # Track uninvested amounts per sector and actual purchases
-        uninvested_amounts = {}
-        total_uninvested = 0
-        actual_sector_purchases = {}  # Track actual purchase costs per sector
-        
-        # Calculate available new funds (investment + SHV) for buying
-        available_new_funds = investment_amount + shv_value
-        funds_used = 0
-        
-        # Step 1: Calculate target values and identify underweight/overweight sectors
-        sector_targets = {}
-        sector_current_values = {}
-        sector_underweight = {}  # Sectors that need buying
-        sector_overweight = {}   # Sectors that need selling
-        
-        for ticker in top_3_sectors:
-            current_price = float(get_latest_trade(api, ticker))
-            current_shares = actual_positions.get(ticker, 0)
-            current_value = current_shares * current_price
-            target_value = target_allocation_per_sector
-            
-            sector_targets[ticker] = target_value
-            sector_current_values[ticker] = current_value
-            
-            value_delta = target_value - current_value
-            if value_delta > 0.01:  # Underweight - needs buying
-                sector_underweight[ticker] = value_delta
-            elif value_delta < -0.01:  # Overweight - might need selling
-                sector_overweight[ticker] = abs(value_delta)
-        
-        # Step 2: Use new funds to buy underweight sectors first (minimize sells)
-        for ticker in sorted(sector_underweight.keys(), key=lambda x: sector_underweight[x], reverse=True):
-            if funds_used >= available_new_funds:
-                break  # No more funds available
-                
-            try:
-                current_price = float(get_latest_trade(api, ticker))
-                current_shares = actual_positions.get(ticker, 0)
-                current_value = sector_current_values[ticker]
-                target_value = sector_targets[ticker]
-                value_delta = target_value - current_value
-                
-                # Calculate how much we can afford with remaining funds
-                remaining_funds = available_new_funds - funds_used
-                max_we_can_buy = min(value_delta, remaining_funds)
-                
-                if max_we_can_buy >= current_price:  # Can buy at least 1 share
-                    shares_to_buy = round(max_we_can_buy / current_price)
-                    if shares_to_buy >= 1:
-                        actual_cost = shares_to_buy * current_price
-                        buy_order = submit_order(api, ticker, shares_to_buy, "buy")
-                        if not skip_order_wait:
-                            wait_for_order_fill(api, buy_order["id"])
-                        trades_executed.append(f"Bought {shares_to_buy:.0f} shares of {ticker} (${actual_cost:.2f} to reach target ${target_value:.2f})")
-                        print(f"Bought {shares_to_buy:.0f} shares of {ticker} (${actual_cost:.2f} to reach target ${target_value:.2f})")
-                        
-                        actual_sector_purchases[ticker] = actual_cost
-                        funds_used += actual_cost
-                        
-                        # Update current value after purchase
-                        sector_current_values[ticker] += actual_cost
-                    else:
-                        # Can't buy even 1 share - track uninvested
-                        uninvested_amounts[ticker] = max_we_can_buy
-                        total_uninvested += max_we_can_buy
-                        print(f"Cannot buy {ticker}: need ${current_price:.2f} for 1 share, but only have ${max_we_can_buy:.2f}")
-                else:
-                    # Not enough funds - track uninvested
-                    uninvested_amounts[ticker] = max_we_can_buy
-                    total_uninvested += max_we_can_buy
-                    print(f"Insufficient funds for {ticker}: need ${value_delta:.2f}, have ${remaining_funds:.2f}")
-            except Exception as e:
-                error_msg = f"Failed to buy {ticker}: {e}"
-                print(error_msg)
-                send_telegram_message(f"🔀 Sector Momentum (10%)\n❌ {error_msg}")
-                return error_msg
-        
-        # Step 3: Only sell overweight sectors if we still need to after using all new funds
-        # Calculate remaining imbalance after using new funds
-        for ticker in top_3_sectors:
-            try:
-                current_price = float(get_latest_trade(api, ticker))
-                current_value = sector_current_values[ticker]  # Updated after purchases
-                target_value = sector_targets[ticker]
-                value_delta = target_value - current_value
-                
-                # Only sell if still overweight after using new funds
-                if value_delta < -0.01:  # Still overweight
-                    shares_to_sell = round(abs(value_delta) / current_price)
-                    whole_shares_to_sell = int(shares_to_sell)  # Round down to whole shares
-                    
-                    if whole_shares_to_sell > 0:
-                        sell_order = submit_order(api, ticker, whole_shares_to_sell, "sell")
-                        if not skip_order_wait:
-                            wait_for_order_fill(api, sell_order["id"])
-                        trades_executed.append(f"Sold {whole_shares_to_sell:.0f} shares of {ticker} (rebalancing to 33.33%, rounded down from {shares_to_sell:.4f})")
-                        print(f"Sold {whole_shares_to_sell:.0f} shares of {ticker} (rebalancing after using new funds)")
-                    else:
-                        print(f"Skipping sell of {ticker}: {shares_to_sell:.4f} shares is less than 1 whole share")
-            except Exception as e:
-                error_msg = f"Failed to rebalance {ticker}: {e}"
-                print(error_msg)
-                send_telegram_message(f"🔀 Sector Momentum (10%)\n❌ {error_msg}")
-                return error_msg
-                
-            except Exception as e:
-                error_msg = f"Failed to rebalance {ticker}: {e}"
-                print(error_msg)
-                send_telegram_message(f"🔀 Sector Momentum (10%)\n❌ {error_msg}")
-                return error_msg
-        
-        # Handle SHV holding fund: sell SHV to fund sector purchases
-        # Since SHV is included in total_to_allocate, we need to sell it to fund purchases
-        shv_shares_to_buy = 0
-        shv_amount_to_buy = 0
-        shv_leftover_after_sectors = 0
-        
-        # Calculate total purchases made (to determine how much SHV to sell)
-        total_purchases = sum(actual_sector_purchases.values())
-        
-        # If we made purchases and have SHV, sell SHV to fund them
-        # SHV was part of total_to_allocate, so we need to sell it to cover purchases
-        # Strategy: Sell SHV to fund purchases that exceed what new investment can cover
-        if total_purchases > 0 and shv_value > 0:
-            # Calculate how much SHV to sell: 
-            # If purchases exceed new investment, we need SHV to cover the difference
-            # Otherwise, we still sell SHV since it's part of the allocation and should be converted to sectors
-            shv_amount_to_sell = min(shv_value, total_purchases)
-            
-            if shv_amount_to_sell > 0:
-                shv_shares_to_sell = shv_amount_to_sell / shv_price if shv_price > 0 else 0
-                
-                # Get actual available SHV shares right before selling
-                actual_shv_shares_available = get_holding_fund_shares(api, holding_fund_ticker)
-                shv_shares_to_sell = min(shv_shares_to_sell, actual_shv_shares_available)
-                
-                if shv_shares_to_sell > 0.0001:  # Only sell if meaningful amount
-                    try:
-                        sell_order = submit_order(api, holding_fund_ticker, shv_shares_to_sell, "sell")
-                        if not skip_order_wait:
-                            wait_for_order_fill(api, sell_order["id"])
-                        
-                        actual_shv_sold_value = shv_shares_to_sell * shv_price
-                        shv_shares -= shv_shares_to_sell
-                        shv_value -= actual_shv_sold_value
-                        trades_executed.append(f"Sold {shv_shares_to_sell:.6f} shares of {holding_fund_ticker} (${actual_shv_sold_value:.2f}) to fund sector purchases")
-                        print(f"Sold {shv_shares_to_sell:.6f} shares of {holding_fund_ticker} (${actual_shv_sold_value:.2f}) to fund sector purchases")
-                    except Exception as e:
-                        print(f"Sector Momentum: Failed to sell {holding_fund_ticker}: {str(e)}")
-                        print("Continuing despite SHV sell failure...")
-        
-        # If we have uninvested amounts or leftover from SHV sale, add to SHV holding fund (up to max)
-        total_shv_to_add = total_uninvested + shv_leftover_after_sectors
-        if total_shv_to_add > 0:
-            # Note: shv_value was already reduced if we sold SHV
-            current_shv_value_after_sale = shv_value  # This is already updated if we sold
-            shv_value_after_investment = current_shv_value_after_sale + total_shv_to_add
-            if shv_value_after_investment <= holding_fund_max:
-                # Can add all leftover/uninvested amount to SHV
-                shv_amount_to_buy = total_shv_to_add
-                shv_shares_to_buy = shv_amount_to_buy / shv_price if shv_price > 0 else 0
-            else:
-                # Can only add up to max, try to buy sectors with excess
-                shv_amount_to_buy = holding_fund_max - current_shv_value_after_sale
-                if shv_amount_to_buy > 0:
-                    shv_shares_to_buy = shv_amount_to_buy / shv_price if shv_price > 0 else 0
-                
-                # Try to buy sectors with excess
-                excess_amount = total_shv_to_add - shv_amount_to_buy
-                if excess_amount > 0:
-                    # Distribute excess to sectors that need it
-                    for ticker, uninvested in uninvested_amounts.items():
-                        if excess_amount > 0:
-                            ticker_price = float(get_latest_trade(api, ticker))
-                            excess_shares = round(excess_amount / len(uninvested_amounts) / ticker_price)
-                            if excess_shares >= 1:
-                                try:
-                                    excess_buy_order = submit_order(api, ticker, excess_shares, "buy")
-                                    if not skip_order_wait:
-                                        wait_for_order_fill(api, excess_buy_order["id"])
-                                    trades_executed.append(f"Bought {excess_shares:.0f} shares of {ticker} (from excess after SHV max)")
-                                    print(f"Bought {excess_shares:.0f} shares of {ticker} (excess after SHV)")
-                                    excess_amount -= (excess_shares * ticker_price)
-                                except Exception as e:
-                                    print(f"Failed to buy {ticker} with excess: {e}")
-        
-        # Buy SHV holding fund if needed (only if amount meets minimum order size)
-        if shv_shares_to_buy > 0:
-            # Check if the order amount meets Alpaca's minimum ($1.00)
-            if shv_amount_to_buy < margin_control_config["min_investment"]:
-                print(f"Skipping SHV purchase: amount ${shv_amount_to_buy:.2f} is below minimum order size (${margin_control_config['min_investment']:.2f})")
-                print(f"Leftover ${shv_amount_to_buy:.2f} will remain uninvested (too small for any order)")
-            else:
-                try:
-                    shv_buy_order = submit_order(api, holding_fund_ticker, shv_shares_to_buy, "buy")
-                    if not skip_order_wait:
-                        wait_for_order_fill(api, shv_buy_order["id"])
-                    shv_shares += shv_shares_to_buy
-                    shv_value += shv_amount_to_buy
-                    trades_executed.append(f"Bought {shv_shares_to_buy:.6f} shares of {holding_fund_ticker} (${shv_amount_to_buy:.2f}) - holding fund")
-                    print(f"Bought {shv_shares_to_buy:.6f} shares of {holding_fund_ticker} for ${shv_amount_to_buy:.2f} (holding fund)")
-                    # Included in final summary message
-                except Exception as e:
-                    print(f"Sector Momentum: Failed to buy {holding_fund_ticker}: {str(e)}")
-                    print("Continuing despite SHV purchase failure...")
-        
-        # Update Firestore with sector positions
-        # ALWAYS use actual positions from Alpaca - don't calculate or filter
-        updated_actual_positions = get_sector_momentum_positions(api)
-        
-        # Use ALL actual positions from Alpaca, not just top 3
-        # This ensures Firestore matches reality even if positions exist outside top 3
-        new_positions = updated_actual_positions.copy()  # Use all actual positions
-        
-        # Update holding fund position (get fresh from Alpaca to be accurate)
-        updated_shv_shares = get_holding_fund_shares(api, holding_fund_ticker)
-        holding_fund_position[holding_fund_ticker] = updated_shv_shares
-        
-        save_balance("sector_momentum", {
-            "total_invested": total_invested + investment_amount,
-            "current_positions": new_positions,  # All actual positions from Alpaca
-            "holding_fund_position": holding_fund_position,
-            "last_trade_date": datetime.datetime.now().strftime("%Y-%m-%d"),
-            "top_3_sectors": top_3_sectors,
-            "spy_above_sma": True,
-            "last_momentum_scores": dict(sector_rankings[:5])  # Top 5 for reference
-        }, env)
-        
-    else:
-        # Bond Mode: Sell all sectors, invest in SCHZ
-        print("SPY below 200-SMA: Switching to bond mode (SCHZ)")
-        
-        bond_etf = sector_momentum_config["bond_etf"]
-        sector_etfs = sector_momentum_config["sector_etfs"]
-        
-        # Sell all sector positions (use actual positions from Alpaca, not Firestore)
-        # Filter to only sell sector ETFs (not SCHZ if it's already held)
-        for ticker, shares in actual_positions.items():
-            # Only sell sector ETFs, not the bond ETF
-            if ticker in sector_etfs and shares > 0:
-                try:
-                    # Round down to whole shares (sector ETFs are non-fractionable)
-                    whole_shares_to_sell = int(shares)
-                    if whole_shares_to_sell > 0:
-                        sell_order = submit_order(api, ticker, whole_shares_to_sell, "sell")
-                        if not skip_order_wait:
-                            wait_for_order_fill(api, sell_order["id"])
-                        if whole_shares_to_sell < shares:
-                            trades_executed.append(f"Sold {whole_shares_to_sell:.0f} shares of {ticker} (rounded down from {shares:.4f})")
-                            print(f"Sold {whole_shares_to_sell:.0f} shares of {ticker} (rounded down from {shares:.4f})")
-                        else:
-                            trades_executed.append(f"Sold {whole_shares_to_sell:.0f} shares of {ticker}")
-                            print(f"Sold {whole_shares_to_sell:.0f} shares of {ticker}")
-                    else:
-                        print(f"Skipping sell of {ticker}: {shares:.4f} shares is less than 1 whole share")
-                except Exception as e:
-                    error_msg = f"Failed to sell {ticker}: {e}"
-                    print(error_msg)
-                    send_telegram_message(f"🔀 Sector Momentum (10%)\n❌ {error_msg}")
-                    return error_msg
-        
-        # Invest all in SCHZ
-        if total_to_allocate > 0:
-            try:
-                schz_price = float(get_latest_trade(api, bond_etf))
-                schz_shares = total_to_allocate / schz_price
-                
-                buy_order = submit_order(api, bond_etf, schz_shares, "buy")
-                if not skip_order_wait:
-                    wait_for_order_fill(api, buy_order["id"])
-                
-                trades_executed.append(f"Bought {schz_shares:.4f} shares of {bond_etf} (bear market protection)")
-                print(f"Bought {schz_shares:.4f} shares of {bond_etf}")
-                
-                # Update holding fund position (get fresh from Alpaca)
-                updated_shv_shares = get_holding_fund_shares(api, holding_fund_ticker)
-                holding_fund_position[holding_fund_ticker] = updated_shv_shares
-                
-                # Get ALL actual positions from Alpaca (not just calculated SCHZ)
-                updated_actual_positions = get_sector_momentum_positions(api)
-                
-                # Update Firestore with ALL actual positions from Alpaca
-                save_balance("sector_momentum", {
-                    "total_invested": total_invested + investment_amount,
-                    "current_positions": updated_actual_positions,  # All actual positions from Alpaca
-                    "holding_fund_position": holding_fund_position,
-                    "last_trade_date": datetime.datetime.now().strftime("%Y-%m-%d"),
-                    "top_3_sectors": [],
-                    "spy_above_sma": False,
-                    "last_momentum_scores": {}
-                }, env)
-                
-            except Exception as e:
-                error_msg = f"Failed to buy {bond_etf}: {e}"
-                print(error_msg)
-                send_telegram_message(f"🔀 Sector Momentum (10%)\n❌ {error_msg}")
-                return error_msg
-    
-    # Calculate and report strategy performance
-    final_value_data = get_sector_momentum_value(api)
-    final_total_invested = total_invested + investment_amount
-    strategy_return = (final_value_data["total_value"] / final_total_invested - 1) if final_total_invested > 0 else 0
-    
-    # Single clean Telegram message
-    trend_label = "🟢 Bullish" if spy_above_sma_current else "🔴 Bearish"
-    msg = f"🔀 Sector Momentum (10%) — ${investment_amount:,.2f}\n"
-    msg += f"Trend: {trend_label} (SPY ${spy_price:.2f} vs SMA ${spy_sma:.2f})\n\n"
-    
-    if spy_above_sma_current and 'top_3_sectors' in locals() and len(top_3_sectors) >= 3:
-        top_3_names = [f"{t} ({sector_momentum_config['sector_names'].get(t, t)})" for t in top_3_sectors]
-        msg += f"Top 3: {', '.join(top_3_names)}\n\n"
-    elif not spy_above_sma_current:
-        msg += f"Bond mode: SCHZ\n\n"
-    
-    if trades_executed:
-        for trade in trades_executed:
-            msg += f"{trade}\n"
-        msg += "\n"
-    
-    msg += f"Total invested: ${final_total_invested:,.2f}\n"
-    msg += f"Current value: ${final_value_data['total_value']:,.2f}\n"
-    msg += f"Return: {strategy_return:+.1%}"
-    
-    print(msg)
-    send_telegram_message(msg)
-    
-    return f"Sector Momentum completed. Return: {strategy_return:.2%}"
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -6360,7 +5657,6 @@ def monthly_invest_all_strategies(api, force_execute=False, skip_order_wait=Fals
     print(f"  RSSB/WTIP ({get_pct('rssb_wtip_allo'):.1f}%): ${strategy_amounts['rssb_wtip_allo']:.2f}")
     print(f"  9-Sig ({get_pct('nine_sig_allo'):.1f}%): ${strategy_amounts['nine_sig_allo']:.2f}")
     print(f"  Dual Momentum ({get_pct('dual_momentum_allo'):.1f}%): ${strategy_amounts['dual_momentum_allo']:.2f}")
-    print(f"  Sector Momentum ({get_pct('sector_momentum_allo'):.1f}%): ${strategy_amounts['sector_momentum_allo']:.2f}")
     print(f"  Regime SSO ({get_pct('regime_sso_allo'):.1f}%): ${strategy_amounts['regime_sso_allo']:.2f}")
     
     # Send one shared account status message to Telegram before executing strategies
@@ -6386,13 +5682,12 @@ def monthly_invest_all_strategies(api, force_execute=False, skip_order_wait=Fals
     # Show per-strategy budget breakdown
     account_msg += "Budget per strategy:\n"
     for label, key in [
-        ("HFEA 15%", "hfea_allo"),
-        ("SPXL SMA 15%", "spxl_allo"),
-        ("RSSB/WTIP 20%", "rssb_wtip_allo"),
-        ("9-Sig 7.5%", "nine_sig_allo"),
-        ("Dual Momentum 22.5%", "dual_momentum_allo"),
-        ("Sector Momentum 12.5%", "sector_momentum_allo"),
-        ("Regime SSO 7.5%", "regime_sso_allo"),
+        ("HFEA 17.14%", "hfea_allo"),
+        ("SPXL SMA 17.14%", "spxl_allo"),
+        ("RSSB/WTIP 22.86%", "rssb_wtip_allo"),
+        ("9-Sig 8.57%", "nine_sig_allo"),
+        ("Dual Momentum 25.72%", "dual_momentum_allo"),
+        ("Regime SSO 8.57%", "regime_sso_allo"),
     ]:
         account_msg += f"  • {label}: ${strategy_amounts[key]:,.2f}\n"
     
@@ -6417,7 +5712,6 @@ def monthly_invest_all_strategies(api, force_execute=False, skip_order_wait=Fals
     _run("rssb_wtip", "RSSB/WTIP", lambda: make_monthly_buys_rssb_wtip(api, force_execute, investment_calc, margin_result, skip_order_wait, env))
     _run("nine_sig", "9-Sig", lambda: make_monthly_nine_sig_contributions(api, force_execute, investment_calc, margin_result, skip_order_wait, env))
     _run("dual_momentum", "Dual Momentum", lambda: monthly_dual_momentum_strategy(api, force_execute, investment_calc, margin_result, skip_order_wait, env))
-    _run("sector_momentum", "Sector Momentum", lambda: monthly_sector_momentum_strategy(api, force_execute, investment_calc, margin_result, skip_order_wait, env))
     _run("regime_sso", "Regime SSO", lambda: make_monthly_buys_regime_sso(api, force_execute, investment_calc, margin_result, skip_order_wait, env))
 
     print("\n=== All Monthly Strategies Complete ===")
@@ -6430,7 +5724,6 @@ def monthly_invest_all_strategies(api, force_execute=False, skip_order_wait=Fals
         "rssb_wtip": "RSSB/WTIP",
         "nine_sig": "9-Sig",
         "dual_momentum": "Dual Momentum",
-        "sector_momentum": "Sector Momentum",
         "regime_sso": "Regime SSO",
     }
     for key, label in label_map.items():
@@ -6449,96 +5742,6 @@ def monthly_invest_all_strategies(api, force_execute=False, skip_order_wait=Fals
 
     mark_monthly_run_complete(env=env)
 
-    return results
-
-
-def monthly_invest_rssb_sector_momentum_custom(api, total_budget=300.0, force_execute=True, skip_order_wait=False, env="live"):
-    """
-    Special occasion function to run only RSSB/WTIP and Sector Momentum strategies
-    with a custom budget, split 50/50 between the two strategies.
-    
-    Args:
-        api: Alpaca API credentials
-        total_budget: Total budget to invest (default: $300)
-        force_execute: Bypass trading day check (default: True for special occasions)
-        skip_order_wait: Skip waiting for order fills (default: False)
-        env: Environment ("live" or "paper")
-    
-    Returns:
-        dict with results from both strategies
-    """
-    print("=== Special Occasion: RSSB/WTIP + Sector Momentum Investment ===")
-    print(f"Total budget: ${total_budget:.2f}")
-    
-    # Split budget 50/50 between the two strategies
-    rssb_wtip_amount = total_budget / 2.0
-    sector_momentum_amount = total_budget / 2.0
-    
-    print(f"  RSSB/WTIP: ${rssb_wtip_amount:.2f}")
-    print(f"  Sector Momentum: ${sector_momentum_amount:.2f}")
-    
-    # Step 1: Sync cost basis from Alpaca to Firestore BEFORE executing trades
-    print("\nStep 1: Syncing cost basis from Alpaca to Firestore...")
-    cost_basis_result = recalculate_all_strategies_cost_basis(api, env, silent=True)
-    if cost_basis_result.get("success"):
-        if cost_basis_result.get("total_difference", 0) != 0:
-            print(f"✅ Cost basis synced: ${cost_basis_result['total_difference']:.2f} correction applied")
-        else:
-            print("✅ Cost basis already in sync")
-    else:
-        print(f"⚠️  Warning: Cost basis sync had issues: {cost_basis_result.get('error', 'Unknown error')}")
-    
-    # Step 2: Get margin conditions (needed for strategy functions)
-    print("\nStep 2: Getting margin conditions...")
-    margin_result = check_margin_conditions(api, env=env)
-    
-    # Step 3: Create custom investment_calc dict with only our two strategies
-    # The functions expect this structure but we'll override the amounts
-    investment_calc = {
-        "total_cash": total_budget,
-        "total_reserved": 0,
-        "total_available": total_budget,
-        "margin_approved": 0,
-        "used_margin": 0,
-        "total_investing": total_budget,
-        "strategy_amounts": {
-            "rssb_wtip_allo": rssb_wtip_amount,
-            "sector_momentum_allo": sector_momentum_amount,
-            # Set other strategies to 0 (they won't be called anyway)
-            "hfea_allo": 0,
-            "spxl_allo": 0,
-            "nine_sig_allo": 0,
-            "dual_momentum_allo": 0,
-            "regime_sso_allo": 0,
-        },
-        "reserved_amounts": {}
-    }
-    
-    # Step 4: Run both strategies with custom budget
-    results = {}
-    
-    print("\n=== Executing RSSB/WTIP ===")
-    results["rssb_wtip"] = make_monthly_buys_rssb_wtip(
-        api, 
-        force_execute=force_execute, 
-        investment_calc=investment_calc, 
-        margin_result=margin_result, 
-        skip_order_wait=skip_order_wait, 
-        env=env
-    )
-    
-    print("\n=== Executing Sector Momentum ===")
-    results["sector_momentum"] = monthly_sector_momentum_strategy(
-        api, 
-        force_execute=force_execute, 
-        investment_calc=investment_calc, 
-        margin_result=margin_result, 
-        skip_order_wait=skip_order_wait, 
-        env=env
-    )
-    
-    print("\n=== Special Occasion Investment Complete ===")
-    
     return results
 
 
@@ -6591,7 +5794,6 @@ def test_monthly_buy_rssb_wtip(api, investment_amount=10.0, force_execute=True, 
             "spxl_allo": 0,
             "nine_sig_allo": 0,
             "dual_momentum_allo": 0,
-            "sector_momentum_allo": 0,
             "regime_sso_allo": 0,
         },
         "reserved_amounts": {}
@@ -6701,23 +5903,6 @@ def monthly_dual_momentum(request):
         return jsonify({"error": error_message}), 500
 
 
-@app.route("/monthly_sector_momentum", methods=["POST"])
-def monthly_sector_momentum(request):
-    """
-    Cloud Function endpoint for Sector Momentum Strategy.
-    Executes monthly sector momentum rotation strategy with top 3 sector ETFs.
-    """
-    try:
-        api = set_alpaca_environment(env=alpaca_environment)
-        result = monthly_sector_momentum_strategy(api, env=alpaca_environment)
-        return jsonify({"result": result}), 200
-    except Exception as e:
-        error_message = f"Sector Momentum Strategy error: {str(e)}"
-        print(error_message)
-        send_telegram_message(error_message)
-        return jsonify({"error": error_message}), 500
-
-
 @app.route("/daily_regime_check", methods=["POST"])
 def daily_regime_check_route(request):
     api = set_alpaca_environment(env=alpaca_environment)
@@ -6789,7 +5974,6 @@ def audit_monthly_run(api, env="live", lookback_days=14):
         "RSSB/WTIP": ["RSSB", "WTIP", "BIL"],
         "9-Sig": ["TQQQ", "AGG"],
         "Dual Momentum": ["SPUU", "EFO", "BND"],
-        "Sector Momentum": list(sector_momentum_config["sector_etfs"]) + ["SCHZ", "SHV"],
         "Regime SSO": [regime_sso_config["risk_asset"], regime_sso_config["safe_asset"]],
     }
 
@@ -6852,15 +6036,10 @@ def run_local(action, env="paper", request="test", force_execute=False, investme
         return check_unified_index_alert(request, env=env)
     elif action == "monthly_dual_momentum":
         return monthly_dual_momentum_strategy(api, force_execute=force_execute, skip_order_wait=True, env=env)
-    elif action == "monthly_sector_momentum":
-        return monthly_sector_momentum_strategy(api, force_execute=force_execute, skip_order_wait=True, env=env)
     elif action == "monthly_buy_regime_sso":
         return make_monthly_buys_regime_sso(api, force_execute=force_execute, skip_order_wait=True, env=env)
     elif action == "daily_regime_check":
         return daily_regime_check(api, env=env)
-    elif action == "monthly_invest_rssb_sector_custom":
-        # Special occasion: RSSB/WTIP + Sector Momentum with $300 budget
-        return monthly_invest_rssb_sector_momentum_custom(api, total_budget=300.0, force_execute=True, skip_order_wait=True, env=env)
     elif action == "test_monthly_buy_rssb_wtip":
         # Test RSSB/WTIP monthly buy with custom investment amount (default: $10)
         investment = investment_amount if investment_amount is not None else 10.0
@@ -6886,10 +6065,8 @@ if __name__ == "__main__":
             "buy_spxl_above_200sma",
             "index_alert",
             "monthly_dual_momentum",
-            "monthly_sector_momentum",
             "monthly_buy_regime_sso",
             "daily_regime_check",
-            "monthly_invest_rssb_sector_custom",
             "test_monthly_buy_rssb_wtip"
         ],
         required=True,

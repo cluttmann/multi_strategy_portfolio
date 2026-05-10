@@ -1,6 +1,6 @@
 # Investment Strategy with Alpaca and Google Cloud Functions
 
-This project contains a set of Python Cloud Functions for managing a multi-strategy portfolio using Alpaca's trading API. The portfolio consists of six distinct investment strategies: **Hedgefundie's Excellent Adventure (HFEA)**, **RSSB/WTIP Strategy (Structural Alpha)**, **S&P 500 with 200-SMA**, **9-Sig Strategy (Jason Kelly Methodology)**, **Dual Momentum Strategy (Gary Antonacci)**, and **Sector Momentum Rotation Strategy**.
+This project contains a set of Python Cloud Functions for managing a multi-strategy portfolio using Alpaca's trading API. The portfolio consists of six distinct investment strategies: **Hedgefundie's Excellent Adventure (HFEA)**, **RSSB/WTIP Strategy (Structural Alpha)**, **S&P 500 with 200-SMA**, **9-Sig Strategy (Jason Kelly Methodology)**, **Dual Momentum Strategy (Gary Antonacci)**, and **Regime SSO Strategy**.
 
 ## Portfolio Allocation
 
@@ -10,7 +10,7 @@ The current portfolio is allocated across six strategies:
 - **RSSB/WTIP Strategy**: 20%
 - **9-Sig Strategy**: 7.5%
 - **Dual Momentum Strategy**: 22.5%
-- **Sector Momentum Strategy**: 12.5%
+- **Regime SSO Strategy**: (small allocation)
 
 ## Overview of the Strategies
 
@@ -93,68 +93,7 @@ This implementation is based on Gary Antonacci's research and community discussi
 - [r/LETFs: Combining Dual Momentum with LETFs](https://www.reddit.com/r/LETFs/comments/rwcoxk/combining_dual_momentum_with_the_principles_of/)
 - [r/LETFs: Leveraged Dual Momentum Backtest](https://www.reddit.com/r/LETFs/comments/1jj4tad/leveraged_dual_momentum_backtest/)
 
-### 3. Leveraged Sector Momentum Rotation Strategy
-
-#### **Strategy Overview:**
-The Leveraged Sector Momentum Rotation Strategy exploits the documented persistence of sector-level momentum driven by economic cycles, investor flows, and fundamental factors. Research shows sector leadership persists for 3-6 months, providing tradable opportunities. Studies by Faber and O'Shaughnessy demonstrate that momentum strategies outperformed buy-and-hold approximately 70% of the time across 80+ years of data.
-
-This leveraged strategy invests in the top 3 performing 2x leveraged sector ETFs based on multi-period momentum, amplifying returns through leverage while maintaining SPY 200-SMA trend filtering for risk management. The use of 2x leveraged ETFs provides enhanced exposure to sector momentum, potentially doubling the returns of sector rotation cycles while requiring careful risk management.
-
-#### **Asset Universe:**
-The strategy uses 11 ProShares 2x Leveraged Sector ETFs:
-- **ROM** (Technology - ProShares Ultra Technology), **UYG** (Financials - ProShares Ultra Financials), **DIG** (Energy - ProShares Ultra Energy)
-- **RXL** (Healthcare - ProShares Ultra Health Care), **UXI** (Industrials - ProShares Ultra Industrials), **UGE** (Consumer Staples - ProShares Ultra Consumer Staples)
-- **UCC** (Consumer Discretionary - ProShares Ultra Cons. Discretionary), **UPW** (Utilities - ProShares Ultra Utilities), **UYM** (Materials - ProShares Ultra Materials)
-- **URE** (Real Estate - ProShares Ultra Real Estate), **LTL** (Communication Services - ProShares Ultra Comm. Services)
-- **SCHZ** (Schwab U.S. Aggregate Bond ETF) - Safety asset during bearish periods
-
-#### **Multi-Period Momentum Calculation:**
-The strategy uses a weighted combination of multiple timeframes for robust signals:
-- **1-Month Momentum**: 40% weight (21 trading days)
-- **3-Month Momentum**: 20% weight (63 trading days)
-- **6-Month Momentum**: 20% weight (126 trading days)
-- **12-Month Momentum**: 20% weight (252 trading days)
-
-**Composite Score Formula:**
-```
-Composite Score = (0.40 × 1M_return) + (0.20 × 3M_return) + 
-                  (0.20 × 6M_return) + (0.20 × 12M_return)
-```
-
-#### **Approach in the Script:**
-- **Monthly Execution**: On the first trading day of each month, the strategy:
-  1. Calculates multi-period momentum scores for all 11 sector ETFs
-  2. Ranks sectors by composite momentum score (descending)
-  3. Selects top 3 sectors for investment
-  4. Allocates 33.33% to each of the top 3 sectors
-  5. Rebalances existing positions to target allocations
-
-- **Trend Filter Integration**: 
-  - Only invests in sectors when SPY > 200-day SMA
-  - Switches to SCHZ (bonds) when SPY < 200-day SMA
-  - Provides downside protection during bear markets
-
-- **Position Management**: 
-  - Sells sectors dropping out of top 3
-  - Buys sectors entering top 3
-  - Rebalances existing positions to maintain 33.33% allocation each
-  - Tracks all invested capital vs. current market value for performance calculation
-
-#### **Expected Returns:**
-- The Leveraged Sector Momentum strategy aims to capture and amplify sector rotation cycles through 2x leveraged ETFs, potentially delivering enhanced returns compared to unleveraged sector rotation strategies.
-- **Leverage Amplification**: By using 2x leveraged sector ETFs, the strategy seeks to double the returns of sector momentum cycles, providing significant upside potential during trending periods.
-- **Historical Performance**: Sector momentum strategies have shown strong risk-adjusted returns with reduced correlation to traditional equity strategies. The addition of leverage amplifies these returns while maintaining the same momentum signals.
-- **Behavioral Edge**: The strategy exploits persistent sector momentum anomalies driven by institutional flows, economic cycles, and behavioral biases that cause sector trends to persist for 3-6 months, with leverage amplifying these effects.
-- **Diversification Benefits**: Provides leveraged exposure to sector-specific opportunities while maintaining broad market diversification through rotation across 11 different sectors.
-
-#### **Risk Management:**
-- **Leverage Risk Awareness**: 2x leveraged ETFs amplify both gains and losses, requiring careful monitoring and disciplined risk management. Leveraged ETFs are designed for daily returns and may experience decay during volatile or sideways markets.
-- **Trend Filtering**: SPY 200-SMA filter provides systematic downside protection, automatically switching to bonds when market conditions deteriorate, which is especially important for leveraged positions.
-- **Position Limits**: Maximum 3-sector concentration reduces single-sector risk while maintaining focused exposure to the strongest momentum sectors.
-- **Equal Weighting**: 33.33% allocation per sector prevents over-concentration and ensures balanced exposure across selected sectors.
-- **Bond Safety**: Automatic switch to SCHZ during bear markets preserves capital and protects against leveraged downside during market downturns.
-
-### 4. RSSB/WTIP Strategy (Structural Alpha)
+### 3. RSSB/WTIP Strategy (Structural Alpha)
 
 #### **Strategy Overview:**
 The RSSB/WTIP strategy moves from **Active/Tactical Management** (scripts, signals, rebalancing) to **Structural/Strategic Management** (asset allocation and leverage). Instead of trying to *time* the market or pick the best sectors, you are *stacking* diversified return streams to win in all economic environments.
@@ -181,7 +120,7 @@ For every $10,000 invested, your effective exposure is roughly **$19,700 (1.97x 
 
 **1. Complete Economic Coverage**
 
-Your previous portfolio relied heavily on **Growth** (HFEA, 9-Sig, SPXL) and **Momentum** (Dual/Sector). It was vulnerable to a "Choppy Stagflation" environment where trends fail to materialize and stocks/bonds fall together (like 2022).
+Your previous portfolio relied heavily on **Growth** (HFEA, 9-Sig, SPXL) and **Momentum** (Dual). It was vulnerable to a "Choppy Stagflation" environment where trends fail to materialize and stocks/bonds fall together (like 2022).
 
 * **RSSB** covers **High Growth** (Stocks) and **Deflation** (Bonds).
 * **WTIP** covers **Inflation** (TIPS) and **Stagflation** (Trend/Gold).
@@ -228,12 +167,6 @@ Here is how the new strategy specifically replaces or improves upon your existin
 * **Old Way:** Aggressive tactical shifts based on relative strength or quarterly signals to chase the "hot hand."
 * **New Way:** **Diversification**. Instead of chasing the winner, you hold the 80% Global Stock allocation (RSSB) which naturally captures winners (like Nvidia or Apple) as they grow in the index, while the Trend component (WTIP) captures momentum in non-equity markets (like Oil or the Dollar).
 
-**4. vs. Sector Momentum (10% of old portfolio)**
-
-* **Old Way:** Rotating into Tech/Energy/Financials based on 6-month returns.
-* **Risk:** Sector rotation often lags; you buy Energy after it has already rallied.
-* **New Way:** **Global Equities (RSSB)**. You own all sectors. If Tech dominates, RSSB owns it. If Energy dominates, WTIP (Commodities) and RSSB (Energy stocks) own it.
-
 #### **Market Conditions Analysis**
 
 | Market Environment | **Old "Python/Alpaca" Portfolio** Performance | **New "80/20 RSSB/WTIP"** Performance |
@@ -269,7 +202,7 @@ Your previous portfolio was a brilliant engineering feat of **Tactical Alpha**�
 
 The **80/20 RSSB/WTIP** portfolio is a feat of **Structural Alpha**—accepting that we cannot predict the future, so we build a vessel that can float on any ocean. It is less work, lower stress, and historically offers a higher Sharpe Ratio (risk-adjusted return).
 
-### 5. S&P 500 with 200-SMA Strategy
+### 4. S&P 500 with 200-SMA Strategy
 
 #### **Strategy Overview:**
 The S&P 500 with 200-SMA strategy is a trend-following investment approach that uses the 200-day Simple Moving Average (SMA) as a signal for entering or exiting the market. The 200-SMA is a widely-used technical indicator that smooths out daily price fluctuations and highlights the underlying trend of the market.
@@ -286,7 +219,7 @@ The basic premise of this strategy is that when the S&P 500 index is above its 2
 #### **Expected Returns:**
 - The S&P 500 with 200-SMA strategy aims to enhance returns through trend-following and risk management. By avoiding major market drawdowns through strategic exits during downtrends, the strategy seeks to capture the majority of market upside while protecting capital during bear markets. The use of 3x leverage (SPXL) amplifies returns during bullish periods while the 200-SMA timing mechanism provides downside protection. Historical backtests of similar strategies have shown improved risk-adjusted returns compared to buy-and-hold approaches.
 
-### 6. 9-Sig Strategy (Jason Kelly Methodology)
+### 5. 9-Sig Strategy (Jason Kelly Methodology)
 
 #### **Strategy Overview:**
 The 9-Sig strategy is based on Jason Kelly's methodology from his book "The 3% Signal". It's a systematic approach to managing a TQQQ (3x leveraged NASDAQ-100) and AGG (iShares Core U.S. Aggregate Bond ETF) portfolio with built-in crash protection. The strategy aims for 9% quarterly growth while maintaining an 80/20 allocation between TQQQ and AGG.
@@ -387,7 +320,7 @@ Result: Hold TQQQ position during market crash
 
 ## Conclusion
 
-All six strategies offer unique ways to potentially enhance returns, but they come with their own sets of risks and assumptions. The HFEA strategy seeks to maximize growth through a balanced but leveraged approach. The S&P 500 with 200-SMA strategy aims to capture market gains while avoiding major downturns. The 9-Sig strategy provides systematic growth with built-in crash protection and systematic rebalancing. The Dual Momentum strategy combines global diversification with momentum-based timing to capture trending markets while protecting capital during downturns. The Leveraged Sector Momentum strategy exploits sector rotation cycles through multi-period momentum analysis with 2x leveraged ETFs and trend filtering.
+All six strategies offer unique ways to potentially enhance returns, but they come with their own sets of risks and assumptions. The HFEA strategy seeks to maximize growth through a balanced but leveraged approach. The S&P 500 with 200-SMA strategy aims to capture market gains while avoiding major downturns. The 9-Sig strategy provides systematic growth with built-in crash protection and systematic rebalancing. The Dual Momentum strategy combines global diversification with momentum-based timing to capture trending markets while protecting capital during downturns.
 
 Together, these strategies provide a comprehensive blend of aggressive growth and risk management:
 - **HFEA (17.5%)**: Three-asset leveraged portfolio (UPRO 45%, TMF 25%, KMLM 30%) with enhanced diversification through managed futures exposure
@@ -395,9 +328,8 @@ Together, these strategies provide a comprehensive blend of aggressive growth an
 - **RSSB/WTIP (20%)**: Structural alpha portfolio (70% RSSB, 30% WTIP) providing diversified return streams across all economic environments
 - **9-Sig (7.5%)**: Systematic TQQQ/AGG growth with crash protection following Jason Kelly's methodology
 - **Dual Momentum (22.5%)**: Tactical allocation between SPUU/EFO/BND using relative and absolute momentum
-- **Sector Momentum (12.5%)**: Leveraged multi-period momentum rotation across top 3 sector ETFs (2x leveraged) with SPY 200-SMA trend filtering
 
-Each strategy has been carefully selected and optimized based on historical backtests and current market research. The diversification across six different approaches—equity/bond/futures leverage, structural alpha, trend-following, systematic rebalancing, momentum-based tactical allocation, and sector rotation—helps reduce overall portfolio risk while maintaining strong growth potential.
+Each strategy has been carefully selected and optimized based on historical backtests and current market research. The diversification across six different approaches—equity/bond/futures leverage, structural alpha, trend-following, systematic rebalancing, momentum-based tactical allocation, and macro regime detection—helps reduce overall portfolio risk while maintaining strong growth potential.
 
 ## Index Alert System
 
@@ -443,7 +375,6 @@ Consider a loan with a duration of 6 to 8 years (50k to 100k) at around 4.5% int
   - **SPXL SMA strategy**: Trend-following with 200-day SMA (monthly buys and daily trading)
   - **9-Sig strategy**: Jason Kelly methodology with monthly AGG contributions and quarterly TQQQ/AGG signals with crash protection
   - **Dual Momentum strategy**: Tactical allocation between SPUU/EFO/BND using 12-month relative and absolute momentum
-  - **Sector Momentum strategy**: Multi-period momentum rotation across top 3 sector ETFs with SPY 200-SMA trend filtering
   - **Unified index alert system**: Monitors multiple indices for ATH drops and SMA crossings
   - **Firestore integration**: Persistent storage for strategy balances, 9-Sig quarterly data, Dual Momentum position tracking, and unified market data cache
   - **Alpaca integration**: All market data fetched from Alpaca IEX feed (no yfinance dependency)
@@ -462,7 +393,6 @@ Consider a loan with a duration of 6 to 8 years (50k to 100k) at around 4.5% int
 - `monthly_nine_sig_contributions`: 9-Sig monthly contributions function (individual execution)
 - `quarterly_nine_sig_signal`: 9-Sig quarterly signal function
 - `monthly_dual_momentum`: Dual Momentum strategy function (individual execution)
-- `monthly_sector_momentum`: Sector Momentum strategy function (individual execution)
 - `index_alert`: Unified index alert system
 
 ### **Cloud Scheduler Jobs:**
@@ -471,11 +401,11 @@ Consider a loan with a duration of 6 to 8 years (50k to 100k) at around 4.5% int
 - **Index alerts**: Hourly during trading hours (9:15 AM - 3:15 PM for SMA alerts, 9:30 AM - 3:30 PM for ATH drop alerts)
 - **Daily SMA functions**: 3:56 PM ET on weekdays (`daily_trade_spxl_200sma`)
 
-**Note**: Individual monthly functions (`monthly_buy_hfea`, `monthly_buy_rssb_wtip`, `monthly_buy_spxl`, `monthly_nine_sig_contributions`, `monthly_dual_momentum`, `monthly_sector_momentum`) are deployed but not scheduled. They remain available for manual execution and debugging purposes. The `monthly_invest_all` orchestrator is used for production to ensure coordinated budget allocation and prevent over-spending.
+**Note**: Individual monthly functions (`monthly_buy_hfea`, `monthly_buy_rssb_wtip`, `monthly_buy_spxl`, `monthly_nine_sig_contributions`, `monthly_dual_momentum`) are deployed but not scheduled. They remain available for manual execution and debugging purposes. The `monthly_invest_all` orchestrator is used for production to ensure coordinated budget allocation and prevent over-spending.
 
 ## Monthly Investment Orchestrator
 
-The `monthly_invest_all` orchestrator is a coordinated execution system that manages all six monthly investment strategies (HFEA, RSSB/WTIP, SPXL SMA, 9-Sig, Dual Momentum, and Sector Momentum) in a single unified process.
+The `monthly_invest_all` orchestrator is a coordinated execution system that manages all six monthly investment strategies (HFEA, RSSB/WTIP, SPXL SMA, 9-Sig, Dual Momentum, and Regime SSO) in a single unified process.
 
 ### **Why Use an Orchestrator?**
 
@@ -498,7 +428,6 @@ The orchestrator (`monthly_invest_all_strategies()` function):
    - RSSB/WTIP: 20%
    - 9-Sig: 7.5%
    - Dual Momentum: 22.5%
-   - Sector Momentum: 12.5%
 3. **Passes pre-calculated amounts**: Each strategy receives its exact budget and margin conditions as parameters
 4. **Prevents over-spending**: Since budgets are pre-calculated, there's no risk of multiple strategies competing for the same funds
 
@@ -745,7 +674,7 @@ python3 main.py --action monthly_dual_momentum --env paper --force
 
 **Why use the orchestrator (`monthly_invest_all`)?**
 - Calculates budgets once and distributes them to all strategies
-- Ensures exact percentage splits (17.5% HFEA, 20% SPXL SMA, 20% RSSB/WTIP, 7.5% 9-Sig, 22.5% Dual Momentum, 12.5% Sector Momentum)
+- Ensures exact percentage splits (17.5% HFEA, 20% SPXL SMA, 20% RSSB/WTIP, 7.5% 9-Sig, 22.5% Dual Momentum)
 - Prevents over-spending by coordinating margin and cash allocation
 - Recommended for production use to maintain portfolio balance
 

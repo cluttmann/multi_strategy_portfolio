@@ -95,22 +95,6 @@ steps:
     - --set-env-vars=GOOGLE_CLOUD_PROJECT=1098661711782,GOOGLE_CLOUD_PROJECT_ID=trading-436516
     waitFor: ['-'] # start in parallel and actually needs to be set, otherwise deployment is sequential
 
-  # Step 4d: Deploy the monthly_sector_momentum function
-  - name: 'gcr.io/cloud-builders/gcloud'
-    args:
-    - functions
-    - deploy
-    - monthly_sector_momentum  # Sector Momentum Strategy function
-    - --source=.
-    - --trigger-http
-    - --region=europe-west3
-    - --runtime=python310
-    - --timeout=540s
-    - --entry-point=monthly_sector_momentum  # Entry point function in your Python code
-    - --memory=512MB
-    - --set-env-vars=GOOGLE_CLOUD_PROJECT=1098661711782,GOOGLE_CLOUD_PROJECT_ID=trading-436516
-    waitFor: ['-'] # start in parallel and actually needs to be set, otherwise deployment is sequential
-
   # Step 4e: Deploy the monthly_buy_rssb_wtip function
   - name: 'gcr.io/cloud-builders/gcloud'
     args:
