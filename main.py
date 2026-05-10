@@ -28,9 +28,10 @@ upro_allocation = 0.45
 tmf_allocation = 0.25
 kmlm_allocation = 0.3
 
-# RSSB/WTIP allocation (80/20)
-rssb_allocation = 0.80
-wtip_allocation = 0.20
+# RSSB/WTIP allocation (70/30 — moved from 80/20 after 2026-05 backtest;
+# see commit message for the rigor work behind the choice)
+rssb_allocation = 0.70
+wtip_allocation = 0.30
 
 # RSSB/WTIP holding fund config (for accumulating funds when WTIP can't be bought)
 rssb_wtip_holding_fund = "BIL"
@@ -1327,7 +1328,7 @@ def make_monthly_buys_rssb_wtip(api, force_execute=False, investment_calc=None, 
     print(f"BIL holding fund: ${bil_value:.2f}")
     print(f"Total to allocate: ${total_to_allocate:.2f}")
     
-    # Calculate target allocations (80% RSSB, 20% WTIP)
+    # Calculate target allocations (70% RSSB, 30% WTIP)
     target_rssb_value_new = total_to_allocate * rssb_allocation
     target_wtip_value_new = total_to_allocate * wtip_allocation
     
@@ -2193,7 +2194,7 @@ def get_spxl_sma_value(api):
 
 def get_rssb_wtip_allocations(api):
     """
-    Get RSSB/WTIP allocations (80/20).
+    Get RSSB/WTIP allocations (70/30).
     Returns current values, percentages, target values, and deviations.
     Includes BIL holding fund value in total_value calculation.
     """
@@ -2228,7 +2229,7 @@ def get_rssb_wtip_allocations(api):
 
 def rebalance_rssb_wtip_portfolio(api):
     """
-    Rebalance RSSB/WTIP portfolio (80/20) quarterly.
+    Rebalance RSSB/WTIP portfolio (70/30) quarterly.
     Executes on first trading day of each quarter.
     Handles non-fractionable shares for WTIP and pending investments.
     """

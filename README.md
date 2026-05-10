@@ -203,9 +203,9 @@ You are eliminating "Execution Risk." Your previous setup relied on:
 The 80/20 strategy requires zero code, zero API keys, and zero maintenance other than occasional rebalancing.
 
 #### **Approach in the Script:**
-- **Monthly Buys**: The script uses the same sophisticated underweight-based allocation system as HFEA. It calculates which assets are underweight relative to their target allocations (80% RSSB, 20% WTIP) and allocates the monthly investment proportionally to bring the portfolio back towards target. This approach automatically rebalances during monthly contributions.
-  
-- **Quarterly Rebalancing**: The script includes a quarterly rebalancing function that ensures the portfolio remains aligned with the 80/20 target allocation. Rebalancing involves selling portions of over-performing ETFs and buying under-performing ones through a series of paired trades, ensuring the portfolio stays on track with the strategy's risk and return profile.
+- **Monthly Buys**: The script uses the same sophisticated underweight-based allocation system as HFEA. It calculates which assets are underweight relative to their target allocations (70% RSSB, 30% WTIP) and allocates the monthly investment proportionally to bring the portfolio back towards target. This approach automatically rebalances during monthly contributions.
+
+- **Quarterly Rebalancing**: The script includes a quarterly rebalancing function that ensures the portfolio remains aligned with the 70/30 target allocation. Rebalancing involves selling portions of over-performing ETFs and buying under-performing ones through a series of paired trades, ensuring the portfolio stays on track with the strategy's risk and return profile.
 
 #### **Comparison: 80/20 vs. Your "Cloud Function" Portfolio**
 
@@ -392,7 +392,7 @@ All six strategies offer unique ways to potentially enhance returns, but they co
 Together, these strategies provide a comprehensive blend of aggressive growth and risk management:
 - **HFEA (17.5%)**: Three-asset leveraged portfolio (UPRO 45%, TMF 25%, KMLM 30%) with enhanced diversification through managed futures exposure
 - **SPXL SMA (20%)**: Trend-following with market timing using 200-day SMA signals
-- **RSSB/WTIP (20%)**: Structural alpha portfolio (80% RSSB, 20% WTIP) providing diversified return streams across all economic environments
+- **RSSB/WTIP (20%)**: Structural alpha portfolio (70% RSSB, 30% WTIP) providing diversified return streams across all economic environments
 - **9-Sig (7.5%)**: Systematic TQQQ/AGG growth with crash protection following Jason Kelly's methodology
 - **Dual Momentum (22.5%)**: Tactical allocation between SPUU/EFO/BND using relative and absolute momentum
 - **Sector Momentum (12.5%)**: Leveraged multi-period momentum rotation across top 3 sector ETFs (2x leveraged) with SPY 200-SMA trend filtering
@@ -439,7 +439,7 @@ Consider a loan with a duration of 6 to 8 years (50k to 100k) at around 4.5% int
 
 - `main.py`: The main Python script containing all strategy logic:
   - **HFEA strategy**: Three-asset portfolio (UPRO/TMF/KMLM at 45/25/30) with monthly underweight-based buys and quarterly rebalancing
-  - **RSSB/WTIP strategy**: Two-asset portfolio (RSSB/WTIP at 80/20) with monthly underweight-based buys and quarterly rebalancing
+  - **RSSB/WTIP strategy**: Two-asset portfolio (RSSB/WTIP at 70/30) with monthly underweight-based buys and quarterly rebalancing
   - **SPXL SMA strategy**: Trend-following with 200-day SMA (monthly buys and daily trading)
   - **9-Sig strategy**: Jason Kelly methodology with monthly AGG contributions and quarterly TQQQ/AGG signals with crash protection
   - **Dual Momentum strategy**: Tactical allocation between SPUU/EFO/BND using 12-month relative and absolute momentum
