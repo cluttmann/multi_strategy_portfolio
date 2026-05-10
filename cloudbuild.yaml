@@ -209,6 +209,54 @@ steps:
     - --set-env-vars=GOOGLE_CLOUD_PROJECT=1098661711782,GOOGLE_CLOUD_PROJECT_ID=trading-436516
     waitFor: ['-']
 
+  # Step 5e: Deploy daily_regime_world_check (URTH 255-SMA + WLDU regime detector daily run)
+  - name: 'gcr.io/cloud-builders/gcloud'
+    args:
+    - functions
+    - deploy
+    - daily_regime_world_check
+    - --source=.
+    - --trigger-http
+    - --region=europe-west3
+    - --runtime=python310
+    - --timeout=540s
+    - --entry-point=daily_regime_world_check_route
+    - --memory=2048MB
+    - --set-env-vars=GOOGLE_CLOUD_PROJECT=1098661711782,GOOGLE_CLOUD_PROJECT_ID=trading-436516
+    waitFor: ['-']
+
+  # Step 5f: Deploy monthly_buy_regime_world (Regime World monthly contribution)
+  - name: 'gcr.io/cloud-builders/gcloud'
+    args:
+    - functions
+    - deploy
+    - monthly_buy_regime_world
+    - --source=.
+    - --trigger-http
+    - --region=europe-west3
+    - --runtime=python310
+    - --timeout=540s
+    - --entry-point=monthly_buy_regime_world
+    - --memory=512MB
+    - --set-env-vars=GOOGLE_CLOUD_PROJECT=1098661711782,GOOGLE_CLOUD_PROJECT_ID=trading-436516
+    waitFor: ['-']
+
+  # Step 5g: Deploy backfill_regime_world_scores (one-shot history seeder for Regime World)
+  - name: 'gcr.io/cloud-builders/gcloud'
+    args:
+    - functions
+    - deploy
+    - backfill_regime_world_scores
+    - --source=.
+    - --trigger-http
+    - --region=europe-west3
+    - --runtime=python310
+    - --timeout=540s
+    - --entry-point=backfill_regime_world_scores_route
+    - --memory=1024MB
+    - --set-env-vars=GOOGLE_CLOUD_PROJECT=1098661711782,GOOGLE_CLOUD_PROJECT_ID=trading-436516
+    waitFor: ['-']
+
   # Step 6: Deploy the unified index_alert Cloud Function with Alpaca and Telegram settings
   - name: 'gcr.io/cloud-builders/gcloud'
     args:
@@ -466,6 +514,35 @@ steps:
           gcloud scheduler jobs create http daily_regime_check \
             --schedule='30 16 * * 1-5' \
             --uri='https://europe-west3-trading-436516.cloudfunctions.net/daily_regime_check' \
+            --http-method='POST' \
+            --time-zone='America/New_York' \
+            --location='europe-west3' \
+            --oidc-service-account-email='1098661711782-compute@developer.gserviceaccount.com' \
+            --attempt-deadline='300s'
+        fi
+    waitFor: ['-']
+
+  # Cloud Scheduler for the daily regime_world check (URTH/WLDU).
+  # Runs 35 min after market close (5 min after regime_sso) to avoid concurrent
+  # FinBERT model loads — the global news basket also needs slightly more time.
+  - name: 'gcr.io/cloud-builders/gcloud'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        if gcloud scheduler jobs describe daily_regime_world_check --location=europe-west3 >/dev/null 2>&1; then
+          gcloud scheduler jobs update http daily_regime_world_check \
+            --schedule='35 16 * * 1-5' \
+            --uri='https://europe-west3-trading-436516.cloudfunctions.net/daily_regime_world_check' \
+            --http-method='POST' \
+            --time-zone='America/New_York' \
+            --location='europe-west3' \
+            --oidc-service-account-email='1098661711782-compute@developer.gserviceaccount.com' \
+            --attempt-deadline='300s'
+        else
+          gcloud scheduler jobs create http daily_regime_world_check \
+            --schedule='35 16 * * 1-5' \
+            --uri='https://europe-west3-trading-436516.cloudfunctions.net/daily_regime_world_check' \
             --http-method='POST' \
             --time-zone='America/New_York' \
             --location='europe-west3' \

@@ -17,11 +17,12 @@ app = Flask(__name__)
 # Investment amounts are calculated dynamically each month based on available cash and margin
 strategy_allocations = {
     "hfea_allo": 0.1714,           # 17.14% to HFEA
-    "spxl_allo": 0.1714,           # 17.14% to SPXL SMA
-    "rssb_wtip_allo": 0.2286,      # 22.86% to RSSB/WTIP strategy
-    "nine_sig_allo": 0.0857,       # 8.57% to 9-Sig strategy
-    "dual_momentum_allo": 0.2572,  # 25.72% to Dual Momentum strategy
-    "regime_sso_allo": 0.0857,     # 8.57% to SSO/USFR regime detector
+    "spxl_allo": 0.1314,           # 13.14% to SPXL SMA (down 4pp to fund regime_world)
+    "rssb_wtip_allo": 0.2086,      # 20.86% to RSSB/WTIP (down 2pp to fund regime_world)
+    "nine_sig_allo": 0.0857,       # 8.57% to 9-Sig
+    "dual_momentum_allo": 0.2572,  # 25.72% to Dual Momentum (best-of-3 SPUU/QLD/EFO)
+    "regime_sso_allo": 0.0857,     # 8.57% to SSO/USFR regime detector (US)
+    "regime_world_allo": 0.0600,   # 6.00% to WLDU/USFR regime detector (global)
 }
 
 upro_allocation = 0.45
@@ -48,6 +49,7 @@ spxl_sma_holding_fund = "SGOV"  # iShares 0-3 Month Treasury Bond ETF
 # - 9-Sig: TQQQ, AGG
 # - Dual Momentum: SPUU, QLD, EFO, BND (BND is defensive + vol-target overflow)
 # - Regime SSO: SSO (when in market), USFR (when defensive — floating-rate Treasury)
+# - Regime World: WLDU (when in market), USFR (when defensive)
 
 # Strategy ticker ownership mapping for cost basis recalculation
 STRATEGY_SYMBOLS = {
@@ -57,6 +59,7 @@ STRATEGY_SYMBOLS = {
     "nine_sig": ["TQQQ", "AGG"],
     "dual_momentum": ["SPUU", "QLD", "EFO", "BND"],
     "regime_sso": ["SSO", "USFR"],
+    "regime_world": ["WLDU", "USFR"],
 }
 
 alpaca_environment = "live"
@@ -115,41 +118,118 @@ rebalance_config = {
 # to the composite (range roughly -7..+7). Designed for ~1.4 executions/year — intentionally
 # slow and noise-resistant.
 regime_sso_config = {
+    # Identity
+    "strategy_key": "regime_sso",       # Firestore doc id under strategy-balances-{env}
+    "alloc_key": "regime_sso_allo",     # Key in strategy_allocations
+    "scores_collection": "regime-scores",  # Firestore collection for daily score history
+    "display_name": "regime_sso",       # Human label
+    # Universe
     "risk_asset": "SSO",                # 2x leveraged S&P 500
     "safe_asset": "USFR",               # WisdomTree Floating Rate Treasury (cash-like, no duration risk)
-    "spy_sma_period": 200,              # Signal 1: SPY trend
+    "trend_symbol": "SPY",              # Signal 1 + Signal 4 base symbol
+    "spy_sma_period": 200,              # Signal 1: SPY 200-SMA
     "sma_hysteresis_days": 3,           # 3-day confirmation to filter whipsaws
-    "breadth_sma_period": 50,           # Signal 2: % of S&P 500 stocks > 50-SMA
+    "breadth_mode": "sp500",            # Signal 2: full S&P 500 constituents
+    "breadth_sma_period": 50,
     "breadth_high_threshold": 0.60,     # > 60% bullish
     "breadth_low_threshold": 0.40,      # < 40% bearish
     "vix_low": 18.0,                    # Signal 3: VIX < 18 = calm
     "vix_high": 25.0,                   # VIX > 25 = stress
-    "adx_period": 14,                   # Signal 4: ADX over 14 days
+    "adx_period": 14,                   # Signal 4: ADX
     "adx_strong": 25.0,                 # ADX > 25 = strong trend
     "credit_sma_period": 50,            # Signal 5: HYG/LQD ratio vs its 50-SMA
     "canary_sma_period": 50,            # Signal 7: HYG/EEM/IWM vs 50-SMA
     "news_lookback_hours": 24,          # Signal 6: 24h of news
-    "news_min_articles": 20,            # Need ≥20 articles for a meaningful sentiment read
-    "news_pos_threshold": 0.10,         # FinBERT signed avg > 0.10 = bullish (signed = +conf if positive, -conf if negative, else 0; averaged over articles)
-    "news_neg_threshold": -0.10,        # FinBERT signed avg < -0.10 = bearish
+    "news_min_articles": 20,
+    "news_pos_threshold": 0.10,
+    "news_neg_threshold": -0.10,
+    "news_tickers": None,               # None = use Alpaca news firehose (US-centric); list = filter to symbols
     "fed_hike_lookback_days": 90,       # Fed-policy filter window
-    "fed_hike_threshold_bps": 50,       # >50bp hike in 90 days = aggressive cycle
+    "fed_hike_threshold_bps": 50,
     # Exit thresholds
-    "slow_exit_days": 15,               # Score ≤ 0 for 15 days → SHV
+    "slow_exit_days": 15,
     "slow_exit_score": 0,
-    "fast_exit_days": 3,                # Score ≤ -3 for 3 days → SHV
+    "fast_exit_days": 3,
     "fast_exit_score": -3,
     # Re-entry thresholds (three independent paths, fastest wins)
-    "credit_vix_recovery_weeks": 4,     # Path A: 4 weeks of credit improving + VIX declining + score positive
-    "credit_vix_credit_improvement": 0.005,  # Last-5d-avg credit ratio > first-5d-avg by ≥ 0.5% over the window
-    "credit_vix_vix_decline": 0.05,     # Last-5d-avg VIX < first-5d-avg by ≥ 5% over the window
-    "nlp_acceleration_score_days": 7,   # Path B: score ≥ +3 for 7 days
-    "nlp_acceleration_sentiment_weeks": 2,  # ... AND high-confidence sentiment for 2 weeks
-    "nlp_confidence_threshold": 0.80,   # Reddit's "NLP confidence 80+" — FinBERT avg confidence ≥ 0.80
-    "standard_reentry_days": 15,        # Path C: score ≥ +3 for 15 days (always-on fallback)
+    "credit_vix_recovery_weeks": 4,
+    "credit_vix_credit_improvement": 0.005,
+    "credit_vix_vix_decline": 0.05,
+    "nlp_acceleration_score_days": 7,
+    "nlp_acceleration_sentiment_weeks": 2,
+    "nlp_confidence_threshold": 0.80,
+    "standard_reentry_days": 15,
     "reentry_score": 3,
-    # Silent-failure alerting
-    "max_signal_failures_before_alert": 3,  # Telegram alert if ≥3 signals returned no data
+    "max_signal_failures_before_alert": 3,
+}
+
+
+# Regime World (WLDU/USFR) configuration — mirrors regime_sso for global markets.
+# Trend signal uses URTH 255-SMA. Breadth uses a curated ex-US country/region ETF
+# basket. News filters Alpaca news to global equity ETF tickers. VIX/credit/canary/
+# Fed filter remain universal indicators (no point splitting them by geography).
+GLOBAL_BREADTH_BASKET = [
+    "EFA",  # MSCI EAFE
+    "EEM",  # Emerging markets
+    "VWO",  # Emerging Vanguard
+    "EWG",  # Germany
+    "EWU",  # UK
+    "EWJ",  # Japan
+    "EWQ",  # France
+    "EWY",  # South Korea
+    "EWA",  # Australia
+    "EWC",  # Canada
+    "EWZ",  # Brazil
+    "INDA", # India
+    "MCHI", # China
+    "EWH",  # Hong Kong
+    "EWT",  # Taiwan
+]
+GLOBAL_NEWS_TICKERS = ["URTH", "EFA", "EEM", "VWO", "VEA", "ACWI", "IEFA"]
+
+regime_world_config = {
+    # Identity
+    "strategy_key": "regime_world",
+    "alloc_key": "regime_world_allo",
+    "scores_collection": "regime-world-scores",
+    "display_name": "regime_world",
+    # Universe
+    "risk_asset": "WLDU",               # 2x MSCI World (Leverage Shares, live since 2026-03-12)
+    "safe_asset": "USFR",               # Same defensive as regime_sso
+    "trend_symbol": "URTH",             # iShares MSCI World ETF — 1× world index proxy
+    "spy_sma_period": 255,              # Signal 1: URTH 255-SMA (longer window for global)
+    "sma_hysteresis_days": 3,
+    "breadth_mode": "basket",           # Signal 2: % of GLOBAL_BREADTH_BASKET above their 50-SMA
+    "breadth_basket": GLOBAL_BREADTH_BASKET,
+    "breadth_sma_period": 50,
+    "breadth_high_threshold": 0.60,
+    "breadth_low_threshold": 0.40,
+    "vix_low": 18.0,
+    "vix_high": 25.0,
+    "adx_period": 14,
+    "adx_strong": 25.0,
+    "credit_sma_period": 50,
+    "canary_sma_period": 50,
+    "news_lookback_hours": 24,
+    "news_min_articles": 15,            # Slightly relaxed — global news volume thinner than US
+    "news_pos_threshold": 0.10,
+    "news_neg_threshold": -0.10,
+    "news_tickers": GLOBAL_NEWS_TICKERS, # Filter Alpaca news to these symbols
+    "fed_hike_lookback_days": 90,
+    "fed_hike_threshold_bps": 50,
+    "slow_exit_days": 15,
+    "slow_exit_score": 0,
+    "fast_exit_days": 3,
+    "fast_exit_score": -3,
+    "credit_vix_recovery_weeks": 4,
+    "credit_vix_credit_improvement": 0.005,
+    "credit_vix_vix_decline": 0.05,
+    "nlp_acceleration_score_days": 7,
+    "nlp_acceleration_sentiment_weeks": 2,
+    "nlp_confidence_threshold": 0.80,
+    "standard_reentry_days": 15,
+    "reentry_score": 3,
+    "max_signal_failures_before_alert": 3,
 }
 
 # Firestore client - initialized lazily to respect .env file
@@ -3987,25 +4067,27 @@ def get_all_strategy_values(api):
             positions.get("BND", 0)
         )
         
-        # Regime SSO: SSO when in market, USFR when defensive. Tracked via the
-        # strategy's own Firestore state so the safe-asset value never collides
-        # with another strategy's holdings.
-        regime_state = regime_sso_state(env="live")
-        risk_asset = regime_sso_config["risk_asset"]
-        safe_asset = regime_sso_config["safe_asset"]
-        risk_qty = regime_state.get("risk_shares", 0) or 0
-        safe_qty = regime_state.get("safe_shares", 0) or 0
-        regime_sso_value = 0.0
-        if risk_qty > 0:
-            try:
-                regime_sso_value += risk_qty * float(get_latest_trade(api, risk_asset))
-            except Exception:
-                pass
-        if safe_qty > 0:
-            try:
-                regime_sso_value += safe_qty * float(get_latest_trade(api, safe_asset))
-            except Exception:
-                pass
+        # Regime sleeves: tracked via per-strategy Firestore state so the
+        # shared safe asset (USFR) never collides across strategies.
+        def _regime_value(cfg):
+            state = regime_state(cfg=cfg, env="live")
+            risk_qty = state.get("risk_shares", 0) or 0
+            safe_qty = state.get("safe_shares", 0) or 0
+            v = 0.0
+            if risk_qty > 0:
+                try:
+                    v += risk_qty * float(get_latest_trade(api, cfg["risk_asset"]))
+                except Exception:
+                    pass
+            if safe_qty > 0:
+                try:
+                    v += safe_qty * float(get_latest_trade(api, cfg["safe_asset"]))
+                except Exception:
+                    pass
+            return v
+
+        regime_sso_value = _regime_value(regime_sso_config)
+        regime_world_value = _regime_value(regime_world_config)
 
         total_value = (
             hfea_value +
@@ -4013,7 +4095,8 @@ def get_all_strategy_values(api):
             rssb_wtip_value +
             nine_sig_value +
             dual_momentum_value +
-            regime_sso_value
+            regime_sso_value +
+            regime_world_value
         )
 
         return {
@@ -4023,6 +4106,7 @@ def get_all_strategy_values(api):
             "nine_sig": nine_sig_value,
             "dual_momentum": dual_momentum_value,
             "regime_sso": regime_sso_value,
+            "regime_world": regime_world_value,
             "total": total_value
         }
 
@@ -4035,6 +4119,7 @@ def get_all_strategy_values(api):
             "nine_sig": 0,
             "dual_momentum": 0,
             "regime_sso": 0,
+            "regime_world": 0,
             "total": 0
         }
 
@@ -4077,6 +4162,7 @@ def calculate_rebalanced_allocations(api, aggressiveness=None):
         "nine_sig": "nine_sig_allo",
         "dual_momentum": "dual_momentum_allo",
         "regime_sso": "regime_sso_allo",
+        "regime_world": "regime_world_allo",
     }
     
     # Get target percentages from strategy_allocations
@@ -4281,6 +4367,7 @@ def print_allocation_dashboard(rebalance_result, contribution_amount=None):
         "nine_sig": "9-Sig",
         "dual_momentum": "Dual Momentum",
         "regime_sso": "Regime SSO",
+        "regime_world": "Regime World",
     }
     
     current_values = rebalance_result["current_values"]
@@ -4738,15 +4825,28 @@ def get_sp500_constituents(env="live"):
         return []
 
 
-def compute_market_breadth(api, env="live", sample_size=150):
-    """% of S&P 500 stocks above their 50-SMA. Sampled to control API cost."""
-    tickers = get_sp500_constituents(env=env)
-    if not tickers:
-        return None
-    if sample_size and sample_size < len(tickers):
-        step = max(1, len(tickers) // sample_size)
-        tickers = tickers[::step][:sample_size]
-    period = regime_sso_config["breadth_sma_period"]
+def compute_market_breadth(api, env="live", sample_size=150, cfg=None):
+    """% of constituents above their N-SMA.
+
+    cfg["breadth_mode"]:
+      "sp500"  → full S&P 500 universe (sampled to sample_size for cost).
+      "basket" → cfg["breadth_basket"] tickers (e.g. ex-US country ETFs).
+    """
+    if cfg is None:
+        cfg = regime_sso_config
+    mode = cfg.get("breadth_mode", "sp500")
+    period = cfg["breadth_sma_period"]
+
+    if mode == "basket":
+        tickers = list(cfg.get("breadth_basket") or [])
+    else:
+        tickers = get_sp500_constituents(env=env)
+        if not tickers:
+            return None
+        if sample_size and sample_size < len(tickers):
+            step = max(1, len(tickers) // sample_size)
+            tickers = tickers[::step][:sample_size]
+
     above = 0
     valid = 0
     for sym in tickers:
@@ -4810,8 +4910,12 @@ def compute_adx_from_bars(bars, period=14):
     return adx_values[-1]
 
 
-def get_alpaca_news(api, hours_back=24, limit=80):
-    """Fetch recent macro news from Alpaca's news API."""
+def get_alpaca_news(api, hours_back=24, limit=80, symbols=None):
+    """Fetch recent macro news from Alpaca's news API.
+
+    symbols: optional list of tickers to filter by (e.g. ["URTH","EFA","EEM"]).
+    None = full firehose (US-centric macro news).
+    """
     headers = get_auth_headers(api)
     after = (datetime.datetime.utcnow() - datetime.timedelta(hours=hours_back)).strftime("%Y-%m-%dT%H:%M:%SZ")
     url = "https://data.alpaca.markets/v1beta1/news"
@@ -4819,6 +4923,8 @@ def get_alpaca_news(api, hours_back=24, limit=80):
     next_token = None
     while len(articles) < limit:
         params = {"start": after, "limit": min(50, limit - len(articles))}
+        if symbols:
+            params["symbols"] = ",".join(symbols)
         if next_token:
             params["page_token"] = next_token
         try:
@@ -4885,24 +4991,27 @@ def score_news_sentiment(articles):
 # --- The 7 signals (each returns -1, 0, or +1) ---
 
 
-def signal_price_trend(api, env="live"):
+def signal_price_trend(api, cfg=None, env="live"):
     """
-    Signal 1: SPY vs 200-SMA with strict 3-day temporal hysteresis (Reddit spec).
+    Signal 1: trend_symbol vs N-SMA with strict 3-day temporal hysteresis.
     The signal only flips after 3 consecutive trading days agree on the new direction.
     Otherwise we hold the prior persisted signal.
 
-    Returns (signal, raw_today, raw_yesterday, raw_2days_ago) so the score persists
-    enough state to debug whipsaws.
+    Returns (signal, raw_today, raw_yesterday, raw_2days_ago).
     """
-    bars = get_alpaca_historical_bars(api, "SPY", days=215)
-    if not bars or len(bars) < 200:
+    if cfg is None:
+        cfg = regime_sso_config
+    symbol = cfg["trend_symbol"]
+    period = cfg["spy_sma_period"]
+    bars = get_alpaca_historical_bars(api, symbol, days=period + 15)
+    if not bars or len(bars) < period:
         return 0, 0, 0, 0
     closes = [float(b["c"]) for b in bars]
 
     def _raw(idx):
-        if idx < 199 or idx >= len(closes):
+        if idx < period - 1 or idx >= len(closes):
             return 0
-        sma = sum(closes[idx - 199:idx + 1]) / 200
+        sma = sum(closes[idx - period + 1:idx + 1]) / period
         if closes[idx] > sma:
             return 1
         if closes[idx] < sma:
@@ -4916,38 +5025,39 @@ def signal_price_trend(api, env="live"):
         return last3[0], last3[0], last3[1], last3[2]
 
     # Otherwise hold the prior persisted signal (avoid flip-flop on a single crossover).
-    history = load_recent_regime_scores(days=2, env=env)
+    history = load_recent_regime_scores(cfg=cfg, days=2, env=env)
     if history:
         prior = history[-1].get("price_trend", 0)
         return prior, last3[0], last3[1], last3[2]
     return 0, last3[0], last3[1], last3[2]
 
 
-def signal_market_breadth(api, env="live"):
+def signal_market_breadth(api, cfg=None, env="live"):
     """
-    Signal 2: % of S&P 500 stocks above their 50-SMA.
-    Uses the full universe (no sampling) — Reddit spec is strict about this signal.
+    Signal 2: % of constituents above their N-SMA.
+      sp500 mode: S&P 500 (regime_sso)
+      basket mode: cfg["breadth_basket"] (regime_world)
     Returns (signal, raw_pct).
     """
-    pct = compute_market_breadth(api, env=env, sample_size=None)
+    if cfg is None:
+        cfg = regime_sso_config
+    pct = compute_market_breadth(api, env=env, sample_size=None, cfg=cfg)
     if pct is None:
         return 0, None
-    if pct > regime_sso_config["breadth_high_threshold"]:
+    if pct > cfg["breadth_high_threshold"]:
         return 1, pct
-    if pct < regime_sso_config["breadth_low_threshold"]:
+    if pct < cfg["breadth_low_threshold"]:
         return -1, pct
     return 0, pct
 
 
-def signal_volatility_regime():
+def signal_volatility_regime(cfg=None):
     """
-    Signal 3: VIX level + trajectory (Reddit spec — "level AND trajectory").
-    Bullish (+1): VIX low AND not spiking (5-day change < +10%)
-    Bearish (−1): VIX high OR rapidly rising (5-day change > +20%)
-    Otherwise neutral.
+    Signal 3: VIX level + trajectory (universal — VIX is the global fear gauge).
     Returns (signal, raw_vix_level, vix_5d_pct_change).
     """
-    cfg = regime_sso_config
+    if cfg is None:
+        cfg = regime_sso_config
     latest, history = get_vix_data(days=20)
     if latest is None or len(history) < 6:
         return 0, latest, 0.0
@@ -4961,33 +5071,36 @@ def signal_volatility_regime():
     return 0, latest, vix_change_pct
 
 
-def signal_trend_strength(api, env="live", price_trend_signal=None):
+def signal_trend_strength(api, cfg=None, env="live", price_trend_signal=None):
     """
     Signal 4: ADX > 25 confirms trend; direction inherited from Signal 1.
-    To avoid re-running Signal 1 (and double-fetching SPY bars), pass the
-    already-computed price_trend signal in.
+    Uses cfg["trend_symbol"] (SPY for SSO, URTH for World).
     Returns (signal, raw_adx).
     """
-    bars = get_alpaca_historical_bars(api, "SPY", days=60)
+    if cfg is None:
+        cfg = regime_sso_config
+    symbol = cfg["trend_symbol"]
+    bars = get_alpaca_historical_bars(api, symbol, days=60)
     if not bars or len(bars) < 30:
         return 0, None
-    adx = compute_adx_from_bars(bars, period=regime_sso_config["adx_period"])
+    adx = compute_adx_from_bars(bars, period=cfg["adx_period"])
     if adx is None:
         return 0, None
-    if adx > regime_sso_config["adx_strong"]:
-        # Inherit direction from the already-computed price trend signal
+    if adx > cfg["adx_strong"]:
         if price_trend_signal is None:
-            price_trend_signal, _, _, _ = signal_price_trend(api, env=env)
+            price_trend_signal, _, _, _ = signal_price_trend(api, cfg=cfg, env=env)
         return price_trend_signal, adx
     return 0, adx
 
 
-def signal_credit_spread(api):
+def signal_credit_spread(api, cfg=None):
     """
-    Signal 5: HYG/LQD ratio vs its 50-SMA. Rising ratio = risk-on (HY outperforming IG).
+    Signal 5: HYG/LQD ratio vs its 50-SMA (universal — global credit indicator).
     Returns (signal, raw_ratio).
     """
-    period = regime_sso_config["credit_sma_period"]
+    if cfg is None:
+        cfg = regime_sso_config
+    period = cfg["credit_sma_period"]
     hyg = get_alpaca_historical_bars(api, "HYG", days=period + 20)
     lqd = get_alpaca_historical_bars(api, "LQD", days=period + 20)
     if not hyg or not lqd or len(hyg) < period or len(lqd) < period:
@@ -5007,14 +5120,19 @@ def signal_credit_spread(api):
     return 0, latest
 
 
-def signal_news_sentiment(api):
+def signal_news_sentiment(api, cfg=None):
     """
     Signal 6: FinBERT sentiment of last 24h Alpaca news.
+    For regime_world, news is filtered to cfg["news_tickers"] (global equity ETFs).
+    For regime_sso, cfg["news_tickers"] is None → full Alpaca firehose (US-centric).
     Returns (signal, signed_avg, avg_confidence, n_articles_scored).
-    Path B re-entry uses the avg_confidence (Reddit's "NLP confidence 80+" check).
     """
-    cfg = regime_sso_config
-    articles = get_alpaca_news(api, hours_back=cfg["news_lookback_hours"], limit=80)
+    if cfg is None:
+        cfg = regime_sso_config
+    articles = get_alpaca_news(api,
+                                hours_back=cfg["news_lookback_hours"],
+                                limit=80,
+                                symbols=cfg.get("news_tickers"))
     if len(articles) < cfg["news_min_articles"]:
         return 0, 0.0, 0.0, len(articles)
     signed_avg, n, avg_conf = score_news_sentiment(articles)
@@ -5025,13 +5143,14 @@ def signal_news_sentiment(api):
     return 0, signed_avg, avg_conf, n
 
 
-def signal_canary_universe(api):
+def signal_canary_universe(api, cfg=None):
     """
-    Signal 7: HYG, EEM, IWM all below/above their 50-SMA = liquidity signal.
-    Reddit spec: if all three break their 50-SMA, liquidity is leaving risk assets.
+    Signal 7: HYG, EEM, IWM all below/above their 50-SMA = liquidity signal (universal).
     Returns (signal, n_above, n_below).
     """
-    period = regime_sso_config["canary_sma_period"]
+    if cfg is None:
+        cfg = regime_sso_config
+    period = cfg["canary_sma_period"]
     above = 0
     below = 0
     valid = 0
@@ -5055,34 +5174,34 @@ def signal_canary_universe(api):
     return 0, above, below
 
 
-def compute_regime_score(api, env="live"):
+def compute_regime_score(api, cfg=None, env="live"):
     """
     Run all 7 signals + the Fed filter, returning a score dict that includes
-    raw values (VIX level, credit ratio, sentiment confidence, breadth %, ADX,
-    canary counts) so re-entry trajectory checks can interrogate history.
+    raw values for the re-entry trajectory checks.
 
-    Tracks signal_failures separately so the watchdog can alert when a data
-    source is silently returning 0/neutral instead of a real read.
+    cfg defaults to regime_sso_config for backwards compat.
     """
+    if cfg is None:
+        cfg = regime_sso_config
     failures = []
 
-    s1, s1_today, s1_yesterday, s1_prior = signal_price_trend(api, env=env)
-    s2, breadth_pct = signal_market_breadth(api, env=env)
+    s1, s1_today, s1_yesterday, s1_prior = signal_price_trend(api, cfg=cfg, env=env)
+    s2, breadth_pct = signal_market_breadth(api, cfg=cfg, env=env)
     if breadth_pct is None:
         failures.append("market_breadth")
-    s3, raw_vix, vix_5d_change = signal_volatility_regime()
+    s3, raw_vix, vix_5d_change = signal_volatility_regime(cfg=cfg)
     if raw_vix is None:
         failures.append("vix")
-    s4, raw_adx = signal_trend_strength(api, env=env, price_trend_signal=s1)
+    s4, raw_adx = signal_trend_strength(api, cfg=cfg, env=env, price_trend_signal=s1)
     if raw_adx is None:
         failures.append("adx")
-    s5, raw_credit_ratio = signal_credit_spread(api)
+    s5, raw_credit_ratio = signal_credit_spread(api, cfg=cfg)
     if raw_credit_ratio is None:
         failures.append("credit_spread")
-    s6, sentiment_avg, sentiment_conf, sentiment_n = signal_news_sentiment(api)
-    if sentiment_n < regime_sso_config["news_min_articles"]:
+    s6, sentiment_avg, sentiment_conf, sentiment_n = signal_news_sentiment(api, cfg=cfg)
+    if sentiment_n < cfg["news_min_articles"]:
         failures.append("news_sentiment")
-    s7, canary_above, canary_below = signal_canary_universe(api)
+    s7, canary_above, canary_below = signal_canary_universe(api, cfg=cfg)
     if canary_above + canary_below < 3:
         failures.append("canary_universe")
 
@@ -5121,36 +5240,44 @@ def compute_regime_score(api, env="live"):
 # --- State management ---
 
 
-def save_regime_score(score, env="live"):
+def save_regime_score(score, cfg=None, env="live"):
+    if cfg is None:
+        cfg = regime_sso_config
+    coll = cfg["scores_collection"]
     today = datetime.datetime.now().strftime("%Y-%m-%d")
     try:
-        get_firestore_client().collection(f"regime-scores-{env}").document(today).set(score)
+        get_firestore_client().collection(f"{coll}-{env}").document(today).set(score)
     except Exception as e:
-        print(f"Failed to persist regime score: {e}")
+        print(f"Failed to persist {cfg['display_name']} score: {e}")
 
 
-def load_recent_regime_scores(days=40, env="live"):
+def load_recent_regime_scores(cfg=None, days=40, env="live"):
     """Returns list of score dicts in chronological order (oldest → newest)."""
+    if cfg is None:
+        cfg = regime_sso_config
+    coll = cfg["scores_collection"]
     try:
         docs = (get_firestore_client()
-                .collection(f"regime-scores-{env}")
+                .collection(f"{coll}-{env}")
                 .order_by("computed_at", direction=firestore.Query.DESCENDING)
                 .limit(days).stream())
         rows = [d.to_dict() for d in docs]
         rows.reverse()
         return rows
     except Exception as e:
-        print(f"Failed to load recent regime scores: {e}")
+        print(f"Failed to load recent {cfg['display_name']} scores: {e}")
         return []
 
 
-def regime_sso_state(env="live"):
+def regime_state(cfg=None, env="live"):
     """Read the strategy's persisted state, defaulting to in-market."""
-    risk = regime_sso_config["risk_asset"]
+    if cfg is None:
+        cfg = regime_sso_config
+    risk = cfg["risk_asset"]
     try:
         doc = (get_firestore_client()
                .collection(f"strategy-balances-{env}")
-               .document("regime_sso").get())
+               .document(cfg["strategy_key"]).get())
         if doc.exists:
             d = doc.to_dict() or {}
             d.setdefault("position", risk)
@@ -5163,14 +5290,16 @@ def regime_sso_state(env="live"):
             "risk_shares": 0, "safe_shares": 0, "total_invested": 0}
 
 
-def save_regime_sso_state(state, env="live"):
+def save_regime_state(state, cfg=None, env="live"):
+    if cfg is None:
+        cfg = regime_sso_config
     try:
-        get_firestore_client().collection(f"strategy-balances-{env}").document("regime_sso").set(state)
+        get_firestore_client().collection(f"strategy-balances-{env}").document(cfg["strategy_key"]).set(state)
     except Exception as e:
-        print(f"Failed to save regime_sso state: {e}")
+        print(f"Failed to save {cfg['display_name']} state: {e}")
 
 
-def evaluate_regime_decision(history, current_position):
+def evaluate_regime_decision(history, current_position, cfg=None):
     """
     Decide what to do given recent score history and current position.
     Returns one of: HOLD, EXIT_SLOW, EXIT_FAST, REENTER_CREDIT_VIX, REENTER_NLP, REENTER_STD.
@@ -5179,8 +5308,9 @@ def evaluate_regime_decision(history, current_position):
     a raw value to the first-5-days mean of the lookback window, so we measure
     the *direction of change*, not just the level.
     """
-    cfg = regime_sso_config
-    risk = regime_sso_config["risk_asset"]
+    if cfg is None:
+        cfg = regime_sso_config
+    risk = cfg["risk_asset"]
     if not history:
         return "HOLD"
     composites = [h.get("composite", 0) for h in history]
@@ -5249,11 +5379,14 @@ def evaluate_regime_decision(history, current_position):
     return "HOLD"
 
 
-def execute_regime_rotation(api, target, env="live"):
-    """Rotate the regime_sso strategy holdings between risk_asset and safe_asset."""
-    risk = regime_sso_config["risk_asset"]
-    safe = regime_sso_config["safe_asset"]
-    state = regime_sso_state(env=env)
+def execute_regime_rotation(api, target, cfg=None, env="live"):
+    """Rotate the regime strategy holdings between risk_asset and safe_asset."""
+    if cfg is None:
+        cfg = regime_sso_config
+    name = cfg["display_name"]
+    risk = cfg["risk_asset"]
+    safe = cfg["safe_asset"]
+    state = regime_state(cfg=cfg, env=env)
     held_risk = state.get("risk_shares", 0) or 0
     held_safe = state.get("safe_shares", 0) or 0
 
@@ -5270,9 +5403,9 @@ def execute_regime_rotation(api, target, env="live"):
                 wait_for_order_fill(api, buy_order["id"])
                 held_safe += safe_qty
                 held_risk = 0
-            send_telegram_message(f"🛡️ regime_sso: {risk} → {safe} (defensive rotation, ${proceeds:,.2f} reallocated)")
+            send_telegram_message(f"🛡️ {name}: {risk} → {safe} (defensive rotation, ${proceeds:,.2f} reallocated)")
         except Exception as e:
-            send_telegram_message(f"🧭 regime_sso\n❌ Rotation {risk}→{safe} failed: {e}")
+            send_telegram_message(f"🧭 {name}\n❌ Rotation {risk}→{safe} failed: {e}")
             return f"Rotation failed: {e}"
     elif target == risk and held_safe > 0:
         try:
@@ -5287,9 +5420,9 @@ def execute_regime_rotation(api, target, env="live"):
                 wait_for_order_fill(api, buy_order["id"])
                 held_risk += risk_qty
                 held_safe = 0
-            send_telegram_message(f"📈 regime_sso: {safe} → {risk} (re-entry, ${proceeds:,.2f} reallocated)")
+            send_telegram_message(f"📈 {name}: {safe} → {risk} (re-entry, ${proceeds:,.2f} reallocated)")
         except Exception as e:
-            send_telegram_message(f"🧭 regime_sso\n❌ Rotation {safe}→{risk} failed: {e}")
+            send_telegram_message(f"🧭 {name}\n❌ Rotation {safe}→{risk} failed: {e}")
             return f"Rotation failed: {e}"
 
     state.update({
@@ -5298,28 +5431,31 @@ def execute_regime_rotation(api, target, env="live"):
         "risk_shares": held_risk,
         "safe_shares": held_safe,
     })
-    save_regime_sso_state(state, env=env)
+    save_regime_state(state, cfg=cfg, env=env)
     return f"Rotated to {target}"
 
 
-def daily_regime_check(api, env="live"):
+def daily_regime_check(api, cfg=None, env="live"):
     """Compute today's score, persist, evaluate and rotate if needed."""
+    if cfg is None:
+        cfg = regime_sso_config
+    name = cfg["display_name"]
     try:
-        score = compute_regime_score(api, env=env)
+        score = compute_regime_score(api, cfg=cfg, env=env)
     except Exception as e:
-        send_telegram_message(f"🧭 regime_sso\n❌ Score computation failed: {e}")
+        send_telegram_message(f"🧭 {name}\n❌ Score computation failed: {e}")
         return f"Score failed: {e}"
-    save_regime_score(score, env=env)
-    history = load_recent_regime_scores(days=40, env=env)
-    state = regime_sso_state(env=env)
-    risk = regime_sso_config["risk_asset"]
+    save_regime_score(score, cfg=cfg, env=env)
+    history = load_recent_regime_scores(cfg=cfg, days=40, env=env)
+    state = regime_state(cfg=cfg, env=env)
+    risk = cfg["risk_asset"]
     current = state.get("position", risk)
-    decision = evaluate_regime_decision(history, current)
+    decision = evaluate_regime_decision(history, current, cfg=cfg)
 
     if decision in ("EXIT_SLOW", "EXIT_FAST"):
-        execute_regime_rotation(api, regime_sso_config["safe_asset"], env=env)
+        execute_regime_rotation(api, cfg["safe_asset"], cfg=cfg, env=env)
     elif decision in ("REENTER_CREDIT_VIX", "REENTER_NLP", "REENTER_STD"):
-        execute_regime_rotation(api, regime_sso_config["risk_asset"], env=env)
+        execute_regime_rotation(api, cfg["risk_asset"], cfg=cfg, env=env)
 
     failures = score.get("signal_failures") or []
     sent_avg = score.get("raw_sentiment_avg", 0)
@@ -5327,7 +5463,7 @@ def daily_regime_check(api, env="live"):
     raw_vix_disp = score.get("raw_vix")
     raw_vix_disp_str = f"{raw_vix_disp:.1f}" if raw_vix_disp else "?"
 
-    msg = (f"🧭 regime_sso daily | score {score['composite']:+d} | pos {current} | {decision}\n"
+    msg = (f"🧭 {name} daily | score {score['composite']:+d} | pos {current} | {decision}\n"
            f"  trend {score['price_trend']:+d}  breadth {score['market_breadth']:+d}  "
            f"vol {score['volatility_regime']:+d} (VIX {raw_vix_disp_str})  adx {score['trend_strength']:+d}\n"
            f"  credit {score['credit_spread']:+d}  news {score['news_sentiment']:+d} "
@@ -5344,30 +5480,25 @@ def daily_regime_check(api, env="live"):
             "signal_failures": failures}
 
 
-def backfill_regime_scores(api, days=30, env="live"):
+def backfill_regime_scores(api, cfg=None, days=30, env="live"):
     """
     One-time helper: compute and persist composite scores for the last N trading
     days so the slow exit (15-day window) and re-entry paths have history to read.
 
-    Each day's score is computed using *that day's* historical data: SPY/HYG/LQD/EEM/IWM
-    bars truncated to that date, FRED VIX truncated to that date. Two limitations:
-
-      • Market breadth: requires per-stock historical data and is API-expensive.
-        We skip the breadth signal during backfill (set to 0) — it will start
-        contributing real values from the first live daily check onward.
-      • News sentiment: Alpaca's news API returns recent items only; we can
-        request older windows but article volume drops off sharply. Skipped
-        for backfill (set to 0).
-
-    The composite still includes the other 5 signals so the slow-exit / re-entry
-    logic has meaningful historical context. Trade-off: the backfilled portion
-    is a 5-signal score, the live portion is the full 7-signal score.
+    Backfilled scores skip breadth (signal 2) and news (signal 6) — both expensive
+    to recompute historically — so the backfilled portion is a 5-signal score
+    while the live portion is the full 7-signal score.
     """
-    today = datetime.datetime.utcnow().date()
-    print(f"Backfilling regime scores for last {days} trading days...")
+    if cfg is None:
+        cfg = regime_sso_config
+    trend_symbol = cfg["trend_symbol"]
+    sma_period = cfg["spy_sma_period"]
+    scores_coll = cfg["scores_collection"]
+    name = cfg["display_name"]
+    print(f"Backfilling {name} scores for last {days} trading days ({trend_symbol} {sma_period}-SMA)...")
 
     # Pull all the time series we need once
-    spy_bars = get_alpaca_historical_bars(api, "SPY", days=days + 220)
+    spy_bars = get_alpaca_historical_bars(api, trend_symbol, days=days + sma_period + 20)
     hyg_bars = get_alpaca_historical_bars(api, "HYG", days=days + 220)
     lqd_bars = get_alpaca_historical_bars(api, "LQD", days=days + 220)
     eem_bars = get_alpaca_historical_bars(api, "EEM", days=days + 220)
@@ -5380,35 +5511,34 @@ def backfill_regime_scores(api, days=30, env="live"):
         except (ValueError, KeyError, TypeError):
             continue
 
-    if not spy_bars or len(spy_bars) < 200:
-        return "Insufficient SPY history for backfill"
+    if not spy_bars or len(spy_bars) < sma_period:
+        return f"Insufficient {trend_symbol} history for backfill"
 
-    cfg = regime_sso_config
     written = 0
     last_signal = 0
     # Walk forward through the last N days
     for offset in range(days, 0, -1):
         # Index into each series — bars are oldest-first
         spy_idx = len(spy_bars) - offset
-        if spy_idx < 199:
+        if spy_idx < sma_period - 1:
             continue
         as_of_iso = spy_bars[spy_idx]["t"][:10]
         # Skip if already persisted
         try:
             existing = (get_firestore_client()
-                        .collection(f"regime-scores-{env}")
+                        .collection(f"{scores_coll}-{env}")
                         .document(as_of_iso).get())
             if existing.exists:
                 continue
         except Exception:
             pass
 
-        # Signal 1: SPY 200-SMA + 3-day hysteresis (built from the historical window)
+        # Signal 1: trend_symbol SMA + 3-day hysteresis (built from the historical window)
         def _raw1(idx):
-            if idx < 199 or idx >= len(spy_bars):
+            if idx < sma_period - 1 or idx >= len(spy_bars):
                 return 0
-            closes = [float(b["c"]) for b in spy_bars[idx - 199:idx + 1]]
-            sma = sum(closes) / 200
+            closes = [float(b["c"]) for b in spy_bars[idx - sma_period + 1:idx + 1]]
+            sma = sum(closes) / sma_period
             close = float(spy_bars[idx]["c"])
             return 1 if close > sma else (-1 if close < sma else 0)
 
@@ -5523,21 +5653,23 @@ def backfill_regime_scores(api, days=30, env="live"):
         }
         try:
             (get_firestore_client()
-             .collection(f"regime-scores-{env}")
+             .collection(f"{scores_coll}-{env}")
              .document(as_of_iso).set(score))
             written += 1
         except Exception as e:
             print(f"  failed to persist backfill {as_of_iso}: {e}")
 
-    msg = f"🧭 regime_sso: backfilled {written} trading days of score history"
+    msg = f"🧭 {name}: backfilled {written} trading days of score history"
     print(msg)
     send_telegram_message(msg)
     return msg
 
 
-def make_monthly_buys_regime_sso(api, force_execute=False, investment_calc=None,
-                                  margin_result=None, skip_order_wait=False, env="live"):
-    """Add this month's allocation to whichever asset (SSO or SHV) the regime is in."""
+def make_monthly_buys_regime(api, cfg=None, force_execute=False, investment_calc=None,
+                              margin_result=None, skip_order_wait=False, env="live"):
+    """Add this month's allocation to whichever asset (risk or safe) the regime is in."""
+    if cfg is None:
+        cfg = regime_sso_config
     if not force_execute and not check_trading_day(mode="monthly"):
         return "Not first trading day of the month"
 
@@ -5546,14 +5678,17 @@ def make_monthly_buys_regime_sso(api, force_execute=False, investment_calc=None,
     if investment_calc is None:
         investment_calc = calculate_monthly_investments(api, margin_result, env)
 
-    investment_amount = investment_calc["strategy_amounts"].get("regime_sso_allo", 0)
+    alloc_key = cfg["alloc_key"]
+    name = cfg["display_name"]
+    investment_amount = investment_calc["strategy_amounts"].get(alloc_key, 0)
     target_margin = margin_result["target_margin"]
     metrics = margin_result["metrics"]
     leverage = metrics.get("leverage", 1.0)
     buying_power = investment_calc["total_available"] + investment_calc["margin_approved"]
+    pct_label = strategy_allocations.get(alloc_key, 0) * 100
 
     def _skip(reason):
-        msg = f"🧭 regime_sso (7.5%) — ${investment_amount:,.2f}\n⏭ {reason}"
+        msg = f"🧭 {name} ({pct_label:.2f}%) — ${investment_amount:,.2f}\n⏭ {reason}"
         send_telegram_message(msg)
         print(reason)
         return reason
@@ -5567,8 +5702,8 @@ def make_monthly_buys_regime_sso(api, force_execute=False, investment_calc=None,
     if investment_amount < margin_control_config["min_investment"]:
         return _skip(f"Skipped — ${investment_amount:.2f} below $1.00 minimum")
 
-    state = regime_sso_state(env=env)
-    risk = regime_sso_config["risk_asset"]
+    state = regime_state(cfg=cfg, env=env)
+    risk = cfg["risk_asset"]
     target = state.get("position", risk)
 
     # Projected leverage check only applies when buying the risk_asset (leveraged ETF)
@@ -5587,7 +5722,7 @@ def make_monthly_buys_regime_sso(api, force_execute=False, investment_calc=None,
         if not skip_order_wait:
             wait_for_order_fill(api, order["id"])
     except Exception as e:
-        send_telegram_message(f"🧭 regime_sso\n❌ Error buying {target}: {e}")
+        send_telegram_message(f"🧭 {name}\n❌ Error buying {target}: {e}")
         return f"Failed to buy {target}: {e}"
 
     if target == risk:
@@ -5596,14 +5731,14 @@ def make_monthly_buys_regime_sso(api, force_execute=False, investment_calc=None,
         state["safe_shares"] = state.get("safe_shares", 0) + qty
     state["total_invested"] = state.get("total_invested", 0) + investment_amount
     state["last_buy_date"] = datetime.datetime.now().strftime("%Y-%m-%d")
-    save_regime_sso_state(state, env=env)
+    save_regime_state(state, cfg=cfg, env=env)
 
     send_telegram_message(
-        f"🧭 regime_sso (7.5%) — ${investment_amount:,.2f}\n"
+        f"🧭 {name} ({pct_label:.2f}%) — ${investment_amount:,.2f}\n"
         f"Bought {qty:.4f} {target} @ ${price:.2f}\n"
         f"Position: {target}"
     )
-    return f"regime_sso bought {qty:.4f} {target}"
+    return f"{name} bought {qty:.4f} {target}"
 
 
 # Helper function to wait for an order to be filled
@@ -5680,6 +5815,7 @@ def monthly_invest_all_strategies(api, force_execute=False, skip_order_wait=Fals
     print(f"  9-Sig ({get_pct('nine_sig_allo'):.1f}%): ${strategy_amounts['nine_sig_allo']:.2f}")
     print(f"  Dual Momentum ({get_pct('dual_momentum_allo'):.1f}%): ${strategy_amounts['dual_momentum_allo']:.2f}")
     print(f"  Regime SSO ({get_pct('regime_sso_allo'):.1f}%): ${strategy_amounts['regime_sso_allo']:.2f}")
+    print(f"  Regime World ({get_pct('regime_world_allo'):.1f}%): ${strategy_amounts['regime_world_allo']:.2f}")
     
     # Send one shared account status message to Telegram before executing strategies
     metrics = margin_result.get("metrics", {})
@@ -5705,11 +5841,12 @@ def monthly_invest_all_strategies(api, force_execute=False, skip_order_wait=Fals
     account_msg += "Budget per strategy:\n"
     for label, key in [
         ("HFEA 17.14%", "hfea_allo"),
-        ("SPXL SMA 17.14%", "spxl_allo"),
-        ("RSSB/WTIP 22.86%", "rssb_wtip_allo"),
+        ("SPXL SMA 13.14%", "spxl_allo"),
+        ("RSSB/WTIP 20.86%", "rssb_wtip_allo"),
         ("9-Sig 8.57%", "nine_sig_allo"),
         ("Dual Momentum 25.72%", "dual_momentum_allo"),
         ("Regime SSO 8.57%", "regime_sso_allo"),
+        ("Regime World 6.00%", "regime_world_allo"),
     ]:
         account_msg += f"  • {label}: ${strategy_amounts[key]:,.2f}\n"
     
@@ -5734,7 +5871,8 @@ def monthly_invest_all_strategies(api, force_execute=False, skip_order_wait=Fals
     _run("rssb_wtip", "RSSB/WTIP", lambda: make_monthly_buys_rssb_wtip(api, force_execute, investment_calc, margin_result, skip_order_wait, env))
     _run("nine_sig", "9-Sig", lambda: make_monthly_nine_sig_contributions(api, force_execute, investment_calc, margin_result, skip_order_wait, env))
     _run("dual_momentum", "Dual Momentum", lambda: monthly_dual_momentum_strategy(api, force_execute, investment_calc, margin_result, skip_order_wait, env))
-    _run("regime_sso", "Regime SSO", lambda: make_monthly_buys_regime_sso(api, force_execute, investment_calc, margin_result, skip_order_wait, env))
+    _run("regime_sso", "Regime SSO", lambda: make_monthly_buys_regime(api, cfg=regime_sso_config, force_execute=force_execute, investment_calc=investment_calc, margin_result=margin_result, skip_order_wait=skip_order_wait, env=env))
+    _run("regime_world", "Regime World", lambda: make_monthly_buys_regime(api, cfg=regime_world_config, force_execute=force_execute, investment_calc=investment_calc, margin_result=margin_result, skip_order_wait=skip_order_wait, env=env))
 
     print("\n=== All Monthly Strategies Complete ===")
 
@@ -5747,6 +5885,7 @@ def monthly_invest_all_strategies(api, force_execute=False, skip_order_wait=Fals
         "nine_sig": "9-Sig",
         "dual_momentum": "Dual Momentum",
         "regime_sso": "Regime SSO",
+        "regime_world": "Regime World",
     }
     for key, label in label_map.items():
         outcome = results.get(key, "(no result)")
@@ -5928,20 +6067,39 @@ def monthly_dual_momentum(request):
 @app.route("/daily_regime_check", methods=["POST"])
 def daily_regime_check_route(request):
     api = set_alpaca_environment(env=alpaca_environment)
-    return daily_regime_check(api, env=alpaca_environment)
+    return daily_regime_check(api, cfg=regime_sso_config, env=alpaca_environment)
 
 
 @app.route("/monthly_buy_regime_sso", methods=["POST"])
 def monthly_buy_regime_sso(request):
     api = set_alpaca_environment(env=alpaca_environment)
-    return make_monthly_buys_regime_sso(api, env=alpaca_environment)
+    return make_monthly_buys_regime(api, cfg=regime_sso_config, env=alpaca_environment)
 
 
 @app.route("/backfill_regime_scores", methods=["POST"])
 def backfill_regime_scores_route(request):
-    """One-shot endpoint: backfill ~30 trading days of historical regime scores."""
+    """One-shot endpoint: backfill ~30 trading days of historical regime_sso scores."""
     api = set_alpaca_environment(env=alpaca_environment)
-    return backfill_regime_scores(api, days=30, env=alpaca_environment)
+    return backfill_regime_scores(api, cfg=regime_sso_config, days=30, env=alpaca_environment)
+
+
+@app.route("/daily_regime_world_check", methods=["POST"])
+def daily_regime_world_check_route(request):
+    api = set_alpaca_environment(env=alpaca_environment)
+    return daily_regime_check(api, cfg=regime_world_config, env=alpaca_environment)
+
+
+@app.route("/monthly_buy_regime_world", methods=["POST"])
+def monthly_buy_regime_world(request):
+    api = set_alpaca_environment(env=alpaca_environment)
+    return make_monthly_buys_regime(api, cfg=regime_world_config, env=alpaca_environment)
+
+
+@app.route("/backfill_regime_world_scores", methods=["POST"])
+def backfill_regime_world_scores_route(request):
+    """One-shot endpoint: backfill ~30 trading days of historical regime_world scores."""
+    api = set_alpaca_environment(env=alpaca_environment)
+    return backfill_regime_scores(api, cfg=regime_world_config, days=30, env=alpaca_environment)
 
 
 @app.route("/index_alert", methods=["POST"])
@@ -5997,6 +6155,7 @@ def audit_monthly_run(api, env="live", lookback_days=14):
         "9-Sig": ["TQQQ", "AGG"],
         "Dual Momentum": ["SPUU", "QLD", "EFO", "BND"],
         "Regime SSO": [regime_sso_config["risk_asset"], regime_sso_config["safe_asset"]],
+        "Regime World": [regime_world_config["risk_asset"], regime_world_config["safe_asset"]],
     }
 
     strategy_activity = {label: [] for label in expected_symbols}
@@ -6059,9 +6218,15 @@ def run_local(action, env="paper", request="test", force_execute=False, investme
     elif action == "monthly_dual_momentum":
         return monthly_dual_momentum_strategy(api, force_execute=force_execute, skip_order_wait=True, env=env)
     elif action == "monthly_buy_regime_sso":
-        return make_monthly_buys_regime_sso(api, force_execute=force_execute, skip_order_wait=True, env=env)
+        return make_monthly_buys_regime(api, cfg=regime_sso_config, force_execute=force_execute, skip_order_wait=True, env=env)
     elif action == "daily_regime_check":
-        return daily_regime_check(api, env=env)
+        return daily_regime_check(api, cfg=regime_sso_config, env=env)
+    elif action == "monthly_buy_regime_world":
+        return make_monthly_buys_regime(api, cfg=regime_world_config, force_execute=force_execute, skip_order_wait=True, env=env)
+    elif action == "daily_regime_world_check":
+        return daily_regime_check(api, cfg=regime_world_config, env=env)
+    elif action == "backfill_regime_world_scores":
+        return backfill_regime_scores(api, cfg=regime_world_config, days=30, env=env)
     elif action == "test_monthly_buy_rssb_wtip":
         # Test RSSB/WTIP monthly buy with custom investment amount (default: $10)
         investment = investment_amount if investment_amount is not None else 10.0
@@ -6089,6 +6254,9 @@ if __name__ == "__main__":
             "monthly_dual_momentum",
             "monthly_buy_regime_sso",
             "daily_regime_check",
+            "monthly_buy_regime_world",
+            "daily_regime_world_check",
+            "backfill_regime_world_scores",
             "test_monthly_buy_rssb_wtip"
         ],
         required=True,
