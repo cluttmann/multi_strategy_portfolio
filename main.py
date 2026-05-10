@@ -94,6 +94,7 @@ margin_control_config = {
 rebalance_config = {
     "aggressiveness": 2.0,          # 0.0 = disabled (use fixed %), 1.0 = proportional tilt, 2.0+ = aggressive tilt
     "max_single_strategy_pct": 0.50,  # Cap any single strategy at 50% of monthly contribution
+    "min_floor_pct_of_target": 0.50,  # Each strategy receives at least this fraction of its target (e.g. 9-Sig at 7.5% gets ≥ 3.75%) so aggressive tilts can't starve a small allocation entirely
 }
 
 # Sector Momentum Strategy configuration
@@ -837,6 +838,74 @@ def load_balances(env="live"):
     return balances
 
 
+def current_quarter_id(today=None):
+    """Return the current quarter id like '2026-Q2'."""
+    today = today or datetime.datetime.now()
+    return f"{today.year}-Q{((today.month - 1) // 3) + 1}"
+
+
+def current_month_id(today=None):
+    """Return the current month id like '2026-05'."""
+    today = today or datetime.datetime.now()
+    return today.strftime("%Y-%m")
+
+
+def mark_monthly_run_complete(env="live"):
+    """Record that the monthly orchestrator finished, so the watchdog can verify."""
+    try:
+        month_id = current_month_id()
+        get_firestore_client().collection(f"monthly-runs-{env}").document(month_id).set(
+            {
+                "month_id": month_id,
+                "timestamp": datetime.datetime.utcnow(),
+            }
+        )
+    except Exception as e:
+        print(f"Warning: could not write monthly-runs marker: {e}")
+
+
+def quarterly_run_complete(strategy, env="live"):
+    """
+    Returns True if the strategy's quarterly rebalance has already been
+    marked complete for the current quarter.
+
+    Used to make quarterly rebalance functions idempotent — the day-1-7
+    cron pattern relies on the trading-day check to prevent re-runs, but
+    a marker doc lets us tolerate manual re-invocations and double-fires.
+    """
+    try:
+        doc = (
+            get_firestore_client()
+            .collection(f"quarterly-runs-{env}")
+            .document(f"{strategy}-{current_quarter_id()}")
+            .get()
+        )
+        return doc.exists
+    except Exception as e:
+        # On Firestore failure, fall through to running — better to risk a
+        # duplicate trade than silently skip a real rebalance.
+        print(f"Warning: quarterly_run_complete check failed for {strategy}: {e}")
+        return False
+
+
+def mark_quarterly_run_complete(strategy, action, env="live"):
+    """Record that a strategy's quarterly run finished, for idempotency checks."""
+    try:
+        quarter_id = current_quarter_id()
+        get_firestore_client().collection(f"quarterly-runs-{env}").document(
+            f"{strategy}-{quarter_id}"
+        ).set(
+            {
+                "strategy": strategy,
+                "quarter_id": quarter_id,
+                "action": action,
+                "timestamp": datetime.datetime.utcnow(),
+            }
+        )
+    except Exception as e:
+        print(f"Warning: could not write quarterly-runs marker for {strategy}: {e}")
+
+
 # 9-Sig Strategy Data Management Functions
 def save_nine_sig_quarterly_data(quarter_id, tqqq_balance, agg_balance, signal_line, action, quarterly_contributions, env="live"):
     """
@@ -1073,17 +1142,17 @@ def make_monthly_nine_sig_contributions(api, force_execute=False, investment_cal
         return reason
     
     # Gate checks
-    if target_margin == 0:
-        if leverage > 1.0:
-            return _skip(f"Skipped — deleveraging required ({leverage:.2f}x)")
-        return _skip("Skipped — margin gates failed (cash-only)")
-    
+    # Note: 9-Sig monthly contributions go to AGG (bonds) and don't add equity leverage,
+    # so we run from cash whenever leverage is at or below 1.0× — even if margin gates fail.
+    if target_margin == 0 and leverage > 1.0:
+        return _skip(f"Skipped — deleveraging required ({leverage:.2f}x)")
+
     if buying_power < investment_amount:
         return _skip(f"Skipped — insufficient buying power (${buying_power:,.2f})")
-    
+
     if investment_amount < margin_control_config["min_investment"]:
         return _skip(f"Skipped — ${investment_amount:.2f} below $1.00 minimum")
-    
+
     # Projected leverage check
     if target_margin > 0:
         portfolio_value = metrics.get("portfolio_value", 0)
@@ -1675,17 +1744,17 @@ def make_monthly_buys(api, force_execute=False, investment_calc=None, margin_res
         return reason
     
     # Gate checks
-    if target_margin == 0:
-        if leverage > 1.0:
-            return _skip(f"Skipped — deleveraging required ({leverage:.2f}x)")
-        return _skip("Skipped — margin gates failed (cash-only)")
-    
+    # When margin gates fail and leverage <= 1.0×, we still run from available cash —
+    # HFEA only skips entirely when we need to deleverage.
+    if target_margin == 0 and leverage > 1.0:
+        return _skip(f"Skipped — deleveraging required ({leverage:.2f}x)")
+
     if buying_power < investment_amount:
         return _skip(f"Skipped — insufficient buying power (${buying_power:,.2f})")
-    
+
     if investment_amount < margin_control_config["min_investment"]:
         return _skip(f"Skipped — ${investment_amount:.2f} below $1.00 minimum")
-    
+
     # Projected leverage check (HFEA uses Portfolio Value + Cash for equity)
     if target_margin > 0:
         pv = metrics.get("portfolio_value", 0)
@@ -2166,7 +2235,11 @@ def rebalance_rssb_wtip_portfolio(api):
     if not check_trading_day(mode="quarterly"):
         print("Not first trading day of the month in this Quarter")
         return "Not first trading day of the month in this Quarter"
-    
+    if quarterly_run_complete("rssb_wtip", env=alpaca_environment):
+        msg = f"RSSB/WTIP quarterly rebalance already executed for {current_quarter_id()} — skipping."
+        print(msg)
+        return msg
+
     # Load pending investments from Firestore
     balances = load_balances()
     rssb_wtip_data = balances.get("rssb_wtip", {})
@@ -2345,6 +2418,7 @@ def rebalance_rssb_wtip_portfolio(api):
     
     # Report completion of rebalancing check
     print("RSSB/WTIP rebalance check completed.")
+    mark_quarterly_run_complete("rssb_wtip", "REBALANCED", env=alpaca_environment)
     return "RSSB/WTIP rebalance executed."
 
 
@@ -2352,6 +2426,10 @@ def rebalance_portfolio(api):
     if not check_trading_day(mode="quarterly"):
         print("Not first trading day of the month in this Quarter")
         return "Not first trading day of the month in this Quarter"
+    if quarterly_run_complete("hfea", env=alpaca_environment):
+        msg = f"HFEA quarterly rebalance already executed for {current_quarter_id()} — skipping."
+        print(msg)
+        return msg
     # Get UPRO, TMF, and KMLM values and deviations from target allocation
     (
         upro_diff,
@@ -2460,6 +2538,7 @@ def rebalance_portfolio(api):
 
     # Report completion of rebalancing check
     print("Rebalance check completed.")
+    mark_quarterly_run_complete("hfea", "REBALANCED", env=alpaca_environment)
     return "Rebalance executed."
 
 
@@ -2468,7 +2547,12 @@ def execute_quarterly_nine_sig_signal(api, force_execute=False, env="live"):
     if not force_execute and not check_trading_day(mode="quarterly"):
         print("Not first trading day of the quarter")
         return "Not first trading day of the quarter"
-    
+
+    if not force_execute and quarterly_run_complete("nine_sig", env=env):
+        msg = f"9-Sig quarterly signal already executed for {current_quarter_id()} — skipping."
+        print(msg)
+        return msg
+
     if force_execute:
         print("9-Sig: Force execution enabled - bypassing trading day check")
         send_telegram_message("9-Sig: Force execution enabled for testing - bypassing trading day check")
@@ -2773,9 +2857,11 @@ def execute_quarterly_nine_sig_signal(api, force_execute=False, env="live"):
             send_telegram_message(f"9-Sig allocation: TQQQ {tqqq_pct:.1%}, AGG {agg_pct:.1%} (Target: 80/20)")
         print(f"Action taken: {action}")
         print("=" * 40 + "\n")
-        
+
+        mark_quarterly_run_complete("nine_sig", action, env=env)
+
         return f"9-Sig quarterly signal: {action}"
-    
+
     except Exception as e:
         error_msg = f"9-Sig quarterly signal failed: {str(e)}"
         print(error_msg)
@@ -2925,19 +3011,19 @@ def monthly_buying_sma(api, symbol, force_execute=False, investment_calc=None, m
     """
     if not force_execute and not check_trading_day(mode="monthly"):
         return "Not first trading day of the month"
-    
+
     if force_execute:
         print(f"{symbol} SMA: Force execution enabled - bypassing trading day check")
 
-        if symbol == "SPXL":
-            spy_data = get_all_market_data("SPY", env=env)
-            if spy_data is None:
-                spy_data = update_market_data("SPY", env=env)
-        
-        sma_200 = spy_data["sma200"]
-        latest_price = spy_data["price"]
-    else:
+    if symbol != "SPXL":
         return f"Unknown symbol: {symbol}"
+
+    spy_data = get_all_market_data("SPY", env=env)
+    if spy_data is None:
+        spy_data = update_market_data("SPY", env=env)
+
+    sma_200 = spy_data["sma200"]
+    latest_price = spy_data["price"]
 
     if margin_result is None:
         margin_result = check_margin_conditions(api, env=env)
@@ -2975,11 +3061,11 @@ def monthly_buying_sma(api, symbol, force_execute=False, investment_calc=None, m
     print(f"{symbol}: Investment=${investment_amount:.2f}, SPY=${latest_price:.2f}, SMA=${sma_200:.2f}")
     
     # Shared gate checks for both bullish and bearish paths
-    if target_margin == 0:
-        if leverage > 1.0:
-            return _skip(f"Skipped — deleveraging required ({leverage:.2f}x)")
-        return _skip("Skipped — margin gates failed (cash-only)")
-    
+    # When margin gates fail and leverage <= 1.0×, the bearish path can still buy SGOV (T-bills)
+    # and the bullish path can still buy SPXL from cash. We only skip entirely when deleveraging.
+    if target_margin == 0 and leverage > 1.0:
+        return _skip(f"Skipped — deleveraging required ({leverage:.2f}x)")
+
     if buying_power < investment_amount:
         return _skip(f"Skipped — insufficient buying power (${buying_power:,.2f})")
     
@@ -4273,12 +4359,12 @@ def calculate_rebalanced_allocations(api, aggressiveness=None):
     adjusted_allocations = adjusted_allocations_normalized.copy()
     iterations = 0
     max_iterations = 10
-    
+
     while iterations < max_iterations:
         excess = 0
         strategies_at_cap = []
         strategies_below_cap = []
-        
+
         for key, val in adjusted_allocations.items():
             if val > max_single_pct:
                 excess += val - max_single_pct
@@ -4286,18 +4372,41 @@ def calculate_rebalanced_allocations(api, aggressiveness=None):
                 strategies_at_cap.append(key)
             else:
                 strategies_below_cap.append(key)
-        
+
         if excess == 0:
             break
-        
+
         # Redistribute excess to strategies below cap
         if strategies_below_cap:
             redistribution_per_strategy = excess / len(strategies_below_cap)
             for key in strategies_below_cap:
                 adjusted_allocations[key] += redistribution_per_strategy
-        
+
         iterations += 1
-    
+
+    # Enforce a per-strategy floor so aggressive tilting can never starve a
+    # small target allocation entirely. The floor is a fraction of each
+    # strategy's *target* allocation. Any shortfall is taken proportionally
+    # from strategies that are above their floor.
+    floor_fraction = rebalance_config.get("min_floor_pct_of_target", 0.0)
+    if floor_fraction > 0:
+        floors = {
+            allo_key: strategy_allocations[allo_key] * floor_fraction
+            for allo_key in adjusted_allocations.keys()
+        }
+        shortfall = 0.0
+        for key, val in adjusted_allocations.items():
+            if val < floors[key]:
+                shortfall += floors[key] - val
+                adjusted_allocations[key] = floors[key]
+        if shortfall > 0:
+            donors = {k: v for k, v in adjusted_allocations.items() if v > floors[k]}
+            donor_excess = sum(v - floors[k] for k, v in donors.items())
+            if donor_excess > 0:
+                for k in donors:
+                    take = (donors[k] - floors[k]) / donor_excess * shortfall
+                    adjusted_allocations[k] -= take
+
     # Final normalization to handle any floating point drift
     total_final = sum(adjusted_allocations.values())
     if abs(total_final - 1.0) > 0.001:
@@ -5222,29 +5331,55 @@ def monthly_invest_all_strategies(api, force_execute=False, skip_order_wait=Fals
     
     send_telegram_message(account_msg)
     
-    # Run all seven strategies with pre-calculated budgets
+    # Run all monthly strategies with pre-calculated budgets. Each call is wrapped
+    # so a single strategy raising doesn't kill the rest of the orchestrator run,
+    # and the post-run summary lists exactly what each strategy did.
     results = {}
-    
-    print("\n=== Executing HFEA ===")
-    results["hfea"] = make_monthly_buys(api, force_execute, investment_calc, margin_result, skip_order_wait, env)
 
-    print("\n=== Executing SPXL SMA ===")
-    results["spxl"] = monthly_buying_sma(api, "SPXL", force_execute, investment_calc, margin_result, skip_order_wait, env)
-    
-    print("\n=== Executing RSSB/WTIP ===")
-    results["rssb_wtip"] = make_monthly_buys_rssb_wtip(api, force_execute, investment_calc, margin_result, skip_order_wait, env)
-    
-    print("\n=== Executing 9-Sig ===")
-    results["nine_sig"] = make_monthly_nine_sig_contributions(api, force_execute, investment_calc, margin_result, skip_order_wait, env)
-    
-    print("\n=== Executing Dual Momentum ===")
-    results["dual_momentum"] = monthly_dual_momentum_strategy(api, force_execute, investment_calc, margin_result, skip_order_wait, env)
-    
-    print("\n=== Executing Sector Momentum ===")
-    results["sector_momentum"] = monthly_sector_momentum_strategy(api, force_execute, investment_calc, margin_result, skip_order_wait, env)
-    
+    def _run(name, label, fn):
+        print(f"\n=== Executing {label} ===")
+        try:
+            results[name] = fn()
+        except Exception as exc:
+            err = f"❌ exception: {exc}"
+            print(err)
+            results[name] = err
+
+    _run("hfea", "HFEA", lambda: make_monthly_buys(api, force_execute, investment_calc, margin_result, skip_order_wait, env))
+    _run("spxl", "SPXL SMA", lambda: monthly_buying_sma(api, "SPXL", force_execute, investment_calc, margin_result, skip_order_wait, env))
+    _run("rssb_wtip", "RSSB/WTIP", lambda: make_monthly_buys_rssb_wtip(api, force_execute, investment_calc, margin_result, skip_order_wait, env))
+    _run("nine_sig", "9-Sig", lambda: make_monthly_nine_sig_contributions(api, force_execute, investment_calc, margin_result, skip_order_wait, env))
+    _run("dual_momentum", "Dual Momentum", lambda: monthly_dual_momentum_strategy(api, force_execute, investment_calc, margin_result, skip_order_wait, env))
+    _run("sector_momentum", "Sector Momentum", lambda: monthly_sector_momentum_strategy(api, force_execute, investment_calc, margin_result, skip_order_wait, env))
+
     print("\n=== All Monthly Strategies Complete ===")
-    
+
+    # Send a summary so a missing strategy is impossible to overlook
+    summary_lines = ["📋 Monthly Orchestrator Summary"]
+    label_map = {
+        "hfea": "HFEA",
+        "spxl": "SPXL SMA",
+        "rssb_wtip": "RSSB/WTIP",
+        "nine_sig": "9-Sig",
+        "dual_momentum": "Dual Momentum",
+        "sector_momentum": "Sector Momentum",
+    }
+    for key, label in label_map.items():
+        outcome = results.get(key, "(no result)")
+        outcome_str = str(outcome)
+        if outcome_str.startswith("❌"):
+            icon = "❌"
+        elif outcome_str.startswith("Skipped") or "Skipped" in outcome_str or "Not first trading day" in outcome_str:
+            icon = "⏭"
+        else:
+            icon = "✅"
+        # Trim long status lines for Telegram readability
+        truncated = outcome_str if len(outcome_str) < 80 else outcome_str[:77] + "..."
+        summary_lines.append(f"{icon} {label}: {truncated}")
+    send_telegram_message("\n".join(summary_lines))
+
+    mark_monthly_run_complete(env=env)
+
     return results
 
 
@@ -5515,6 +5650,95 @@ def monthly_sector_momentum(request):
 @app.route("/index_alert", methods=["POST"])
 def index_alert(request):
     return check_unified_index_alert(request, env=alpaca_environment)
+
+
+def audit_monthly_run(api, env="live", lookback_days=14):
+    """
+    Verify that this month's orchestrator actually ran and that each strategy
+    has produced expected activity. Sends one consolidated Telegram alert.
+
+    Designed to be invoked daily by a Cloud Scheduler watchdog after the
+    monthly buy window closes (e.g. day 8 of each month). Safe to re-run.
+    """
+    today = datetime.datetime.now()
+    month_id = current_month_id(today)
+    after = (today - datetime.timedelta(days=lookback_days)).strftime("%Y-%m-%dT00:00:00Z")
+
+    # 1) Did the orchestrator complete this month?
+    try:
+        marker = (
+            get_firestore_client()
+            .collection(f"monthly-runs-{env}")
+            .document(month_id)
+            .get()
+        )
+        orchestrator_ok = marker.exists
+    except Exception as e:
+        print(f"Warning: could not read monthly-runs marker: {e}")
+        orchestrator_ok = None  # unknown
+
+    # 2) Pull recent Alpaca orders to detect strategy activity
+    try:
+        headers = get_auth_headers(api)
+        url = f"{api['BASE_URL']}/v2/orders"
+        resp = alpaca_request_with_retry(
+            "GET",
+            url,
+            headers,
+            params={"status": "closed", "after": after, "limit": 500, "direction": "asc"},
+            label="audit_orders",
+        )
+        recent_orders = resp.json() if resp is not None else []
+    except Exception as e:
+        print(f"Warning: could not list recent orders: {e}")
+        recent_orders = []
+
+    expected_symbols = {
+        "HFEA": ["UPRO", "TMF", "KMLM"],
+        "SPXL SMA": ["SPXL", "SGOV"],
+        "RSSB/WTIP": ["RSSB", "WTIP", "BIL"],
+        "9-Sig": ["TQQQ", "AGG"],
+        "Dual Momentum": ["SPUU", "EFO", "BND"],
+        "Sector Momentum": list(sector_momentum_config["sector_etfs"]) + ["SCHZ", "SHV"],
+    }
+
+    strategy_activity = {label: [] for label in expected_symbols}
+    for o in recent_orders:
+        sym = o.get("symbol")
+        for label, syms in expected_symbols.items():
+            if sym in syms:
+                strategy_activity[label].append(
+                    f"{(o.get('filled_at') or o.get('created_at') or '?')[:10]} {o.get('side','?')} {sym}"
+                )
+
+    # 3) Build report
+    lines = [f"🛎 Monthly Run Audit — {month_id}"]
+    if orchestrator_ok is True:
+        lines.append("✅ Orchestrator completed this month")
+    elif orchestrator_ok is False:
+        lines.append("❌ NO orchestrator completion marker for this month")
+    else:
+        lines.append("⚠️  Could not read orchestrator marker (Firestore error)")
+
+    lines.append("")
+    lines.append(f"Trades in last {lookback_days} days:")
+    for label in expected_symbols:
+        events = strategy_activity[label]
+        if events:
+            lines.append(f"✅ {label}: {len(events)} trade(s) — most recent {events[-1]}")
+        else:
+            lines.append(f"❌ {label}: NO recent trades")
+
+    msg = "\n".join(lines)
+    print(msg)
+    send_telegram_message(msg)
+    return msg
+
+
+@app.route("/audit_monthly_run", methods=["POST"])
+def audit_monthly_run_route(request):
+    api = set_alpaca_environment(env=alpaca_environment)
+    return audit_monthly_run(api, env=alpaca_environment)
 
 
 def run_local(action, env="paper", request="test", force_execute=False, investment_amount=None):

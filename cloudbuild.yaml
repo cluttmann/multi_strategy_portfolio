@@ -191,6 +191,22 @@ steps:
     - --set-env-vars=GOOGLE_CLOUD_PROJECT=1098661711782,GOOGLE_CLOUD_PROJECT_ID=trading-436516
     waitFor: ['-'] # start in parallel and actually needs to be set, otherwise deployment is sequential
 
+  # Step 7: Deploy the audit_monthly_run watchdog (verifies the monthly orchestrator actually ran)
+  - name: 'gcr.io/cloud-builders/gcloud'
+    args:
+    - functions
+    - deploy
+    - audit_monthly_run
+    - --source=.
+    - --trigger-http
+    - --region=europe-west3
+    - --runtime=python310
+    - --timeout=540s
+    - --entry-point=audit_monthly_run_route
+    - --memory=512MB
+    - --set-env-vars=GOOGLE_CLOUD_PROJECT=1098661711782,GOOGLE_CLOUD_PROJECT_ID=trading-436516
+    waitFor: ['-']
+
 
 # Create Cloud Scheduler job for 'monthly_invest_all' ORCHESTRATOR (runs all 4 monthly strategies)
   - name: 'gcr.io/cloud-builders/gcloud'
@@ -367,6 +383,33 @@ steps:
           --oidc-service-account-email='1098661711782-compute@developer.gserviceaccount.com' \
           --message-body='{"index_symbol": "SPY", "index_name": "S&P 500 (SPY)", "alert_type": "sma_crossing", "sma_period": 200, "noise_threshold": 1.0}'
     waitFor: ['-'] # start in parallel and actually needs to be set, otherwise deployment is sequential
+
+  # Create Cloud Scheduler job for the monthly run audit watchdog
+  # Runs once on day 8 of each month at 14:00 ET — after the day-1-7 buy window —
+  # so a missed orchestrator run produces a Telegram alert.
+  - name: 'gcr.io/cloud-builders/gcloud'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        if gcloud scheduler jobs describe audit_monthly_run --location=europe-west3 >/dev/null 2>&1; then
+          gcloud scheduler jobs update http audit_monthly_run \
+            --schedule='0 14 8 * *' \
+            --uri='https://europe-west3-trading-436516.cloudfunctions.net/audit_monthly_run' \
+            --http-method='POST' \
+            --time-zone='America/New_York' \
+            --location='europe-west3' \
+            --oidc-service-account-email='1098661711782-compute@developer.gserviceaccount.com'
+        else
+          gcloud scheduler jobs create http audit_monthly_run \
+            --schedule='0 14 8 * *' \
+            --uri='https://europe-west3-trading-436516.cloudfunctions.net/audit_monthly_run' \
+            --http-method='POST' \
+            --time-zone='America/New_York' \
+            --location='europe-west3' \
+            --oidc-service-account-email='1098661711782-compute@developer.gserviceaccount.com'
+        fi
+    waitFor: ['-']
 
 options:
   logging: CLOUD_LOGGING_ONLY  # Send logs to Cloud Logging only
