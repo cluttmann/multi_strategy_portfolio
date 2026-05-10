@@ -4226,7 +4226,7 @@ def get_all_strategy_values(api):
         regime_state = regime_sso_state(env="live")
         risk_asset = regime_sso_config["risk_asset"]
         safe_asset = regime_sso_config["safe_asset"]
-        risk_qty = regime_state.get("risk_shares", 0) or regime_state.get("sso_shares", 0) or 0
+        risk_qty = regime_state.get("risk_shares", 0) or 0
         safe_qty = regime_state.get("safe_shares", 0) or 0
         regime_sso_value = 0.0
         if risk_qty > 0:
@@ -5701,8 +5701,8 @@ def regime_sso_state(env="live"):
         if doc.exists:
             d = doc.to_dict() or {}
             d.setdefault("position", risk)
-            d.setdefault("risk_shares", d.get("sso_shares", 0))
-            d.setdefault("safe_shares", d.get("shv_shares", 0))
+            d.setdefault("risk_shares", 0)
+            d.setdefault("safe_shares", 0)
             return d
     except Exception:
         pass
