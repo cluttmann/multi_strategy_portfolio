@@ -401,12 +401,27 @@ def alpaca_request_with_retry(method, url, headers, max_retries=5, timeout=60, l
     return None
 
 
-def get_alpaca_historical_bars(api, symbol, days=400):
-    """Fetch historical daily bars from Alpaca IEX feed. Returns list of closing prices or None."""
+def get_alpaca_historical_bars(api, symbol, days=400, raw=False):
+    """Fetch historical daily bars from Alpaca IEX feed.
+
+    `days` is interpreted as TRADING days. We request ~1.5× as many calendar
+    days from Alpaca to account for weekends + holidays, so callers can write
+    `days=200` and reliably get back ≥200 bars (when the symbol has history).
+
+    raw=False (default) → list of closing prices (floats).
+    raw=True            → list of bar dicts {t, o, h, l, c, v, ...} from Alpaca.
+                          Callers that need OHLC + timestamps (ADX, backfill,
+                          OHLC-based signals) must request raw=True.
+    Returns None if the request fails or no bars are returned.
+    """
     from datetime import datetime, timedelta
 
+    # Trading-day → calendar-day buffer. ~252 trading days / 365 calendar days
+    # ≈ 0.69, so calendar = trading × 1.45. Add a small floor for short windows.
+    calendar_days = int(days * 1.5) + 10
+
     end_date = datetime.now()
-    start_date = end_date - timedelta(days=days)
+    start_date = end_date - timedelta(days=calendar_days)
 
     url = f"https://data.alpaca.markets/v2/stocks/{symbol}/bars"
     params = {
@@ -430,9 +445,10 @@ def get_alpaca_historical_bars(api, symbol, days=400):
         print(f"No Alpaca bars returned for {symbol}")
         return None
 
-    closes = [bar['c'] for bar in bars]
-    print(f"Fetched {len(closes)} bars for {symbol} from Alpaca IEX feed")
-    return closes
+    print(f"Fetched {len(bars)} bars for {symbol} from Alpaca IEX feed (requested {days} trading days)")
+    if raw:
+        return bars
+    return [bar['c'] for bar in bars]
 
 
 def get_latest_trade(api, symbol):
@@ -4851,13 +4867,13 @@ def compute_market_breadth(api, env="live", sample_size=150, cfg=None):
     valid = 0
     for sym in tickers:
         try:
-            bars = get_alpaca_historical_bars(api, sym, days=period + 30)
-            if bars is None or len(bars) < period:
+            closes = get_alpaca_historical_bars(api, sym, days=period + 30)
+            if closes is None or len(closes) < period:
                 continue
-            closes = [float(b["c"]) for b in bars[-period:]]
-            sma = sum(closes) / period
+            window = closes[-period:]
+            sma = sum(window) / period
             valid += 1
-            if closes[-1] > sma:
+            if window[-1] > sma:
                 above += 1
         except Exception:
             continue
@@ -5003,10 +5019,9 @@ def signal_price_trend(api, cfg=None, env="live"):
         cfg = regime_sso_config
     symbol = cfg["trend_symbol"]
     period = cfg["spy_sma_period"]
-    bars = get_alpaca_historical_bars(api, symbol, days=period + 15)
-    if not bars or len(bars) < period:
+    closes = get_alpaca_historical_bars(api, symbol, days=period + 15)
+    if not closes or len(closes) < period:
         return 0, 0, 0, 0
-    closes = [float(b["c"]) for b in bars]
 
     def _raw(idx):
         if idx < period - 1 or idx >= len(closes):
@@ -5080,7 +5095,7 @@ def signal_trend_strength(api, cfg=None, env="live", price_trend_signal=None):
     if cfg is None:
         cfg = regime_sso_config
     symbol = cfg["trend_symbol"]
-    bars = get_alpaca_historical_bars(api, symbol, days=60)
+    bars = get_alpaca_historical_bars(api, symbol, days=60, raw=True)
     if not bars or len(bars) < 30:
         return 0, None
     adx = compute_adx_from_bars(bars, period=cfg["adx_period"])
@@ -5101,14 +5116,12 @@ def signal_credit_spread(api, cfg=None):
     if cfg is None:
         cfg = regime_sso_config
     period = cfg["credit_sma_period"]
-    hyg = get_alpaca_historical_bars(api, "HYG", days=period + 20)
-    lqd = get_alpaca_historical_bars(api, "LQD", days=period + 20)
-    if not hyg or not lqd or len(hyg) < period or len(lqd) < period:
+    hyg_closes = get_alpaca_historical_bars(api, "HYG", days=period + 20)
+    lqd_closes = get_alpaca_historical_bars(api, "LQD", days=period + 20)
+    if not hyg_closes or not lqd_closes or len(hyg_closes) < period or len(lqd_closes) < period:
         return 0, None
-    n = min(len(hyg), len(lqd))
-    hyg_closes = [float(b["c"]) for b in hyg[-n:]]
-    lqd_closes = [float(b["c"]) for b in lqd[-n:]]
-    ratios = [h / l for h, l in zip(hyg_closes, lqd_closes) if l > 0]
+    n = min(len(hyg_closes), len(lqd_closes))
+    ratios = [h / l for h, l in zip(hyg_closes[-n:], lqd_closes[-n:]) if l > 0]
     if len(ratios) < period:
         return 0, None
     sma = sum(ratios[-period:]) / period
@@ -5155,13 +5168,13 @@ def signal_canary_universe(api, cfg=None):
     below = 0
     valid = 0
     for sym in ("HYG", "EEM", "IWM"):
-        bars = get_alpaca_historical_bars(api, sym, days=period + 20)
-        if not bars or len(bars) < period:
+        closes = get_alpaca_historical_bars(api, sym, days=period + 20)
+        if not closes or len(closes) < period:
             continue
-        closes = [float(b["c"]) for b in bars[-period:]]
-        sma = sum(closes) / period
+        window = closes[-period:]
+        sma = sum(window) / period
         valid += 1
-        if closes[-1] > sma:
+        if window[-1] > sma:
             above += 1
         else:
             below += 1
@@ -5497,12 +5510,13 @@ def backfill_regime_scores(api, cfg=None, days=30, env="live"):
     name = cfg["display_name"]
     print(f"Backfilling {name} scores for last {days} trading days ({trend_symbol} {sma_period}-SMA)...")
 
-    # Pull all the time series we need once
-    spy_bars = get_alpaca_historical_bars(api, trend_symbol, days=days + sma_period + 20)
-    hyg_bars = get_alpaca_historical_bars(api, "HYG", days=days + 220)
-    lqd_bars = get_alpaca_historical_bars(api, "LQD", days=days + 220)
-    eem_bars = get_alpaca_historical_bars(api, "EEM", days=days + 220)
-    iwm_bars = get_alpaca_historical_bars(api, "IWM", days=days + 220)
+    # Pull all the time series we need once. Backfill needs OHLC + timestamps,
+    # so request raw bar dicts (not the closes-only default).
+    spy_bars = get_alpaca_historical_bars(api, trend_symbol, days=days + sma_period + 20, raw=True)
+    hyg_bars = get_alpaca_historical_bars(api, "HYG", days=days + 220, raw=True)
+    lqd_bars = get_alpaca_historical_bars(api, "LQD", days=days + 220, raw=True)
+    eem_bars = get_alpaca_historical_bars(api, "EEM", days=days + 220, raw=True)
+    iwm_bars = get_alpaca_historical_bars(api, "IWM", days=days + 220, raw=True)
     vix_obs = get_fred_series("VIXCLS", limit=days + 30) or []
     vix_by_date = {}
     for o in vix_obs:
@@ -6225,6 +6239,8 @@ def run_local(action, env="paper", request="test", force_execute=False, investme
         return make_monthly_buys_regime(api, cfg=regime_world_config, force_execute=force_execute, skip_order_wait=True, env=env)
     elif action == "daily_regime_world_check":
         return daily_regime_check(api, cfg=regime_world_config, env=env)
+    elif action == "backfill_regime_sso_scores":
+        return backfill_regime_scores(api, cfg=regime_sso_config, days=30, env=env)
     elif action == "backfill_regime_world_scores":
         return backfill_regime_scores(api, cfg=regime_world_config, days=30, env=env)
     elif action == "test_monthly_buy_rssb_wtip":
@@ -6256,6 +6272,7 @@ if __name__ == "__main__":
             "daily_regime_check",
             "monthly_buy_regime_world",
             "daily_regime_world_check",
+            "backfill_regime_sso_scores",
             "backfill_regime_world_scores",
             "test_monthly_buy_rssb_wtip"
         ],
