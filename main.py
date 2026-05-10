@@ -161,8 +161,8 @@ regime_sso_config = {
     "canary_sma_period": 50,            # Signal 7: HYG/EEM/IWM vs 50-SMA
     "news_lookback_hours": 24,          # Signal 6: 24h of news
     "news_min_articles": 20,            # Need ≥20 articles for a meaningful sentiment read
-    "news_pos_threshold": 0.10,         # VADER compound > 0.10 = bullish
-    "news_neg_threshold": -0.10,        # VADER compound < -0.10 = bearish
+    "news_pos_threshold": 0.10,         # FinBERT signed avg > 0.10 = bullish (signed = +conf if positive, -conf if negative, else 0; averaged over articles)
+    "news_neg_threshold": -0.10,        # FinBERT signed avg < -0.10 = bearish
     "fed_hike_lookback_days": 90,       # Fed-policy filter window
     "fed_hike_threshold_bps": 50,       # >50bp hike in 90 days = aggressive cycle
     # Exit thresholds
@@ -172,10 +172,15 @@ regime_sso_config = {
     "fast_exit_score": -3,
     # Re-entry thresholds (three independent paths, fastest wins)
     "credit_vix_recovery_weeks": 4,     # Path A: 4 weeks of credit improving + VIX declining + score positive
+    "credit_vix_credit_improvement": 0.005,  # Last-5d-avg credit ratio > first-5d-avg by ≥ 0.5% over the window
+    "credit_vix_vix_decline": 0.05,     # Last-5d-avg VIX < first-5d-avg by ≥ 5% over the window
     "nlp_acceleration_score_days": 7,   # Path B: score ≥ +3 for 7 days
-    "nlp_acceleration_sentiment_weeks": 2,  # ... AND positive sentiment 2 weeks
+    "nlp_acceleration_sentiment_weeks": 2,  # ... AND high-confidence sentiment for 2 weeks
+    "nlp_confidence_threshold": 0.80,   # Reddit's "NLP confidence 80+" — FinBERT avg confidence ≥ 0.80
     "standard_reentry_days": 15,        # Path C: score ≥ +3 for 15 days (always-on fallback)
     "reentry_score": 3,
+    # Silent-failure alerting
+    "max_signal_failures_before_alert": 3,  # Telegram alert if ≥3 signals returned no data
 }
 
 # Firestore client - initialized lazily to respect .env file
@@ -5299,16 +5304,26 @@ def monthly_sector_momentum_strategy(api, force_execute=False, investment_calc=N
 # signals; rotates SSO ↔ SHV. Designed to fire ~1.4x/year.
 # ════════════════════════════════════════════════════════════════════
 
-_vader_analyzer = None
+_finbert_pipeline = None
 
 
-def _get_vader():
-    """Lazy-init VADER sentiment analyzer (avoids import on cold start of unrelated functions)."""
-    global _vader_analyzer
-    if _vader_analyzer is None:
-        from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
-        _vader_analyzer = SentimentIntensityAnalyzer()
-    return _vader_analyzer
+def _get_finbert():
+    """
+    Lazy-init FinBERT (ProsusAI/finbert) sentiment pipeline. Heavy import (torch +
+    transformers + ~440MB of model weights at runtime) so we only load on demand.
+    Cold-start cost ~30-60 s; daily check runs once per weekday so this is fine.
+    """
+    global _finbert_pipeline
+    if _finbert_pipeline is None:
+        from transformers import pipeline
+        _finbert_pipeline = pipeline(
+            "sentiment-analysis",
+            model="ProsusAI/finbert",
+            tokenizer="ProsusAI/finbert",
+            truncation=True,
+            max_length=512,
+        )
+    return _finbert_pipeline
 
 
 def get_fred_series(series_id, limit=300):
@@ -5505,118 +5520,198 @@ def get_alpaca_news(api, hours_back=24, limit=80):
 
 
 def score_news_sentiment(articles):
-    """VADER-scored compound sentiment averaged over articles. Returns (avg, n)."""
+    """
+    FinBERT-scored compound sentiment averaged over articles.
+    For each article we feed `headline + ". " + summary` (truncated to 512 tokens).
+    FinBERT returns label ∈ {positive, negative, neutral} with a confidence in [0, 1].
+    We map: positive → +confidence, negative → −confidence, neutral → 0, then average.
+
+    Returns (signed_avg, n_scored, avg_confidence) where:
+      - signed_avg ∈ [-1, +1]: net directional sentiment (used for the −1/0/+1 signal)
+      - avg_confidence ∈ [0, 1]: how decisive the model was on average
+        (used for the Path B "high-confidence sentiment" re-entry check)
+    """
     if not articles:
-        return 0.0, 0
-    analyzer = _get_vader()
-    scores = []
+        return 0.0, 0, 0.0
+    pipe = _get_finbert()
+    texts = []
     for a in articles:
-        text = f"{a.get('headline','')}. {a.get('summary','')}"
-        if not text.strip():
-            continue
-        scores.append(analyzer.polarity_scores(text)["compound"])
-    if not scores:
-        return 0.0, 0
-    return sum(scores) / len(scores), len(scores)
+        text = f"{a.get('headline','') or ''}. {a.get('summary','') or ''}".strip()
+        if text and text != ".":
+            texts.append(text[:2000])  # outer cap, FinBERT will retokenize
+    if not texts:
+        return 0.0, 0, 0.0
+    try:
+        results = pipe(texts)
+    except Exception as e:
+        print(f"FinBERT inference failed: {e}")
+        return 0.0, 0, 0.0
+    signed = []
+    confs = []
+    for r in results:
+        label = (r.get("label") or "").lower()
+        conf = float(r.get("score") or 0.0)
+        if label == "positive":
+            signed.append(conf)
+        elif label == "negative":
+            signed.append(-conf)
+        else:
+            signed.append(0.0)
+        confs.append(conf)
+    if not signed:
+        return 0.0, 0, 0.0
+    return sum(signed) / len(signed), len(signed), sum(confs) / len(confs)
 
 
 # --- The 7 signals (each returns -1, 0, or +1) ---
 
 
 def signal_price_trend(api, env="live"):
-    """Signal 1: SPY vs 200-SMA with margin band as soft hysteresis."""
-    spy_data = get_all_market_data("SPY", env=env)
-    if spy_data is None:
-        spy_data = update_market_data("SPY", env=env)
-    if not spy_data:
+    """
+    Signal 1: SPY vs 200-SMA with strict 3-day temporal hysteresis (Reddit spec).
+    The signal only flips after 3 consecutive trading days agree on the new direction.
+    Otherwise we hold the prior persisted signal.
+
+    Returns (signal, raw_today, raw_yesterday, raw_2days_ago) so the score persists
+    enough state to debug whipsaws.
+    """
+    bars = get_alpaca_historical_bars(api, "SPY", days=215)
+    if not bars or len(bars) < 200:
+        return 0, 0, 0, 0
+    closes = [float(b["c"]) for b in bars]
+
+    def _raw(idx):
+        if idx < 199 or idx >= len(closes):
+            return 0
+        sma = sum(closes[idx - 199:idx + 1]) / 200
+        if closes[idx] > sma:
+            return 1
+        if closes[idx] < sma:
+            return -1
         return 0
-    price = spy_data.get("price")
-    sma = spy_data.get("sma200")
-    if not price or not sma:
-        return 0
-    ratio = price / sma
-    if ratio > 1.005:
-        return 1
-    if ratio < 0.995:
-        return -1
-    return 0
+
+    last3 = [_raw(len(closes) - 1), _raw(len(closes) - 2), _raw(len(closes) - 3)]
+
+    # If the most recent 3 trading days all agree, that's the confirmed signal.
+    if last3[0] != 0 and all(s == last3[0] for s in last3):
+        return last3[0], last3[0], last3[1], last3[2]
+
+    # Otherwise hold the prior persisted signal (avoid flip-flop on a single crossover).
+    history = load_recent_regime_scores(days=2, env=env)
+    if history:
+        prior = history[-1].get("price_trend", 0)
+        return prior, last3[0], last3[1], last3[2]
+    return 0, last3[0], last3[1], last3[2]
 
 
 def signal_market_breadth(api, env="live"):
-    """Signal 2: % of S&P 500 stocks above 50-SMA."""
-    pct = compute_market_breadth(api, env=env, sample_size=150)
+    """
+    Signal 2: % of S&P 500 stocks above their 50-SMA.
+    Uses the full universe (no sampling) — Reddit spec is strict about this signal.
+    Returns (signal, raw_pct).
+    """
+    pct = compute_market_breadth(api, env=env, sample_size=None)
     if pct is None:
-        return 0
+        return 0, None
     if pct > regime_sso_config["breadth_high_threshold"]:
-        return 1
+        return 1, pct
     if pct < regime_sso_config["breadth_low_threshold"]:
-        return -1
-    return 0
+        return -1, pct
+    return 0, pct
 
 
 def signal_volatility_regime():
-    """Signal 3: VIX level."""
-    latest, history = get_vix_data(days=10)
-    if latest is None:
-        return 0
-    if latest < regime_sso_config["vix_low"]:
-        return 1
-    if latest > regime_sso_config["vix_high"]:
-        return -1
-    return 0
+    """
+    Signal 3: VIX level + trajectory (Reddit spec — "level AND trajectory").
+    Bullish (+1): VIX low AND not spiking (5-day change < +10%)
+    Bearish (−1): VIX high OR rapidly rising (5-day change > +20%)
+    Otherwise neutral.
+    Returns (signal, raw_vix_level, vix_5d_pct_change).
+    """
+    cfg = regime_sso_config
+    latest, history = get_vix_data(days=20)
+    if latest is None or len(history) < 6:
+        return 0, latest, 0.0
+    vix_5d_ago = history[5]
+    vix_change_pct = (latest - vix_5d_ago) / vix_5d_ago if vix_5d_ago > 0 else 0.0
+
+    if latest > cfg["vix_high"] or vix_change_pct > 0.20:
+        return -1, latest, vix_change_pct
+    if latest < cfg["vix_low"] and vix_change_pct < 0.10:
+        return 1, latest, vix_change_pct
+    return 0, latest, vix_change_pct
 
 
-def signal_trend_strength(api):
-    """Signal 4: ADX > 25 confirms trend; direction inherited from price trend."""
+def signal_trend_strength(api, env="live", price_trend_signal=None):
+    """
+    Signal 4: ADX > 25 confirms trend; direction inherited from Signal 1.
+    To avoid re-running Signal 1 (and double-fetching SPY bars), pass the
+    already-computed price_trend signal in.
+    Returns (signal, raw_adx).
+    """
     bars = get_alpaca_historical_bars(api, "SPY", days=60)
     if not bars or len(bars) < 30:
-        return 0
+        return 0, None
     adx = compute_adx_from_bars(bars, period=regime_sso_config["adx_period"])
     if adx is None:
-        return 0
+        return 0, None
     if adx > regime_sso_config["adx_strong"]:
-        return signal_price_trend(api)
-    return 0
+        # Inherit direction from the already-computed price trend signal
+        if price_trend_signal is None:
+            price_trend_signal, _, _, _ = signal_price_trend(api, env=env)
+        return price_trend_signal, adx
+    return 0, adx
 
 
 def signal_credit_spread(api):
-    """Signal 5: HYG/LQD ratio vs its 50-SMA. Rising ratio = risk-on."""
+    """
+    Signal 5: HYG/LQD ratio vs its 50-SMA. Rising ratio = risk-on (HY outperforming IG).
+    Returns (signal, raw_ratio).
+    """
     period = regime_sso_config["credit_sma_period"]
     hyg = get_alpaca_historical_bars(api, "HYG", days=period + 20)
     lqd = get_alpaca_historical_bars(api, "LQD", days=period + 20)
     if not hyg or not lqd or len(hyg) < period or len(lqd) < period:
-        return 0
+        return 0, None
     n = min(len(hyg), len(lqd))
     hyg_closes = [float(b["c"]) for b in hyg[-n:]]
     lqd_closes = [float(b["c"]) for b in lqd[-n:]]
     ratios = [h / l for h, l in zip(hyg_closes, lqd_closes) if l > 0]
     if len(ratios) < period:
-        return 0
+        return 0, None
     sma = sum(ratios[-period:]) / period
     latest = ratios[-1]
     if latest > sma * 1.002:
-        return 1
+        return 1, latest
     if latest < sma * 0.998:
-        return -1
-    return 0
+        return -1, latest
+    return 0, latest
 
 
 def signal_news_sentiment(api):
-    """Signal 6: VADER sentiment of last 24h Alpaca news."""
+    """
+    Signal 6: FinBERT sentiment of last 24h Alpaca news.
+    Returns (signal, signed_avg, avg_confidence, n_articles_scored).
+    Path B re-entry uses the avg_confidence (Reddit's "NLP confidence 80+" check).
+    """
     cfg = regime_sso_config
     articles = get_alpaca_news(api, hours_back=cfg["news_lookback_hours"], limit=80)
     if len(articles) < cfg["news_min_articles"]:
-        return 0
-    avg, _ = score_news_sentiment(articles)
-    if avg > cfg["news_pos_threshold"]:
-        return 1
-    if avg < cfg["news_neg_threshold"]:
-        return -1
-    return 0
+        return 0, 0.0, 0.0, len(articles)
+    signed_avg, n, avg_conf = score_news_sentiment(articles)
+    if signed_avg > cfg["news_pos_threshold"]:
+        return 1, signed_avg, avg_conf, n
+    if signed_avg < cfg["news_neg_threshold"]:
+        return -1, signed_avg, avg_conf, n
+    return 0, signed_avg, avg_conf, n
 
 
 def signal_canary_universe(api):
-    """Signal 7: HYG, EEM, IWM all below/above 50-SMA = liquidity signal."""
+    """
+    Signal 7: HYG, EEM, IWM all below/above their 50-SMA = liquidity signal.
+    Reddit spec: if all three break their 50-SMA, liquidity is leaving risk assets.
+    Returns (signal, n_above, n_below).
+    """
     period = regime_sso_config["canary_sma_period"]
     above = 0
     below = 0
@@ -5633,25 +5728,48 @@ def signal_canary_universe(api):
         else:
             below += 1
     if valid < 3:
-        return 0
+        return 0, above, below
     if below >= 3:
-        return -1
+        return -1, above, below
     if above >= 3:
-        return 1
-    return 0
+        return 1, above, below
+    return 0, above, below
 
 
 def compute_regime_score(api, env="live"):
-    """Run all 7 signals + the Fed filter. Returns score dict."""
-    s1 = signal_price_trend(api, env=env)
-    s2 = signal_market_breadth(api, env=env)
-    s3 = signal_volatility_regime()
-    s4 = signal_trend_strength(api)
-    s5 = signal_credit_spread(api)
-    s6 = signal_news_sentiment(api)
-    s7 = signal_canary_universe(api)
+    """
+    Run all 7 signals + the Fed filter, returning a score dict that includes
+    raw values (VIX level, credit ratio, sentiment confidence, breadth %, ADX,
+    canary counts) so re-entry trajectory checks can interrogate history.
+
+    Tracks signal_failures separately so the watchdog can alert when a data
+    source is silently returning 0/neutral instead of a real read.
+    """
+    failures = []
+
+    s1, s1_today, s1_yesterday, s1_prior = signal_price_trend(api, env=env)
+    s2, breadth_pct = signal_market_breadth(api, env=env)
+    if breadth_pct is None:
+        failures.append("market_breadth")
+    s3, raw_vix, vix_5d_change = signal_volatility_regime()
+    if raw_vix is None:
+        failures.append("vix")
+    s4, raw_adx = signal_trend_strength(api, env=env, price_trend_signal=s1)
+    if raw_adx is None:
+        failures.append("adx")
+    s5, raw_credit_ratio = signal_credit_spread(api)
+    if raw_credit_ratio is None:
+        failures.append("credit_spread")
+    s6, sentiment_avg, sentiment_conf, sentiment_n = signal_news_sentiment(api)
+    if sentiment_n < regime_sso_config["news_min_articles"]:
+        failures.append("news_sentiment")
+    s7, canary_above, canary_below = signal_canary_universe(api)
+    if canary_above + canary_below < 3:
+        failures.append("canary_universe")
+
     composite = s1 + s2 + s3 + s4 + s5 + s6 + s7
     return {
+        # The seven signals (each in {-1, 0, +1})
         "price_trend": s1,
         "market_breadth": s2,
         "volatility_regime": s3,
@@ -5660,7 +5778,23 @@ def compute_regime_score(api, env="live"):
         "news_sentiment": s6,
         "canary_universe": s7,
         "composite": composite,
+        # Raw values for trajectory re-checks downstream
+        "raw_breadth_pct": breadth_pct,
+        "raw_vix": raw_vix,
+        "raw_vix_5d_change": vix_5d_change,
+        "raw_adx": raw_adx,
+        "raw_credit_ratio": raw_credit_ratio,
+        "raw_sentiment_avg": sentiment_avg,
+        "raw_sentiment_confidence": sentiment_conf,
+        "raw_news_n_articles": sentiment_n,
+        "raw_canary_above": canary_above,
+        "raw_canary_below": canary_below,
+        "raw_price_trend_today": s1_today,
+        "raw_price_trend_yesterday": s1_yesterday,
+        "raw_price_trend_2d_ago": s1_prior,
+        # Filters & metadata
         "fed_hike_filter": is_aggressive_rate_hiking_cycle(),
+        "signal_failures": failures,
         "computed_at": datetime.datetime.utcnow().isoformat(),
     }
 
@@ -5721,13 +5855,18 @@ def evaluate_regime_decision(history, current_position):
     """
     Decide what to do given recent score history and current position.
     Returns one of: HOLD, EXIT_SLOW, EXIT_FAST, REENTER_CREDIT_VIX, REENTER_NLP, REENTER_STD.
+
+    Re-entry trajectory checks (Path A, Path B) compare the last-5-days mean of
+    a raw value to the first-5-days mean of the lookback window, so we measure
+    the *direction of change*, not just the level.
     """
     cfg = regime_sso_config
+    risk = regime_sso_config["risk_asset"]
     if not history:
         return "HOLD"
     composites = [h.get("composite", 0) for h in history]
 
-    if current_position == "SSO":
+    if current_position == risk:
         if len(composites) >= cfg["fast_exit_days"]:
             recent = composites[-cfg["fast_exit_days"]:]
             if all(c <= cfg["fast_exit_score"] for c in recent):
@@ -5738,30 +5877,50 @@ def evaluate_regime_decision(history, current_position):
                 return "EXIT_SLOW"
         return "HOLD"
 
-    # Defensive (SHV): block re-entries if Fed is in aggressive hiking cycle
+    # Defensive (USFR): block re-entries if Fed is in aggressive hiking cycle.
+    # This is the explicit "Fed hiking lock" filter Reddit credits with avoiding
+    # 2022's $39K loss from re-entering during bear rallies.
     if history[-1].get("fed_hike_filter"):
         return "HOLD"
 
-    # Path A: Credit-VIX recovery (~4 weeks of credit + vol both non-negative + score positive)
+    def _trend(window, key):
+        """Returns (first_5d_avg, last_5d_avg) for a given raw key, or (None, None)."""
+        vals = [h.get(key) for h in window if h.get(key) is not None]
+        if len(vals) < 10:
+            return None, None
+        first = sum(vals[:5]) / 5
+        last = sum(vals[-5:]) / 5
+        return first, last
+
+    # Path A: Credit-VIX recovery — credit ratio improving AND VIX declining
+    # over 4 consecutive weeks AND today's composite > 0.
     days_a = cfg["credit_vix_recovery_weeks"] * 5
     if len(history) >= days_a:
-        recent = history[-days_a:]
-        if (all(h.get("credit_spread", 0) >= 0 for h in recent) and
-                all(h.get("volatility_regime", 0) >= 0 for h in recent) and
+        recent_a = history[-days_a:]
+        credit_first, credit_last = _trend(recent_a, "raw_credit_ratio")
+        vix_first, vix_last = _trend(recent_a, "raw_vix")
+        if (credit_first is not None and vix_first is not None and
+                credit_last > credit_first * (1 + cfg["credit_vix_credit_improvement"]) and
+                vix_last < vix_first * (1 - cfg["credit_vix_vix_decline"]) and
                 composites[-1] > 0):
             return "REENTER_CREDIT_VIX"
 
-    # Path B: NLP-accelerated (score ≥ +3 for 7 days AND positive sentiment 2 weeks)
+    # Path B: NLP-accelerated — composite ≥ +3 for the last 7 trading days AND
+    # FinBERT confidence ≥ 0.80 averaged over the last 2 weeks.
     days_b_score = cfg["nlp_acceleration_score_days"]
     days_b_sent = cfg["nlp_acceleration_sentiment_weeks"] * 5
     if len(history) >= max(days_b_score, days_b_sent):
         recent_score = composites[-days_b_score:]
         recent_sent = history[-days_b_sent:]
+        confs = [h.get("raw_sentiment_confidence", 0) for h in recent_sent]
+        signed = [h.get("raw_sentiment_avg", 0) for h in recent_sent]
         if (all(c >= cfg["reentry_score"] for c in recent_score) and
-                all(h.get("news_sentiment", 0) >= 0 for h in recent_sent)):
+                len(confs) >= days_b_sent and
+                (sum(confs) / len(confs)) >= cfg["nlp_confidence_threshold"] and
+                (sum(signed) / len(signed)) > 0):
             return "REENTER_NLP"
 
-    # Path C: Standard mechanical (score ≥ +3 for 15 days)
+    # Path C: Standard mechanical — composite ≥ +3 for 15 consecutive days
     days_c = cfg["standard_reentry_days"]
     if len(composites) >= days_c:
         recent = composites[-days_c:]
@@ -5834,7 +5993,8 @@ def daily_regime_check(api, env="live"):
     save_regime_score(score, env=env)
     history = load_recent_regime_scores(days=40, env=env)
     state = regime_sso_state(env=env)
-    current = state.get("position", "SSO")
+    risk = regime_sso_config["risk_asset"]
+    current = state.get("position", risk)
     decision = evaluate_regime_decision(history, current)
 
     if decision in ("EXIT_SLOW", "EXIT_FAST"):
@@ -5842,15 +6002,218 @@ def daily_regime_check(api, env="live"):
     elif decision in ("REENTER_CREDIT_VIX", "REENTER_NLP", "REENTER_STD"):
         execute_regime_rotation(api, regime_sso_config["risk_asset"], env=env)
 
+    failures = score.get("signal_failures") or []
+    sent_avg = score.get("raw_sentiment_avg", 0)
+    sent_conf = score.get("raw_sentiment_confidence", 0)
+    raw_vix_disp = score.get("raw_vix")
+    raw_vix_disp_str = f"{raw_vix_disp:.1f}" if raw_vix_disp else "?"
+
     msg = (f"🧭 regime_sso daily | score {score['composite']:+d} | pos {current} | {decision}\n"
            f"  trend {score['price_trend']:+d}  breadth {score['market_breadth']:+d}  "
-           f"vol {score['volatility_regime']:+d}  adx {score['trend_strength']:+d}\n"
-           f"  credit {score['credit_spread']:+d}  news {score['news_sentiment']:+d}  "
+           f"vol {score['volatility_regime']:+d} (VIX {raw_vix_disp_str})  adx {score['trend_strength']:+d}\n"
+           f"  credit {score['credit_spread']:+d}  news {score['news_sentiment']:+d} "
+           f"(avg {sent_avg:+.2f}, conf {sent_conf:.2f})  "
            f"canary {score['canary_universe']:+d}  fed_hike={score['fed_hike_filter']}")
+    if failures:
+        msg += f"\n  ⚠ signal failures: {', '.join(failures)}"
     print(msg)
-    if decision != "HOLD":
+
+    # Send Telegram on rotation OR when signals are degraded enough to be untrustworthy
+    if decision != "HOLD" or len(failures) >= regime_sso_config["max_signal_failures_before_alert"]:
         send_telegram_message(msg)
-    return {"score": score, "decision": decision, "position_before": current}
+    return {"score": score, "decision": decision, "position_before": current,
+            "signal_failures": failures}
+
+
+def backfill_regime_scores(api, days=30, env="live"):
+    """
+    One-time helper: compute and persist composite scores for the last N trading
+    days so the slow exit (15-day window) and re-entry paths have history to read.
+
+    Each day's score is computed using *that day's* historical data: SPY/HYG/LQD/EEM/IWM
+    bars truncated to that date, FRED VIX truncated to that date. Two limitations:
+
+      • Market breadth: requires per-stock historical data and is API-expensive.
+        We skip the breadth signal during backfill (set to 0) — it will start
+        contributing real values from the first live daily check onward.
+      • News sentiment: Alpaca's news API returns recent items only; we can
+        request older windows but article volume drops off sharply. Skipped
+        for backfill (set to 0).
+
+    The composite still includes the other 5 signals so the slow-exit / re-entry
+    logic has meaningful historical context. Trade-off: the backfilled portion
+    is a 5-signal score, the live portion is the full 7-signal score.
+    """
+    today = datetime.datetime.utcnow().date()
+    print(f"Backfilling regime scores for last {days} trading days...")
+
+    # Pull all the time series we need once
+    spy_bars = get_alpaca_historical_bars(api, "SPY", days=days + 220)
+    hyg_bars = get_alpaca_historical_bars(api, "HYG", days=days + 220)
+    lqd_bars = get_alpaca_historical_bars(api, "LQD", days=days + 220)
+    eem_bars = get_alpaca_historical_bars(api, "EEM", days=days + 220)
+    iwm_bars = get_alpaca_historical_bars(api, "IWM", days=days + 220)
+    vix_obs = get_fred_series("VIXCLS", limit=days + 30) or []
+    vix_by_date = {}
+    for o in vix_obs:
+        try:
+            vix_by_date[o["date"]] = float(o["value"])
+        except (ValueError, KeyError, TypeError):
+            continue
+
+    if not spy_bars or len(spy_bars) < 200:
+        return "Insufficient SPY history for backfill"
+
+    cfg = regime_sso_config
+    written = 0
+    last_signal = 0
+    # Walk forward through the last N days
+    for offset in range(days, 0, -1):
+        # Index into each series — bars are oldest-first
+        spy_idx = len(spy_bars) - offset
+        if spy_idx < 199:
+            continue
+        as_of_iso = spy_bars[spy_idx]["t"][:10]
+        # Skip if already persisted
+        try:
+            existing = (get_firestore_client()
+                        .collection(f"regime-scores-{env}")
+                        .document(as_of_iso).get())
+            if existing.exists:
+                continue
+        except Exception:
+            pass
+
+        # Signal 1: SPY 200-SMA + 3-day hysteresis (built from the historical window)
+        def _raw1(idx):
+            if idx < 199 or idx >= len(spy_bars):
+                return 0
+            closes = [float(b["c"]) for b in spy_bars[idx - 199:idx + 1]]
+            sma = sum(closes) / 200
+            close = float(spy_bars[idx]["c"])
+            return 1 if close > sma else (-1 if close < sma else 0)
+
+        last3 = [_raw1(spy_idx), _raw1(spy_idx - 1), _raw1(spy_idx - 2)]
+        if last3[0] != 0 and all(s == last3[0] for s in last3):
+            s1 = last3[0]
+        else:
+            s1 = last_signal  # carry prior on mixed signal
+        last_signal = s1
+
+        # Signal 3: VIX (level + trajectory)
+        vix_today = vix_by_date.get(as_of_iso)
+        s3 = 0
+        raw_vix = None
+        vix_5d_change = 0.0
+        if vix_today is not None:
+            raw_vix = vix_today
+            # 5-day change using FRED
+            keys = sorted(vix_by_date.keys())
+            try:
+                pos = keys.index(as_of_iso)
+                if pos >= 5:
+                    older = vix_by_date[keys[pos - 5]]
+                    vix_5d_change = (vix_today - older) / older if older > 0 else 0.0
+            except ValueError:
+                pass
+            if vix_today > cfg["vix_high"] or vix_5d_change > 0.20:
+                s3 = -1
+            elif vix_today < cfg["vix_low"] and vix_5d_change < 0.10:
+                s3 = 1
+
+        # Signal 4: ADX (using SPY bars up to this date)
+        s4 = 0
+        raw_adx = None
+        if spy_idx >= 30:
+            adx = compute_adx_from_bars(spy_bars[max(0, spy_idx - 60):spy_idx + 1],
+                                         period=cfg["adx_period"])
+            raw_adx = adx
+            if adx is not None and adx > cfg["adx_strong"]:
+                s4 = s1
+
+        # Signal 5: HYG/LQD ratio vs 50-SMA
+        s5 = 0
+        raw_credit_ratio = None
+        period = cfg["credit_sma_period"]
+        if (hyg_bars and lqd_bars and
+                spy_idx < len(hyg_bars) and spy_idx < len(lqd_bars) and spy_idx >= period):
+            ratios = []
+            for j in range(spy_idx - period + 1, spy_idx + 1):
+                if j < 0 or j >= min(len(hyg_bars), len(lqd_bars)):
+                    continue
+                lqd_c = float(lqd_bars[j]["c"])
+                if lqd_c > 0:
+                    ratios.append(float(hyg_bars[j]["c"]) / lqd_c)
+            if len(ratios) >= period:
+                sma = sum(ratios) / len(ratios)
+                latest = ratios[-1]
+                raw_credit_ratio = latest
+                if latest > sma * 1.002:
+                    s5 = 1
+                elif latest < sma * 0.998:
+                    s5 = -1
+
+        # Signal 7: canary (HYG/EEM/IWM vs 50-SMA)
+        s7 = 0
+        c_above = 0
+        c_below = 0
+        for series in (hyg_bars, eem_bars, iwm_bars):
+            if not series or spy_idx >= len(series) or spy_idx < cfg["canary_sma_period"]:
+                continue
+            closes = [float(b["c"]) for b in series[spy_idx - cfg["canary_sma_period"] + 1:spy_idx + 1]]
+            if len(closes) < cfg["canary_sma_period"]:
+                continue
+            sma = sum(closes) / len(closes)
+            if closes[-1] > sma:
+                c_above += 1
+            else:
+                c_below += 1
+        if c_below >= 3:
+            s7 = -1
+        elif c_above >= 3:
+            s7 = 1
+
+        # Signals 2 (breadth) and 6 (news) skipped during backfill
+        s2 = 0
+        s6 = 0
+        composite = s1 + s2 + s3 + s4 + s5 + s6 + s7
+
+        score = {
+            "price_trend": s1,
+            "market_breadth": s2,
+            "volatility_regime": s3,
+            "trend_strength": s4,
+            "credit_spread": s5,
+            "news_sentiment": s6,
+            "canary_universe": s7,
+            "composite": composite,
+            "raw_breadth_pct": None,
+            "raw_vix": raw_vix,
+            "raw_vix_5d_change": vix_5d_change,
+            "raw_adx": raw_adx,
+            "raw_credit_ratio": raw_credit_ratio,
+            "raw_sentiment_avg": 0.0,
+            "raw_sentiment_confidence": 0.0,
+            "raw_news_n_articles": 0,
+            "raw_canary_above": c_above,
+            "raw_canary_below": c_below,
+            "fed_hike_filter": False,
+            "signal_failures": ["market_breadth", "news_sentiment"],
+            "backfill": True,
+            "computed_at": f"{as_of_iso}T00:00:00",
+        }
+        try:
+            (get_firestore_client()
+             .collection(f"regime-scores-{env}")
+             .document(as_of_iso).set(score))
+            written += 1
+        except Exception as e:
+            print(f"  failed to persist backfill {as_of_iso}: {e}")
+
+    msg = f"🧭 regime_sso: backfilled {written} trading days of score history"
+    print(msg)
+    send_telegram_message(msg)
+    return msg
 
 
 def make_monthly_buys_regime_sso(api, force_execute=False, investment_calc=None,
@@ -6365,6 +6728,13 @@ def daily_regime_check_route(request):
 def monthly_buy_regime_sso(request):
     api = set_alpaca_environment(env=alpaca_environment)
     return make_monthly_buys_regime_sso(api, env=alpaca_environment)
+
+
+@app.route("/backfill_regime_scores", methods=["POST"])
+def backfill_regime_scores_route(request):
+    """One-shot endpoint: backfill ~30 trading days of historical regime scores."""
+    api = set_alpaca_environment(env=alpaca_environment)
+    return backfill_regime_scores(api, days=30, env=alpaca_environment)
 
 
 @app.route("/index_alert", methods=["POST"])

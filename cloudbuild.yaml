@@ -175,7 +175,9 @@ steps:
     - --set-env-vars=GOOGLE_CLOUD_PROJECT=1098661711782,GOOGLE_CLOUD_PROJECT_ID=trading-436516
     waitFor: ['-'] # start in parallel and actually needs to be set, otherwise deployment is sequential
 
-  # Step 5b: Deploy daily_regime_check (SSO/SHV regime detector daily run)
+  # Step 5b: Deploy daily_regime_check (SSO/USFR regime detector daily run)
+  # Memory bumped to 2GB to fit FinBERT (~440MB at runtime) plus the 500-stock
+  # market breadth scan in a single invocation.
   - name: 'gcr.io/cloud-builders/gcloud'
     args:
     - functions
@@ -187,7 +189,7 @@ steps:
     - --runtime=python310
     - --timeout=540s
     - --entry-point=daily_regime_check_route
-    - --memory=1024MB
+    - --memory=2048MB
     - --set-env-vars=GOOGLE_CLOUD_PROJECT=1098661711782,GOOGLE_CLOUD_PROJECT_ID=trading-436516
     waitFor: ['-']
 
@@ -204,6 +206,22 @@ steps:
     - --timeout=540s
     - --entry-point=monthly_buy_regime_sso
     - --memory=512MB
+    - --set-env-vars=GOOGLE_CLOUD_PROJECT=1098661711782,GOOGLE_CLOUD_PROJECT_ID=trading-436516
+    waitFor: ['-']
+
+  # Step 5d: Deploy backfill_regime_scores (one-shot history seeder, manually triggered)
+  - name: 'gcr.io/cloud-builders/gcloud'
+    args:
+    - functions
+    - deploy
+    - backfill_regime_scores
+    - --source=.
+    - --trigger-http
+    - --region=europe-west3
+    - --runtime=python310
+    - --timeout=540s
+    - --entry-point=backfill_regime_scores_route
+    - --memory=1024MB
     - --set-env-vars=GOOGLE_CLOUD_PROJECT=1098661711782,GOOGLE_CLOUD_PROJECT_ID=trading-436516
     waitFor: ['-']
 
