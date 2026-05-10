@@ -1,21 +1,20 @@
 # Investment Strategy with Alpaca and Google Cloud Functions
 
-This project contains a set of Python Cloud Functions for managing a multi-strategy portfolio using Alpaca's trading API. The portfolio consists of seven distinct investment strategies: **Hedgefundie's Excellent Adventure (HFEA)**, **Golden HFEA Lite**, **RSSB/WTIP Strategy (Structural Alpha)**, **S&P 500 with 200-SMA**, **9-Sig Strategy (Jason Kelly Methodology)**, **Dual Momentum Strategy (Gary Antonacci)**, and **Sector Momentum Rotation Strategy**.
+This project contains a set of Python Cloud Functions for managing a multi-strategy portfolio using Alpaca's trading API. The portfolio consists of six distinct investment strategies: **Hedgefundie's Excellent Adventure (HFEA)**, **RSSB/WTIP Strategy (Structural Alpha)**, **S&P 500 with 200-SMA**, **9-Sig Strategy (Jason Kelly Methodology)**, **Dual Momentum Strategy (Gary Antonacci)**, and **Sector Momentum Rotation Strategy**.
 
 ## Portfolio Allocation
 
-The current portfolio is allocated across seven strategies:
-- **HFEA Strategy**: 16.25%
-- **Golden HFEA Lite Strategy**: 16.25%
-- **SPXL SMA Strategy**: 32.5%
-- **RSSB/WTIP Strategy**: 10%
-- **9-Sig Strategy**: 5%
-- **Dual Momentum Strategy**: 10%
-- **Sector Momentum Strategy**: 10%
+The current portfolio is allocated across six strategies:
+- **HFEA Strategy**: 17.5%
+- **SPXL SMA Strategy**: 20%
+- **RSSB/WTIP Strategy**: 20%
+- **9-Sig Strategy**: 7.5%
+- **Dual Momentum Strategy**: 22.5%
+- **Sector Momentum Strategy**: 12.5%
 
 ## Overview of the Strategies
 
-The project is based on seven distinct investment strategies, each designed to maximize returns by leveraging specific market behaviors and signals.
+The project is based on six distinct investment strategies, each designed to maximize returns by leveraging specific market behaviors and signals.
 
 ### 1. Hedgefundie's Excellent Adventure (HFEA) Strategy
 
@@ -41,37 +40,7 @@ This three-asset approach was selected based on research from the r/LETFs commun
 This implementation is based on extensive backtesting and research from:
 - [r/LETFs 2024 Best Portfolio Competition Results](https://www.reddit.com/r/LETFs/comments/1dyl49a/2024_rletfs_best_portfolio_competition_results/)
 
-### 2. Golden HFEA Lite Strategy
-
-#### **Strategy Overview:**
-The Golden HFEA Lite strategy is a classic leveraged ETF portfolio that combines equity exposure, bond protection, and gold diversification. This strategy uses a balanced allocation across three key asset classes:
-- **SSO** (2x leveraged S&P 500) - 50% allocation
-- **ZROZ** (Long-term U.S. Treasury bonds) - 25% allocation  
-- **GLD** (Gold ETF) - 25% allocation
-
-This three-asset approach provides exposure to equity growth through leveraged S&P 500 exposure, downside protection through long-term treasury bonds, and diversification through gold's uncorrelated returns. The strategy is designed to capture the benefits of the classic "Golden Butterfly" portfolio with leveraged equity exposure for enhanced returns.
-
-#### **Approach in the Script:**
-- **Monthly Buys**: The script uses the same sophisticated underweight-based allocation system as HFEA. It calculates which assets are underweight relative to their target allocations (50% SSO, 25% ZROZ, 25% GLD) and allocates the monthly investment proportionally to bring the portfolio back towards target. This approach automatically rebalances during monthly contributions.
-  
-- **Quarterly Rebalancing**: The script includes a quarterly rebalancing function that ensures the portfolio remains aligned with the 50/25/25 target allocation. Rebalancing involves selling portions of over-performing ETFs and buying under-performing ones through a series of paired trades, ensuring the portfolio stays on track with the strategy's risk and return profile.
-
-#### **Expected Returns (CAGR):**
-- The Golden HFEA Lite strategy aims to provide strong risk-adjusted returns through the combination of leveraged equity exposure, bond stability, and gold diversification.
-- **Historical Performance**: Based on [backtesting from 1992-2025](https://testfol.io/?s=6KSoxd01a0K) (33.81 years), the SSO/ZROZ/GLD (50%/25%/25%) portfolio achieved **13.19% CAGR** with strong risk-adjusted returns:
-  - **Total Return**: 6,492.54% over ~34 years
-  - **Max Drawdown**: -46.26% (reasonable for leveraged strategy)
-  - **Volatility**: 18.02% (moderate for leveraged approach)
-  - **Sharpe Ratio**: 0.64 (good risk-adjusted returns)
-  - **Sortino Ratio**: 0.91 (excellent downside risk-adjusted returns)
-- The 2x leverage on equities provides enhanced returns during bull markets while the 25% allocation to bonds and gold provides downside protection and diversification benefits.
-
-#### **Research Sources:**
-This implementation is based on the classic "Golden Butterfly" portfolio concept adapted for leveraged ETFs:
-- [Golden Butterfly Portfolio](https://portfoliocharts.com/portfolio/golden-butterfly/) - Original portfolio concept
-- [Leveraged ETF Portfolio Strategies](https://www.reddit.com/r/LETFs/) - Community discussions on leveraged implementations
-
-### 3. Dual Momentum Strategy (Gary Antonacci)
+### 2. Dual Momentum Strategy (Gary Antonacci)
 
 #### **Strategy Overview:**
 The Dual Momentum strategy, developed by Gary Antonacci, is a sophisticated tactical asset allocation approach that combines two momentum principles:
@@ -124,7 +93,7 @@ This implementation is based on Gary Antonacci's research and community discussi
 - [r/LETFs: Combining Dual Momentum with LETFs](https://www.reddit.com/r/LETFs/comments/rwcoxk/combining_dual_momentum_with_the_principles_of/)
 - [r/LETFs: Leveraged Dual Momentum Backtest](https://www.reddit.com/r/LETFs/comments/1jj4tad/leveraged_dual_momentum_backtest/)
 
-### 4. Leveraged Sector Momentum Rotation Strategy
+### 3. Leveraged Sector Momentum Rotation Strategy
 
 #### **Strategy Overview:**
 The Leveraged Sector Momentum Rotation Strategy exploits the documented persistence of sector-level momentum driven by economic cycles, investor flows, and fundamental factors. Research shows sector leadership persists for 3-6 months, providing tradable opportunities. Studies by Faber and O'Shaughnessy demonstrate that momentum strategies outperformed buy-and-hold approximately 70% of the time across 80+ years of data.
@@ -185,7 +154,7 @@ Composite Score = (0.40 × 1M_return) + (0.20 × 3M_return) +
 - **Equal Weighting**: 33.33% allocation per sector prevents over-concentration and ensures balanced exposure across selected sectors.
 - **Bond Safety**: Automatic switch to SCHZ during bear markets preserves capital and protects against leveraged downside during market downturns.
 
-### 5. RSSB/WTIP Strategy (Structural Alpha)
+### 4. RSSB/WTIP Strategy (Structural Alpha)
 
 #### **Strategy Overview:**
 The RSSB/WTIP strategy moves from **Active/Tactical Management** (scripts, signals, rebalancing) to **Structural/Strategic Management** (asset allocation and leverage). Instead of trying to *time* the market or pick the best sectors, you are *stacking* diversified return streams to win in all economic environments.
@@ -242,7 +211,7 @@ The 80/20 strategy requires zero code, zero API keys, and zero maintenance other
 
 Here is how the new strategy specifically replaces or improves upon your existing six sub-strategies.
 
-**1. vs. HFEA & Golden HFEA Lite (35% of old portfolio)**
+**1. vs. HFEA (17.5% of old portfolio)**
 
 * **Old Way:** Leveraged 3x ETFs ($UPRO/$TMF). High volatility decay. If the market moves sideways with high volatility, you lose money.
 * **New Way:** **RSSB**. It provides similar Stock/Bond stacking but uses **Futures** rather than daily leveraged ETFs.
@@ -281,7 +250,7 @@ Here is how the new strategy specifically replaces or improves upon your existin
 1. **Robustness:** No "single point of failure" (like a bug in `main.py` or a broken API connection).
 2. **Psychology:** Easier to stick with. You aren't watching "Margin Gates" or "Signal Lines" every month.
 3. **Efficiency:** Better tax treatment and lower transaction costs (no bid/ask spread slippage from monthly trading).
-4. **Macro-Aware:** Explicitly hedges Inflation and Debasement (Gold/BTC) which your old portfolio only lightly touched via Golden HFEA.
+4. **Macro-Aware:** Explicitly hedges Inflation and Debasement which your old portfolio did not touch directly.
 
 **❌ Cons (What you are giving up)**
 
@@ -300,7 +269,7 @@ Your previous portfolio was a brilliant engineering feat of **Tactical Alpha**�
 
 The **80/20 RSSB/WTIP** portfolio is a feat of **Structural Alpha**—accepting that we cannot predict the future, so we build a vessel that can float on any ocean. It is less work, lower stress, and historically offers a higher Sharpe Ratio (risk-adjusted return).
 
-### 7. S&P 500 with 200-SMA Strategy
+### 5. S&P 500 with 200-SMA Strategy
 
 #### **Strategy Overview:**
 The S&P 500 with 200-SMA strategy is a trend-following investment approach that uses the 200-day Simple Moving Average (SMA) as a signal for entering or exiting the market. The 200-SMA is a widely-used technical indicator that smooths out daily price fluctuations and highlights the underlying trend of the market.
@@ -317,7 +286,7 @@ The basic premise of this strategy is that when the S&P 500 index is above its 2
 #### **Expected Returns:**
 - The S&P 500 with 200-SMA strategy aims to enhance returns through trend-following and risk management. By avoiding major market drawdowns through strategic exits during downtrends, the strategy seeks to capture the majority of market upside while protecting capital during bear markets. The use of 3x leverage (SPXL) amplifies returns during bullish periods while the 200-SMA timing mechanism provides downside protection. Historical backtests of similar strategies have shown improved risk-adjusted returns compared to buy-and-hold approaches.
 
-### 8. 9-Sig Strategy (Jason Kelly Methodology)
+### 6. 9-Sig Strategy (Jason Kelly Methodology)
 
 #### **Strategy Overview:**
 The 9-Sig strategy is based on Jason Kelly's methodology from his book "The 3% Signal". It's a systematic approach to managing a TQQQ (3x leveraged NASDAQ-100) and AGG (iShares Core U.S. Aggregate Bond ETF) portfolio with built-in crash protection. The strategy aims for 9% quarterly growth while maintaining an 80/20 allocation between TQQQ and AGG.
@@ -418,18 +387,17 @@ Result: Hold TQQQ position during market crash
 
 ## Conclusion
 
-All seven strategies offer unique ways to potentially enhance returns, but they come with their own sets of risks and assumptions. The HFEA strategy seeks to maximize growth through a balanced but leveraged approach, while the Golden HFEA Lite strategy combines equity growth with bond protection and gold diversification. The S&P 500 with 200-SMA strategy aims to capture market gains while avoiding major downturns. The 9-Sig strategy provides systematic growth with built-in crash protection and systematic rebalancing. The Dual Momentum strategy combines global diversification with momentum-based timing to capture trending markets while protecting capital during downturns. The Leveraged Sector Momentum strategy exploits sector rotation cycles through multi-period momentum analysis with 2x leveraged ETFs and trend filtering.
+All six strategies offer unique ways to potentially enhance returns, but they come with their own sets of risks and assumptions. The HFEA strategy seeks to maximize growth through a balanced but leveraged approach. The S&P 500 with 200-SMA strategy aims to capture market gains while avoiding major downturns. The 9-Sig strategy provides systematic growth with built-in crash protection and systematic rebalancing. The Dual Momentum strategy combines global diversification with momentum-based timing to capture trending markets while protecting capital during downturns. The Leveraged Sector Momentum strategy exploits sector rotation cycles through multi-period momentum analysis with 2x leveraged ETFs and trend filtering.
 
 Together, these strategies provide a comprehensive blend of aggressive growth and risk management:
-- **HFEA (16.25%)**: Three-asset leveraged portfolio (UPRO 45%, TMF 25%, KMLM 30%) with enhanced diversification through managed futures exposure
-- **Golden HFEA Lite (16.25%)**: Classic leveraged portfolio (SSO 50%, ZROZ 25%, GLD 25%) with equity exposure, bond protection, and gold diversification
-- **SPXL SMA (32.5%)**: Trend-following with market timing using 200-day SMA signals  
-- **RSSB/WTIP (10%)**: Structural alpha portfolio (80% RSSB, 20% WTIP) providing diversified return streams across all economic environments
-- **9-Sig (5%)**: Systematic TQQQ/AGG growth with crash protection following Jason Kelly's methodology
-- **Dual Momentum (10%)**: Tactical allocation between SPUU/EFO/BND using relative and absolute momentum
-- **Sector Momentum (10%)**: Leveraged multi-period momentum rotation across top 3 sector ETFs (2x leveraged) with SPY 200-SMA trend filtering
+- **HFEA (17.5%)**: Three-asset leveraged portfolio (UPRO 45%, TMF 25%, KMLM 30%) with enhanced diversification through managed futures exposure
+- **SPXL SMA (20%)**: Trend-following with market timing using 200-day SMA signals
+- **RSSB/WTIP (20%)**: Structural alpha portfolio (80% RSSB, 20% WTIP) providing diversified return streams across all economic environments
+- **9-Sig (7.5%)**: Systematic TQQQ/AGG growth with crash protection following Jason Kelly's methodology
+- **Dual Momentum (22.5%)**: Tactical allocation between SPUU/EFO/BND using relative and absolute momentum
+- **Sector Momentum (12.5%)**: Leveraged multi-period momentum rotation across top 3 sector ETFs (2x leveraged) with SPY 200-SMA trend filtering
 
-Each strategy has been carefully selected and optimized based on historical backtests and current market research. The diversification across seven different approaches—equity/bond/futures leverage, structural alpha, trend-following, systematic rebalancing, momentum-based tactical allocation, and sector rotation—helps reduce overall portfolio risk while maintaining strong growth potential.
+Each strategy has been carefully selected and optimized based on historical backtests and current market research. The diversification across six different approaches—equity/bond/futures leverage, structural alpha, trend-following, systematic rebalancing, momentum-based tactical allocation, and sector rotation—helps reduce overall portfolio risk while maintaining strong growth potential.
 
 ## Index Alert System
 
@@ -471,7 +439,6 @@ Consider a loan with a duration of 6 to 8 years (50k to 100k) at around 4.5% int
 
 - `main.py`: The main Python script containing all strategy logic:
   - **HFEA strategy**: Three-asset portfolio (UPRO/TMF/KMLM at 45/25/30) with monthly underweight-based buys and quarterly rebalancing
-  - **Golden HFEA Lite strategy**: Three-asset portfolio (SSO/ZROZ/GLD at 50/25/25) with monthly underweight-based buys and quarterly rebalancing
   - **RSSB/WTIP strategy**: Two-asset portfolio (RSSB/WTIP at 80/20) with monthly underweight-based buys and quarterly rebalancing
   - **SPXL SMA strategy**: Trend-following with 200-day SMA (monthly buys and daily trading)
   - **9-Sig strategy**: Jason Kelly methodology with monthly AGG contributions and quarterly TQQQ/AGG signals with crash protection
@@ -485,11 +452,9 @@ Consider a loan with a duration of 6 to 8 years (50k to 100k) at around 4.5% int
 - `README.md`: Comprehensive documentation of all strategies and setup instructions.
 
 ### **Cloud Functions Deployed:**
-- `monthly_invest_all`: **Orchestrator function (RECOMMENDED)** - Runs all seven monthly strategies with coordinated budget calculations
+- `monthly_invest_all`: **Orchestrator function (RECOMMENDED)** - Runs all six monthly strategies with coordinated budget calculations
 - `monthly_buy_hfea`: HFEA monthly investment function (individual execution)
 - `rebalance_hfea`: HFEA quarterly rebalancing function
-- `monthly_buy_golden_hfea_lite`: Golden HFEA Lite monthly investment function (individual execution)
-- `rebalance_golden_hfea_lite`: Golden HFEA Lite quarterly rebalancing function
 - `monthly_buy_rssb_wtip`: RSSB/WTIP monthly investment function (individual execution)
 - `rebalance_rssb_wtip`: RSSB/WTIP quarterly rebalancing function
 - `monthly_buy_spxl`: SPXL SMA monthly investment function (individual execution)
@@ -501,16 +466,16 @@ Consider a loan with a duration of 6 to 8 years (50k to 100k) at around 4.5% int
 - `index_alert`: Unified index alert system
 
 ### **Cloud Scheduler Jobs:**
-- **Monthly orchestrator**: First trading day of each month at 12:00 PM ET (`monthly_invest_all` - runs all seven monthly strategies with coordinated budgets)
-- **Quarterly functions**: First trading day of each quarter at specified times (`rebalance_hfea` at 2:00 PM ET, `rebalance_golden_hfea_lite` at 2:00 PM ET, `rebalance_rssb_wtip` at 2:00 PM ET, `quarterly_nine_sig_signal` at 1:00 PM ET)
+- **Monthly orchestrator**: First trading day of each month at 12:00 PM ET (`monthly_invest_all` - runs all six monthly strategies with coordinated budgets)
+- **Quarterly functions**: First trading day of each quarter at specified times (`rebalance_hfea` at 2:00 PM ET, `rebalance_rssb_wtip` at 2:00 PM ET, `quarterly_nine_sig_signal` at 1:00 PM ET)
 - **Index alerts**: Hourly during trading hours (9:15 AM - 3:15 PM for SMA alerts, 9:30 AM - 3:30 PM for ATH drop alerts)
 - **Daily SMA functions**: 3:56 PM ET on weekdays (`daily_trade_spxl_200sma`)
 
-**Note**: Individual monthly functions (`monthly_buy_hfea`, `monthly_buy_golden_hfea_lite`, `monthly_buy_rssb_wtip`, `monthly_buy_spxl`, `monthly_nine_sig_contributions`, `monthly_dual_momentum`, `monthly_sector_momentum`) are deployed but not scheduled. They remain available for manual execution and debugging purposes. The `monthly_invest_all` orchestrator is used for production to ensure coordinated budget allocation and prevent over-spending.
+**Note**: Individual monthly functions (`monthly_buy_hfea`, `monthly_buy_rssb_wtip`, `monthly_buy_spxl`, `monthly_nine_sig_contributions`, `monthly_dual_momentum`, `monthly_sector_momentum`) are deployed but not scheduled. They remain available for manual execution and debugging purposes. The `monthly_invest_all` orchestrator is used for production to ensure coordinated budget allocation and prevent over-spending.
 
 ## Monthly Investment Orchestrator
 
-The `monthly_invest_all` orchestrator is a coordinated execution system that manages all seven monthly investment strategies (HFEA, Golden HFEA Lite, RSSB/WTIP, SPXL SMA, 9-Sig, Dual Momentum, and Sector Momentum) in a single unified process.
+The `monthly_invest_all` orchestrator is a coordinated execution system that manages all six monthly investment strategies (HFEA, RSSB/WTIP, SPXL SMA, 9-Sig, Dual Momentum, and Sector Momentum) in a single unified process.
 
 ### **Why Use an Orchestrator?**
 
@@ -529,18 +494,17 @@ The orchestrator (`monthly_invest_all_strategies()` function):
 1. **Calculates budgets once**: Checks margin conditions and calculates total available buying power a single time
 2. **Distributes precisely**: Splits the total amount according to strategy allocations:
    - HFEA: 17.5%
-   - Golden HFEA Lite: 17.5%
-   - SPXL SMA: 35%
-   - RSSB/WTIP: 5%
-   - 9-Sig: 5%
-   - Dual Momentum: 10%
-   - Sector Momentum: 10%
+   - SPXL SMA: 20%
+   - RSSB/WTIP: 20%
+   - 9-Sig: 7.5%
+   - Dual Momentum: 22.5%
+   - Sector Momentum: 12.5%
 3. **Passes pre-calculated amounts**: Each strategy receives its exact budget and margin conditions as parameters
 4. **Prevents over-spending**: Since budgets are pre-calculated, there's no risk of multiple strategies competing for the same funds
 
 ### **Key Features**
 
-- **Coordinated execution**: All six strategies run in sequence with shared context
+- **Coordinated execution**: All strategies run in sequence with shared context
 - **Exact splits**: Portfolio allocation percentages are maintained precisely
 - **Single margin check**: Margin conditions evaluated once and shared across all strategies
 - **Unified reporting**: Consolidated Telegram notifications show the complete picture
@@ -758,7 +722,7 @@ pip install -r requirements.txt
 The script supports local execution for testing strategies before deploying to Google Cloud:
 
 ```bash
-# RECOMMENDED - Monthly Orchestrator (runs all four monthly strategies with coordinated budgets)
+# RECOMMENDED - Monthly Orchestrator (runs all six monthly strategies with coordinated budgets)
 python3 main.py --action monthly_invest_all --env paper --force
 
 # Individual Strategy Testing (for debugging specific strategies)
@@ -781,7 +745,7 @@ python3 main.py --action monthly_dual_momentum --env paper --force
 
 **Why use the orchestrator (`monthly_invest_all`)?**
 - Calculates budgets once and distributes them to all strategies
-- Ensures exact percentage splits (17.5% HFEA, 17.5% Golden HFEA Lite, 35% SPXL SMA, 5% RSSB/WTIP, 5% 9-Sig, 10% Dual Momentum, 10% Sector Momentum)
+- Ensures exact percentage splits (17.5% HFEA, 20% SPXL SMA, 20% RSSB/WTIP, 7.5% 9-Sig, 22.5% Dual Momentum, 12.5% Sector Momentum)
 - Prevents over-spending by coordinating margin and cash allocation
 - Recommended for production use to maintain portfolio balance
 
