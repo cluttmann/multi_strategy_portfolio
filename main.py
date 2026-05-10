@@ -16,13 +16,13 @@ app = Flask(__name__)
 # Strategy allocation percentages for dynamic monthly investment calculation
 # Investment amounts are calculated dynamically each month based on available cash and margin
 strategy_allocations = {
-    "hfea_allo": 0.1714,           # 17.14% to HFEA
-    "spxl_allo": 0.1314,           # 13.14% to SPXL SMA (down 4pp to fund regime_world)
-    "rssb_wtip_allo": 0.2086,      # 20.86% to RSSB/WTIP (down 2pp to fund regime_world)
-    "nine_sig_allo": 0.0857,       # 8.57% to 9-Sig
-    "dual_momentum_allo": 0.2572,  # 25.72% to Dual Momentum (best-of-3 SPUU/QLD/EFO)
-    "regime_sso_allo": 0.0857,     # 8.57% to SSO/USFR regime detector (US)
-    "regime_world_allo": 0.0600,   # 6.00% to WLDU/USFR regime detector (global)
+    "hfea_allo": 0.15,             # 15% to HFEA
+    "spxl_allo": 0.15,             # 15% to SPXL SMA
+    "rssb_wtip_allo": 0.10,        # 10% to RSSB/WTIP (macro hedge sleeve)
+    "nine_sig_allo": 0.05,         # 5% to 9-Sig (high-DD sleeve, kept small)
+    "dual_momentum_allo": 0.20,    # 20% to Dual Momentum (best-of-3 SPUU/QLD/EFO)
+    "regime_sso_allo": 0.15,       # 15% to SSO/USFR regime detector (US)
+    "regime_world_allo": 0.20,     # 20% to WLDU/USFR regime detector (global)
 }
 
 upro_allocation = 0.45
@@ -5854,13 +5854,13 @@ def monthly_invest_all_strategies(api, force_execute=False, skip_order_wait=Fals
     # Show per-strategy budget breakdown
     account_msg += "Budget per strategy:\n"
     for label, key in [
-        ("HFEA 17.14%", "hfea_allo"),
-        ("SPXL SMA 13.14%", "spxl_allo"),
-        ("RSSB/WTIP 20.86%", "rssb_wtip_allo"),
-        ("9-Sig 8.57%", "nine_sig_allo"),
-        ("Dual Momentum 25.72%", "dual_momentum_allo"),
-        ("Regime SSO 8.57%", "regime_sso_allo"),
-        ("Regime World 6.00%", "regime_world_allo"),
+        ("HFEA 15%", "hfea_allo"),
+        ("SPXL SMA 15%", "spxl_allo"),
+        ("RSSB/WTIP 10%", "rssb_wtip_allo"),
+        ("9-Sig 5%", "nine_sig_allo"),
+        ("Dual Momentum 20%", "dual_momentum_allo"),
+        ("Regime SSO 15%", "regime_sso_allo"),
+        ("Regime World 20%", "regime_world_allo"),
     ]:
         account_msg += f"  • {label}: ${strategy_amounts[key]:,.2f}\n"
     
