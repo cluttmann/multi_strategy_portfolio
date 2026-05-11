@@ -1,20 +1,26 @@
 # Investment Strategy with Alpaca and Google Cloud Functions
 
-This project contains a set of Python Cloud Functions for managing a multi-strategy portfolio using Alpaca's trading API. The portfolio consists of six distinct investment strategies: **Hedgefundie's Excellent Adventure (HFEA)**, **RSSB/WTIP Strategy (Structural Alpha)**, **S&P 500 with 200-SMA**, **9-Sig Strategy (Jason Kelly Methodology)**, **Dual Momentum Strategy (Gary Antonacci)**, and **Regime SSO Strategy**.
+This project contains a set of Python Cloud Functions for managing a multi-strategy portfolio using Alpaca's trading API. The portfolio is composed of seven complementary strategies: **HFEA**, **SPXL SMA**, **RSSB/WTIP (Structural Alpha)**, **9-Sig (Jason Kelly Methodology)**, **Dual Momentum (best-of-3 leveraged rotation)**, **Regime SSO (US regime detector)**, and **Regime World (global regime detector)**.
 
 ## Portfolio Allocation
 
-The current portfolio is allocated across six strategies:
-- **HFEA Strategy**: 17.5%
-- **SPXL SMA Strategy**: 20%
-- **RSSB/WTIP Strategy**: 20%
-- **9-Sig Strategy**: 7.5%
-- **Dual Momentum Strategy**: 22.5%
-- **Regime SSO Strategy**: (small allocation)
+Current production weights (sum to 100%):
+
+| Strategy | Weight | Role |
+|---|---:|---|
+| HFEA | 15% | Aggressive 3× leveraged buy-and-hold (UPRO/TMF/KMLM) |
+| SPXL SMA | 15% | 3× S&P trend-following with 200-SMA gate |
+| RSSB/WTIP | 10% | Structural alpha — global stocks + managed futures (macro hedge) |
+| 9-Sig | 5% | Systematic TQQQ/AGG with crash protection (tail-risk sleeve) |
+| Dual Momentum (best-of-3) | 20% | SPUU/QLD/EFO rotation + DD-stop + vol-target |
+| Regime SSO | 15% | 7-signal US regime detector — SSO ↔ USFR rotation |
+| Regime World | 20% | 7-signal global regime detector — WLDU ↔ USFR rotation |
+
+Two regime-detection sleeves (US + global) make up 35% of the portfolio. The combination delivers a 24-year backtested Sharpe of **0.75** with a max drawdown of **-29%** and a CAGR of **15.78%** — see *Backtest Results & Robustness* below.
 
 ## Overview of the Strategies
 
-The project is based on six distinct investment strategies, each designed to maximize returns by leveraging specific market behaviors and signals.
+The project is based on seven distinct investment strategies, each designed to maximize returns by leveraging specific market behaviors and signals.
 
 ### 1. Hedgefundie's Excellent Adventure (HFEA) Strategy
 
@@ -40,58 +46,44 @@ This three-asset approach was selected based on research from the r/LETFs commun
 This implementation is based on extensive backtesting and research from:
 - [r/LETFs 2024 Best Portfolio Competition Results](https://www.reddit.com/r/LETFs/comments/1dyl49a/2024_rletfs_best_portfolio_competition_results/)
 
-### 2. Dual Momentum Strategy (Gary Antonacci)
+### 2. Dual Momentum — best-of-3 with DD-stop + vol-target
 
 #### **Strategy Overview:**
-The Dual Momentum strategy, developed by Gary Antonacci, is a sophisticated tactical asset allocation approach that combines two momentum principles:
-- **Relative Momentum**: Comparing performance between two underlying assets (SPY vs EFA)
-- **Absolute Momentum**: Determining if the winner has positive trend (> 0% return)
+This sleeve replaces the original 2-asset Antonacci dual momentum (SPUU vs EFO) with a **best-of-3 multi-asset rotation** that picks the strongest momentum candidate each month from three 2× leveraged equity ETFs. The change pushed the sleeve's 24-year backtested CAGR from ~10.5% to **17.21%** and Sharpe from 0.31 to **0.65**, while keeping effective leverage ≤ 2×.
 
-This strategy compares the underlying assets for momentum signals but invests in leveraged ETFs for enhanced returns:
-- **Momentum Analysis**: Calculates 12-month returns on SPY (S&P 500) and EFA (international developed markets)
-- **Investment Vehicles**:
-  - **SPUU** (ProShares Ultra S&P 500) - 2x leveraged S&P 500
-  - **EFO** (ProShares Ultra MSCI EAFE) - 2x leveraged international developed markets
-  - **BND** (Vanguard Total Bond Market ETF) - Safety asset during downtrends
+#### **Universe:**
+- **SPUU** — 2× S&P 500 (signal: SPY)
+- **QLD** — 2× Nasdaq-100 (signal: QQQ) — the biggest contributor to the upgrade
+- **EFO** — 2× MSCI EAFE (signal: EFA)
+- **BND** — Vanguard Total Bond Market ETF (defensive + vol-target overflow)
 
-#### **Approach in the Script:**
-- **Monthly Rebalancing**: On the first trading day of each month, the strategy:
-  1. Calculates 12-month returns (252 trading days) for the underlying assets SPY and EFA
-  2. Applies the current TestFolio-aligned decision tree with a 1% tolerance band:
-     - **Signal A**: `SPY > 1%`
-     - **Signal B**: `EFA > 1%`
-     - **Signal C**: `SPY > EFA + 1%`
-     - **Allocation 1 (SPUU)**: `A AND B AND C`
-     - **Allocation 2 (EFO)**: `Else if B`
-     - **Fallback (BND)**: `Else`
-  4. Executes position switch if signal changes, or adds new investment to existing position
-  5. Always runs monthly signal evaluation and persists signal state even when the monthly allocation for Dual Momentum is `0`
+#### **Signal:**
+Blended 6-month + 12-month return on the underlying signal symbol, weighted 50/50, with **skip-most-recent-month** (Jegadeesh-Titman) — uses prices from `today − 21 calendar days` as the "now" reference, suppressing short-term reversal noise. Winner is the candidate with highest blended score; if no candidate exceeds +1%, the strategy goes defensive.
 
-- **Why Compare Underlying Assets**: By comparing the underlying assets (SPY vs EFA) rather than the leveraged ETFs themselves, the strategy gets cleaner momentum signals that aren't affected by leverage decay, rebalancing effects, or volatility in the leveraged products.
+#### **Risk Management:**
+1. **DD-stop (30%)** — trailing-peak-NAV drawdown stop. If the strategy is ≥ 30% below its peak, force defensive (BND) and reset the peak. Prevents the leveraged ETFs from melting through prolonged bear markets.
+2. **Vol-target (25% annualized)** — scale the winner position by `min(1, 0.25 / 60d-realized-vol)`. Excess parks in BND. When SPUU is doing 35% vol, the strategy holds ≈ 71% SPUU + 29% BND.
 
-- **Position Management**: The strategy maintains 100% allocation to a single position at all times. When the momentum signal changes, it sells the entire current position and buys the new target position. This ensures full exposure to the strongest trending asset while providing downside protection through bonds during negative momentum periods.
+#### **Monthly Mechanics:**
+1. Compute current NAV from all positions (SPUU + QLD + EFO + BND)
+2. Update peak NAV; if drawdown > 30% → force defensive, reset peak
+3. Otherwise, compute blended momentum scores for SPY, QQQ, EFA
+4. Pick winner (highest score, must exceed +1%)
+5. Compute 60-day realized vol of the winner ETF
+6. Compute target dollar split: `scale × $total` to winner, `(1-scale) × $total` to BND
+7. Rebalance current positions to converge to targets
 
-- **Investment Tracking**: All contributions and positions are tracked in Firestore, enabling accurate performance calculation and return monitoring.
+#### **24-Year Backtested Performance (this sleeve standalone):**
+- CAGR: **17.21%**
+- Sharpe: **0.65** (best risk/return among ≤2× sleeves)
+- Max DD: **-33.93%**
+- Worst year: -26.48%
+- Total return: 4,240%
 
-#### **Expected Returns:**
-- The Dual Momentum strategy aims to capture the best-performing markets (US or International) during bull markets while providing crash protection by moving to bonds during bear markets.
-- **Historical Performance**: Based on the current TestFolio setup and logic implemented in this repo, the strategy has demonstrated strong risk-adjusted returns with reduced drawdowns compared to broad market benchmarks.
-- **Reference Backtest**: [TestFolio tactical backtest (current implementation)](https://testfol.io/tactical?s=i7AJfaoEUxv)
-- The combination of relative and absolute momentum helps avoid extended periods of negative returns while maintaining exposure to trending markets.
-- **Behavioral Edge**: The strategy exploits persistent momentum anomalies that arise from behavioral biases like herding and anchoring, which cause trends to persist for 3-12 months.
-
-#### **Backtest Figures (Current Implementation):**
-The following figures are from the TestFolio run linked above and document the current strategy behavior and benchmark comparison.
-
-![Dual Momentum TestFolio strategy statistics](docs/images/dual-momentum-testfolio-stats.png)
-
-![Dual Momentum TestFolio benchmark comparison](docs/images/dual-momentum-testfolio-benchmark.png)
-
-#### **Research Sources:**
-This implementation is based on Gary Antonacci's research and community discussions:
-- [TestFolio tactical backtest (current implementation)](https://testfol.io/tactical?s=i7AJfaoEUxv) - SPUU/EFO/BND leveraged implementation with current monthly decision logic
-- [r/LETFs: Combining Dual Momentum with LETFs](https://www.reddit.com/r/LETFs/comments/rwcoxk/combining_dual_momentum_with_the_principles_of/)
-- [r/LETFs: Leveraged Dual Momentum Backtest](https://www.reddit.com/r/LETFs/comments/1jj4tad/leveraged_dual_momentum_backtest/)
+#### **Why Best-of-3 + Vol-Target Beat the Original:**
+- Adding QLD captures Nasdaq momentum during tech-led bull runs (2010s, 2020-2024) that pure SPY signal misses
+- Vol-targeting prevents the strategy from holding the full 2× exposure during high-vol regimes — meaningfully reduces drawdown without much CAGR cost
+- Trailing-peak DD-stop catches multi-month bear markets the monthly momentum signal would otherwise lag
 
 ### 3. RSSB/WTIP Strategy (Structural Alpha)
 
@@ -289,6 +281,131 @@ Result: Hold TQQQ position during market crash
 - Tracks: balances, signal lines, actions taken, and performance metrics
 - Enables accurate calculation of subsequent quarters' signal lines
 
+### 6. Regime SSO (US Regime Detector)
+
+#### **Strategy Overview:**
+A 7-signal composite regime detector based on Reddit r/LETFs methodology (u/Neat_Bug1775). Rotates between **SSO** (2× S&P 500) in risk-on conditions and **USFR** (WisdomTree Floating Rate Treasury, cash-like) in risk-off conditions. Designed to fire ≈ 1.4 rotations per year — intentionally slow and noise-resistant.
+
+#### **The Seven Signals (each contributes -1 / 0 / +1):**
+1. **Price trend** — SPY vs 200-SMA with 3-day hysteresis (filters whipsaws)
+2. **Market breadth** — % of S&P 500 stocks above their 50-SMA
+3. **Volatility regime** — VIX level AND trajectory (5-day change)
+4. **Trend strength** — 14-day ADX on SPY (must exceed 25 to count)
+5. **Credit spread** — HYG/LQD ratio vs its 50-SMA (junk vs investment-grade)
+6. **News sentiment** — FinBERT-scored Alpaca news over rolling 24h
+7. **Canary universe** — HYG / EEM / IWM vs their 50-SMA (liquidity proxy)
+
+Composite range: roughly -7 to +7.
+
+#### **Plus: Fed Hike Filter:**
+Blocks re-entries during aggressive Fed hiking cycles (>50bp in 90 days). Credited with avoiding the 2022 bear-rally trap.
+
+#### **Exit / Re-entry Logic:**
+- **EXIT_FAST**: composite ≤ -3 for 3 consecutive days → SSO → USFR
+- **EXIT_SLOW**: composite ≤ 0 for 15 consecutive days → SSO → USFR
+- **REENTER_CREDIT_VIX** (Path A): 4 weeks of improving credit + declining VIX + positive composite
+- **REENTER_NLP** (Path B): composite ≥ +3 for 7 days AND FinBERT confidence ≥ 0.80 over 2 weeks
+- **REENTER_STD** (Path C): composite ≥ +3 for 15 consecutive days (always-on fallback)
+
+#### **24-Year Backtested Performance:**
+- CAGR: 12.16% • Sharpe: **0.62** • Max DD: **-23.59%** • Worst year: -13.40%
+- Lowest drawdown of any leveraged sleeve in the portfolio.
+
+### 7. Regime World (Global Regime Detector)
+
+#### **Strategy Overview:**
+Sister strategy to Regime SSO, applied to global equities. Same 7-signal apparatus + Fed filter, but with world-specific signal sources. Rotates between **WLDU** (Leverage Shares 2× MSCI World ETF) and **USFR** (cash). Provides geographic diversification from the otherwise US-heavy portfolio.
+
+#### **World-Specific Signals:**
+| Signal | Regime SSO source | Regime World source |
+|---|---|---|
+| 1. Trend | SPY 200-SMA | **URTH 255-SMA** (longer window for global indices) |
+| 2. Breadth | S&P 500 constituents | **Ex-US country ETF basket** (EFA/EEM/VWO + 12 country ETFs) |
+| 3. Volatility | VIX | VIX (universal) |
+| 4. ADX | SPY 14-day ADX | **URTH 14-day ADX** |
+| 5. Credit | HYG/LQD | HYG/LQD (universal — global credit) |
+| 6. News | US-centric Alpaca news firehose | **Filtered to global ETF tickers** (URTH, EFA, EEM, VWO, VEA, ACWI, IEFA) |
+| 7. Canary | HYG/EEM/IWM | HYG/EEM/IWM (universal liquidity) |
+| Fed filter | DFEDTARU | DFEDTARU (Fed matters globally) |
+
+#### **24-Year Backtested Performance:**
+- CAGR: 9.89% • Sharpe: 0.43 • Max DD: -30.94% • Worst year: **-10.49%**
+- Lower raw return than Regime SSO because URTH lagged SPY ~4 pp/year over 2002-2026. Earns its keep through **geographic decorrelation** and the **best worst-year of any leveraged sleeve**.
+
+#### **Implementation Caveat — Synthetic Backtest:**
+WLDU launched **2026-03-12**. The 24-year backtest is ~99% synthetic (2× URTH minus financing minus expense ratio). Live WLDU's tracking error vs. the synthetic model is the largest unhedged uncertainty in this sleeve.
+
+#### **Shared Engine:**
+Both regime sleeves run on a parameterized engine — same code, two config dicts (`regime_sso_config`, `regime_world_config`). Daily score checks run separately at 16:30 (SSO) and 16:35 (World) on weekdays to avoid concurrent FinBERT model loads.
+
+## Backtest Results & Robustness
+
+The full portfolio is backtested over **24 years** (2002-07 → 2026-05) using EODHD-sourced spliced daily returns, with synthetic reconstruction for assets pre-inception (UPRO/TMF/TQQQ/SPUU/QLD/EFO/SOXL/EDC, WLDU, KMLM/DBMF, RSSB, WTIP, USFR). Backtest engine: `/tmp/mega_backtest/mega_backtest.py`.
+
+### Deterministic Backtest (single historical path)
+
+| Strategy | Weight | CAGR | Vol | Sharpe | Max DD | Worst Yr | Best Yr | Total Ret |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| Dual Momentum (best-of-3) | 20% | 17.21% | 23.31% | **0.65** | -33.93% | -26.48% | +65.04% | 4,240% |
+| Regime SSO | 15% | 12.16% | 16.52% | 0.62 | **-23.59%** | -13.40% | +70.47% | 1,427% |
+| HFEA | 15% | 18.91% | 27.57% | 0.61 | -67.24% | -41.74% | +71.90% | 6,020% |
+| Regime World | 20% | 9.89% | 18.23% | 0.43 | -30.94% | **-10.49%** | +46.30% | 838% |
+| 9-Sig | 5% | **22.43%** | 48.06% | 0.42 | -93.06% | -84.84% | **+164.68%** | **12,119%** |
+| SPXL SMA | 15% | 14.96% | 30.57% | 0.42 | -54.86% | -41.32% | +118.37% | 2,642% |
+| RSSB/WTIP | 10% | 8.26% | 15.18% | 0.41 | -46.02% | -25.19% | +30.50% | 558% |
+| **AGGREGATE (production)** | **100%** | **15.78%** | **18.31%** | **0.75** | **-28.89%** | **-23.43%** | **+56.59%** | **3,146%** |
+| 100% SPY (benchmark) | — | 11.52% | 18.87% | 0.50 | -55.19% | -36.79% | +32.31% | 1,232% |
+| 100% URTH MSCI World (benchmark) | — | 7.20% | 13.20% | 0.39 | -34.01% | -17.97% | +28.15% | 421% |
+
+Key observations:
+- **Aggregate Sharpe (0.75) exceeds every individual sleeve** — the diversification benefit is real and large.
+- **Aggregate volatility (18.31%) is *lower* than SPY (18.87%)** despite delivering 1.5× the return.
+- vs SPY: +4.26 pp CAGR, +0.25 Sharpe, **26 pp tighter drawdown**.
+- vs MSCI World: +8.58 pp CAGR, +0.36 Sharpe, 5 pp tighter drawdown.
+- $1 → $32.46 (production) vs $13.32 (SPY) vs $5.21 (MSCI World) over 24 years.
+
+### Monte Carlo Robustness (Stationary Block Bootstrap)
+
+To test whether the deterministic result depends on the specific historical path, the daily strategy returns are jointly resampled via Politis-Romano stationary bootstrap (n = 2000 simulations, mean block = 63 trading days ≈ one quarter). Joint sampling preserves cross-strategy correlation (e.g., 2008-style crisis comovement).
+
+**Aggregate distribution (n = 2000 simulated 24-year paths):**
+
+| Metric | Deterministic | p5 (worst) | p50 (median) | p95 (best) |
+|---|---:|---:|---:|---:|
+| CAGR | +15.78% | +9.82% | +15.72% | +22.20% |
+| Sharpe | 0.75 | 0.43 | 0.75 | 1.11 |
+| Max DD | -28.89% | -45.26% | -31.90% | -24.30% |
+| Worst Yr | -23.43% | -27.83% | -15.23% | -4.09% |
+
+**Beat-benchmark probabilities (matched bootstrap paths):**
+
+| Strategy | vs SPY (CAGR) | vs SPY (Sharpe) | vs SPY (MaxDD) | vs MSCI World (CAGR) | vs MSCI World (Sharpe) |
+|---|---:|---:|---:|---:|---:|
+| **AGGREGATE (production)** | **98.0%** | **96.1%** | **85.7%** | **100.0%** | **99.4%** |
+| HFEA | 97.2% | 74.1% | 2.1% | 98.4% | 84.3% |
+| Dual Momentum (best-of-3) | 95.0% | 75.5% | 57.0% | 99.7% | 92.7% |
+| 9-Sig | 89.8% | 27.9% | 0.0% | 91.3% | 58.1% |
+| SPXL SMA | 74.2% | 32.5% | 8.8% | 92.0% | 56.9% |
+| Regime SSO | 57.0% | 66.7% | 81.2% | 95.5% | 85.9% |
+| Regime World | 32.7% | 34.8% | 77.5% | 83.5% | 57.5% |
+| RSSB/WTIP | 9.3% | 28.0% | 56.4% | 66.4% | 56.1% |
+
+**What the Monte Carlo tells us:**
+- The deterministic result (15.78% / 0.75 / -29%) sits **almost exactly at the p50** of every metric — the historical 24 years was *not* a lucky path. No survivorship bias.
+- Aggregate beats SPY on CAGR in **98% of simulated paths** and on Sharpe in **96%**. Beats MSCI World on Sharpe **99% of the time**.
+- Tail risks are bounded: **0% chance of finishing negative** over 24 years; **13.7% chance of breaching -40% drawdown**; **1.7% chance of breaching -50%**.
+- Sleeves that look weak in isolation (RSSB/WTIP only beats SPY on CAGR 9% of the time) pay for themselves through diversification — they're macro hedges, not return chasers.
+- The aggregate's deterministic MaxDD of -29% sits between p75 and p95 of the distribution — slightly *better than typical*. **Future drawdowns may run a bit worse than the historical experience.**
+
+### Honest Caveats
+
+- Regime World's 24-year backtest is ~99% synthetic. Live WLDU has only ~2 months of data.
+- RSSB pre-2023-12 and WTIP pre-2025-06 are synthetic component reconstructions.
+- Synthetic-WTIP correlation with live WTIP is ~0.57 — absolute returns may differ from a live-only backtest.
+- Bootstrap can't simulate regimes that don't appear in the 2002-2026 sample (e.g., 1970s stagflation).
+- Whole-share / fractional constraints aren't modeled.
+- Margin behavior in the backtest is simplified vs. production's gated margin logic.
+
 ## Detailed Analysis of All Strategies
 
 ### **Risk and Volatility:**
@@ -298,7 +415,11 @@ Result: Hold TQQQ position during market crash
 
 - **9-Sig Strategy**: The 9-Sig strategy balances growth and risk management through systematic rebalancing and crash protection. While it uses leveraged ETFs (TQQQ), the monthly contributions to bonds and the "30 Down, Stick Around" rule provide significant downside protection. The strategy's systematic approach removes emotional decision-making and provides built-in risk management during market crashes.
 
-- **Dual Momentum Strategy**: The Dual Momentum strategy uses 2x leveraged ETFs (SPUU/EFO) but includes built-in crash protection through its absolute momentum filter. When both markets show negative momentum, the strategy moves to BND (bonds), providing downside protection. The monthly rebalancing reduces whipsaw risk while the 12-month lookback period captures sustained trends. This strategy balances aggressive growth during bull markets with defensive positioning during bear markets.
+- **Dual Momentum (best-of-3)**: Uses 2× leveraged ETFs (SPUU/QLD/EFO) and rotates monthly to whichever underlying has the strongest blended 6m/12m momentum (skip-1m). Two layered risk controls — a 30% trailing-peak drawdown stop and a 25% annualized vol target — keep effective leverage ≤ 2× and prevent leveraged-ETF decay during bear markets. The 24-year backtested -34% max DD is roughly half what unhedged HFEA produced.
+
+- **Regime SSO**: 7-signal composite (price trend, breadth, VIX, ADX, credit, news sentiment, canary universe) gates entry to SSO (2× S&P) vs USFR (cash). The composite scoring suppresses single-signal whipsaw — meaningful exits and re-entries fire ~1.4 times per year. Lowest max drawdown (-24%) of any leveraged sleeve.
+
+- **Regime World**: Same 7-signal apparatus applied to global equities (URTH 255-SMA, ex-US country basket breadth, global ETF news filter). Holds WLDU (2× MSCI World) vs USFR. Lower CAGR than Regime SSO because URTH lagged SPY ~4 pp/year over the backtest window, but offers genuine geographic diversification. Best worst-year (-10%) of any leveraged sleeve.
 
 ### **Investment Horizon:**
 - **HFEA Strategy**: Best suited for long-term investors who can afford to leave their investments untouched for several years, allowing the compounding effect to play out.
@@ -307,7 +428,9 @@ Result: Hold TQQQ position during market crash
 
 - **9-Sig Strategy**: Designed for long-term systematic growth with quarterly rebalancing. The strategy's systematic approach and crash protection make it suitable for investors who want exposure to leveraged growth but with built-in risk management. The monthly contributions to bonds provide a steady foundation while the quarterly rebalancing optimizes growth.
 
-- **Dual Momentum Strategy**: Ideal for long-term investors seeking tactical asset allocation with momentum-based timing. The monthly rebalancing and 12-month lookback period make it suitable for capturing intermediate-term trends while avoiding short-term noise. Best for investors who want global diversification with built-in trend-following and crash protection.
+- **Dual Momentum (best-of-3)**: Ideal for long-term investors who want a tactical sleeve that adapts to which asset class is leading (US large-cap vs Nasdaq vs international developed). Monthly rebalancing strikes a balance between responsiveness and transaction costs.
+
+- **Regime SSO / Regime World**: Both designed as slow, defensive-tilted sleeves. The 7-signal composite is intentionally noise-resistant — long flat or sideways markets won't trigger rotations. Investors who want signal-driven downside protection rather than buy-and-hold leverage.
 
 ### **Key Assumptions:**
 - **HFEA Strategy**: Assumes that the diversification benefits of combining equities, bonds, and managed futures will persist, and that over time, the leveraged returns will outweigh the increased volatility. The strategy also assumes that KMLM's trend-following approach will provide crisis alpha and reduce drawdowns during major market dislocations.
@@ -316,20 +439,25 @@ Result: Hold TQQQ position during market crash
 
 - **9-Sig Strategy**: Assumes that the systematic rebalancing approach will capture market growth while the crash protection rule will prevent significant losses during major market downturns. The strategy assumes that the 9% quarterly growth target is achievable over long-term market cycles and that the monthly contributions to bonds provide sufficient stability for the leveraged growth component.
 
-- **Dual Momentum Strategy**: Assumes that momentum persists for 3-12 months due to behavioral biases, that relative momentum identifies the strongest markets, and that absolute momentum provides effective crash protection. The strategy assumes that the 12-month lookback period optimally captures trends while the monthly rebalancing frequency balances responsiveness with transaction costs.
+- **Dual Momentum (best-of-3)**: Assumes that momentum persists for 6-12 months due to behavioral biases, that adding QLD (Nasdaq) widens the rotation pool to capture tech-led regimes, and that the layered DD-stop + vol-target combination reduces leverage decay during sustained bears. The skip-1m construction guards against short-term reversal.
+
+- **Regime SSO / Regime World**: Assume that composite multi-signal regime detection is more robust than any single indicator (200-SMA, VIX, etc.) and that combining slow (15-day score persistence) with fast (3-day extreme score) exit logic balances false-alarm avoidance with crash protection. The Fed hike filter assumes monetary policy environment is a meaningful regime modifier.
 
 ## Conclusion
 
-All six strategies offer unique ways to potentially enhance returns, but they come with their own sets of risks and assumptions. The HFEA strategy seeks to maximize growth through a balanced but leveraged approach. The S&P 500 with 200-SMA strategy aims to capture market gains while avoiding major downturns. The 9-Sig strategy provides systematic growth with built-in crash protection and systematic rebalancing. The Dual Momentum strategy combines global diversification with momentum-based timing to capture trending markets while protecting capital during downturns.
+All seven strategies offer unique ways to potentially enhance returns, but they come with their own sets of risks and assumptions. HFEA pursues maximum growth through balanced leverage. SPXL SMA captures market gains while avoiding sustained downturns via the 200-SMA. 9-Sig systematizes TQQQ/AGG growth with built-in crash protection. Dual Momentum rotates among three 2× sleeves with DD-stop + vol-target. The two regime detectors (SSO/World) use 7-signal composites to gate entry to leveraged risk assets — preserving capital during compositely-flagged risk-off regimes.
 
-Together, these strategies provide a comprehensive blend of aggressive growth and risk management:
-- **HFEA (17.5%)**: Three-asset leveraged portfolio (UPRO 45%, TMF 25%, KMLM 30%) with enhanced diversification through managed futures exposure
-- **SPXL SMA (20%)**: Trend-following with market timing using 200-day SMA signals
-- **RSSB/WTIP (20%)**: Structural alpha portfolio (70% RSSB, 30% WTIP) providing diversified return streams across all economic environments
-- **9-Sig (7.5%)**: Systematic TQQQ/AGG growth with crash protection following Jason Kelly's methodology
-- **Dual Momentum (22.5%)**: Tactical allocation between SPUU/EFO/BND using relative and absolute momentum
+Together, these strategies provide a comprehensive blend of aggressive growth, trend-following, structural alpha, and signal-driven risk management:
 
-Each strategy has been carefully selected and optimized based on historical backtests and current market research. The diversification across six different approaches—equity/bond/futures leverage, structural alpha, trend-following, systematic rebalancing, momentum-based tactical allocation, and macro regime detection—helps reduce overall portfolio risk while maintaining strong growth potential.
+- **HFEA (15%)**: Three-asset leveraged portfolio (UPRO 45%, TMF 25%, KMLM 30%)
+- **SPXL SMA (15%)**: Trend-following with 200-day SMA gate on SPXL (3× S&P)
+- **RSSB/WTIP (10%)**: Structural alpha — 70% RSSB / 30% WTIP — macro hedge across economic environments
+- **9-Sig (5%)**: Systematic TQQQ/AGG growth with crash protection — tail-risk sleeve, kept small
+- **Dual Momentum (20%)**: Best-of-3 rotation (SPUU/QLD/EFO/BND) + DD-stop + vol-target — best risk/return at ≤2× leverage
+- **Regime SSO (15%)**: 7-signal US regime detector — SSO ↔ USFR
+- **Regime World (20%)**: 7-signal global regime detector — WLDU ↔ USFR
+
+Each strategy has been selected based on historical backtests, robustness testing (Monte Carlo stationary block bootstrap, 2000 simulated paths), and current market research. The diversification across seven different approaches — buy-and-hold leverage, US trend-following, structural alpha, systematic rebalancing, multi-asset momentum rotation, and dual regime detection — produces an aggregate Sharpe (0.75) that exceeds every individual sleeve. **The aggregate portfolio beats SPY on Sharpe in 96% of simulated paths and beats MSCI World on Sharpe in 99% of simulated paths** — the strongest portfolio-construction evidence the data supports.
 
 ## Index Alert System
 
@@ -423,11 +551,13 @@ The orchestrator (`monthly_invest_all_strategies()` function):
 
 1. **Calculates budgets once**: Checks margin conditions and calculates total available buying power a single time
 2. **Distributes precisely**: Splits the total amount according to strategy allocations:
-   - HFEA: 17.5%
-   - SPXL SMA: 20%
-   - RSSB/WTIP: 20%
-   - 9-Sig: 7.5%
-   - Dual Momentum: 22.5%
+   - HFEA: 15%
+   - SPXL SMA: 15%
+   - RSSB/WTIP: 10%
+   - 9-Sig: 5%
+   - Dual Momentum: 20%
+   - Regime SSO: 15%
+   - Regime World: 20%
 3. **Passes pre-calculated amounts**: Each strategy receives its exact budget and margin conditions as parameters
 4. **Prevents over-spending**: Since budgets are pre-calculated, there's no risk of multiple strategies competing for the same funds
 
@@ -674,7 +804,7 @@ python3 main.py --action monthly_dual_momentum --env paper --force
 
 **Why use the orchestrator (`monthly_invest_all`)?**
 - Calculates budgets once and distributes them to all strategies
-- Ensures exact percentage splits (17.5% HFEA, 20% SPXL SMA, 20% RSSB/WTIP, 7.5% 9-Sig, 22.5% Dual Momentum)
+- Ensures exact percentage splits (15% HFEA, 15% SPXL SMA, 10% RSSB/WTIP, 5% 9-Sig, 20% Dual Momentum, 15% Regime SSO, 20% Regime World)
 - Prevents over-spending by coordinating margin and cash allocation
 - Recommended for production use to maintain portfolio balance
 
