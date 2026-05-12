@@ -8465,14 +8465,42 @@ def monte_carlo_per_strategy(returns_dict: dict, strategies: list, benchmarks: l
         if len(agg) >= 252:
             series_map["AGGREGATE"] = agg
 
+    # ── Fast numpy-only metric helper ───────────────────────────────
+    # Avoids pd.Series construction + slow resample-apply in the inner loop.
+    # CAGR/Sharpe/MaxDD on a daily-returns numpy array; "Worst Year" is
+    # approximated as the worst 252-day compounded rolling window (close
+    # to calendar-year worst on a daily-aligned series).
+    rf = RISK_FREE_RATE
+    ann = 252
+
+    def _fast_metrics(r: np.ndarray):
+        n_ = len(r)
+        if n_ < 2:
+            return None
+        years = n_ / ann
+        cum = np.cumprod(1.0 + r)
+        total = cum[-1] - 1.0
+        cagr_ = (1.0 + total) ** (1.0 / years) - 1.0 if total > -1.0 else -1.0
+        vol_ = float(r.std() * np.sqrt(ann))
+        sharpe_ = (cagr_ - rf) / vol_ if vol_ > 0 else np.nan
+        running_max = np.maximum.accumulate(cum)
+        dd = (cum - running_max) / running_max
+        max_dd_ = float(dd.min())
+        # Worst year ≈ worst 252-day rolling compounded return (vectorized)
+        if n_ > ann:
+            rolling_yr = cum[ann:] / cum[:-ann] - 1.0
+            worst_yr = float(rolling_yr.min())
+        else:
+            worst_yr = total
+        return cagr_, sharpe_, max_dd_, worst_yr
+
     rows = []
+    import time as _time
     for target_name, s_series in series_map.items():
+        t0 = _time.time()
         n = len(s_series)
         s_arr = s_series.values
         s_dates = s_series.index
-        # Synthetic date axis for metric computation — length matches strategy's
-        # native window so CAGR uses the right denominator (years = n/252).
-        synth_dates = pd.date_range("2000-01-03", periods=n, freq="B")
 
         # Pre-slice each benchmark to the same window the strategy ran on.
         bench_arrs = {}
@@ -8484,36 +8512,42 @@ def monte_carlo_per_strategy(returns_dict: dict, strategies: list, benchmarks: l
         for sim in range(n_sims):
             idx = stationary_bootstrap_indices(n, mean_block, rng)
             sim_s = s_arr[idx]
-            s_metrics = compute_metrics(pd.Series(sim_s, index=synth_dates), fast=True)
+            sm = _fast_metrics(sim_s)
+            if sm is None:
+                continue
+            s_cagr, s_sharpe, s_dd, s_worst = sm
 
             for b, b_arr in bench_arrs.items():
                 sim_b = b_arr[idx]
-                b_metrics = compute_metrics(pd.Series(sim_b, index=synth_dates), fast=True)
+                bm = _fast_metrics(sim_b)
+                if bm is None:
+                    continue
+                b_cagr, b_sharpe, b_dd, b_worst = bm
                 rows.append({
                     "sim":          sim,
                     "strategy":     target_name,
                     "benchmark":    b,
-                    "cagr":         s_metrics.get("CAGR"),
-                    "sharpe":       s_metrics.get("Sharpe"),
-                    "max_dd":       s_metrics.get("Max DD"),
-                    "worst_yr":     s_metrics.get("Worst Year"),
-                    "bench_cagr":   b_metrics.get("CAGR"),
-                    "bench_sharpe": b_metrics.get("Sharpe"),
-                    "bench_dd":     b_metrics.get("Max DD"),
-                    "bench_worst":  b_metrics.get("Worst Year"),
+                    "cagr":         s_cagr,
+                    "sharpe":       s_sharpe,
+                    "max_dd":       s_dd,
+                    "worst_yr":     s_worst,
+                    "bench_cagr":   b_cagr,
+                    "bench_sharpe": b_sharpe,
+                    "bench_dd":     b_dd,
+                    "bench_worst":  b_worst,
                 })
-            # If no benchmarks: emit a sim-only row so distributions can still be
-            # computed even when nothing is set up for matched comparison.
             if not bench_arrs:
                 rows.append({
                     "sim":          sim,
                     "strategy":     target_name,
                     "benchmark":    None,
-                    "cagr":         s_metrics.get("CAGR"),
-                    "sharpe":       s_metrics.get("Sharpe"),
-                    "max_dd":       s_metrics.get("Max DD"),
-                    "worst_yr":     s_metrics.get("Worst Year"),
+                    "cagr":         s_cagr,
+                    "sharpe":       s_sharpe,
+                    "max_dd":       s_dd,
+                    "worst_yr":     s_worst,
                 })
+        print(f"  · {target_name:<60} n={n:>5}  done in {_time.time()-t0:.1f}s",
+              flush=True)
 
     return pd.DataFrame(rows)
 
