@@ -50,3 +50,20 @@ positions_from_pdf.csv
 testing.ipynb
 9-sig-strategy-PRD.md
 tasks.md
+
+# Claude Code local state (worktrees, locks, session metadata)
+.claude/
+
+# Research script outputs (regenerable; live in research/ when run from repo)
+research/report.html
+research/results.csv
+research/stress_periods.csv
+research/run_unified.log
+research/monte_carlo_distribution.csv
+research/equity_curves.png
+research/drawdowns.png
+research/rolling_sharpe.png
+research/rolling_3y_sharpe.png
+research/tax_drag_comparison.png
+research/__pycache__/
+CLAUDE.md

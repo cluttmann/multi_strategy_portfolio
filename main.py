@@ -16,27 +16,24 @@ app = Flask(__name__)
 # Strategy allocation percentages for dynamic monthly investment calculation
 # Investment amounts are calculated dynamically each month based on available cash and margin
 strategy_allocations = {
-    "hfea_allo": 0.15,             # 15% to HFEA
-    "spxl_allo": 0.15,             # 15% to SPXL SMA
-    "rssb_wtip_allo": 0.10,        # 10% to RSSB/WTIP (macro hedge sleeve)
-    "nine_sig_allo": 0.05,         # 5% to 9-Sig (high-DD sleeve, kept small)
-    "dual_momentum_allo": 0.20,    # 20% to Dual Momentum (best-of-3 SPUU/QLD/EFO)
-    "regime_sso_allo": 0.15,       # 15% to SSO/USFR regime detector (US)
-    "regime_world_allo": 0.20,     # 20% to WLDU/USFR regime detector (global)
+    # Updated 2026-05-12: Regime World replaced by 7-Asset Rotator (AAA-family adaptive
+    # rotation) and World 40/30/30 (static intl diversifier). Tax-aware caps applied:
+    #   • HFEA / SPXL: capped at 15% (US-equity concentration limit)
+    #   • Regime SSO: capped at 12% (high turnover via SSO↔USFR rotation)
+    #   • 7-Asset Rotator: capped at 15% (highest turnover — monthly 7-asset rotation)
+    #   • World 40/30/30: 18% (lowest turnover — quarterly rebal of 3 fixed assets, intl diversifier)
+    "hfea_allo":          0.15,    # 15% — HFEA UPRO/TMF/KMLM
+    "spxl_allo":          0.15,    # 15% — SPXL SMA trend-gate
+    "nine_sig_allo":      0.05,    # 5%  — 9-Sig TQQQ/AGG
+    "dual_momentum_allo": 0.20,    # 20% — DM 2× best-of-3 (SPUU/QLD/EFO)
+    "regime_sso_allo":    0.12,    # 12% — Regime SSO (7-signal composite)
+    "aaa_allo":           0.15,    # 15% — 7-Asset Rotator (NTSD/SAA/EET/UBT/UST/UGL/DBC top-3 rotation)
+    "f4_allo":            0.18,    # 18% — World 40/30/30 (WLDU+GOLY+TLT intl diversifier)
 }
 
 upro_allocation = 0.45
 tmf_allocation = 0.25
 kmlm_allocation = 0.3
-
-# RSSB/WTIP allocation (70/30 — moved from 80/20 after 2026-05 backtest;
-# see commit message for the rigor work behind the choice)
-rssb_allocation = 0.70
-wtip_allocation = 0.30
-
-# RSSB/WTIP holding fund config (for accumulating funds when WTIP can't be bought)
-rssb_wtip_holding_fund = "BIL"
-rssb_wtip_holding_fund_max = 70.0  # $70 maximum
 
 # SPXL SMA holding fund config (for T-bills when SPY < 200-SMA)
 spxl_sma_holding_fund = "SGOV"  # iShares 0-3 Month Treasury Bond ETF
@@ -45,21 +42,21 @@ spxl_sma_holding_fund = "SGOV"  # iShares 0-3 Month Treasury Bond ETF
 # Each strategy has clear ticker ownership for simplified margin calculations and position tracking:
 # - HFEA: UPRO, TMF, KMLM
 # - SPXL SMA: SPXL, SGOV (SGOV is holding fund when bearish)
-# - RSSB/WTIP: RSSB, WTIP, BIL (BIL is holding fund for uninvested WTIP amounts)
 # - 9-Sig: TQQQ, AGG
 # - Dual Momentum: SPUU, QLD, EFO, BND (BND is defensive + vol-target overflow)
 # - Regime SSO: SSO (when in market), USFR (when defensive — floating-rate Treasury)
-# - Regime World: WLDU (when in market), USFR (when defensive)
+# - 7-Asset Rotator (AAA family): NTSD, SAA, EET, UBT, UST, UGL, DBC (top-3 selected monthly), SHV (defensive)
+# - World 40/30/30: WLDU, GOLY, TLT (static 40/30/30, quarterly rebalance)
 
 # Strategy ticker ownership mapping for cost basis recalculation
 STRATEGY_SYMBOLS = {
     "hfea": ["UPRO", "TMF", "KMLM"],
     "spxl_sma": ["SPXL", "SGOV"],
-    "rssb_wtip": ["RSSB", "WTIP", "BIL"],
     "nine_sig": ["TQQQ", "AGG"],
     "dual_momentum": ["SPUU", "QLD", "EFO", "BND"],
     "regime_sso": ["SSO", "USFR"],
-    "regime_world": ["WLDU", "USFR"],
+    "aaa": ["NTSD", "SAA", "EET", "UBT", "UST", "UGL", "DBC", "SHV"],
+    "f4": ["WLDU", "GOLY", "TLT"],
 }
 
 alpaca_environment = "live"
@@ -71,6 +68,61 @@ nine_sig_config = {
     "quarterly_growth_rate": 0.09,  # 9% quarterly growth target
     "bond_rebalance_threshold": 0.30,  # Rebalance when AGG > 30%
     "tolerance_amount": 25,  # Minimum trade amount to avoid tiny trades
+}
+
+# ─── 7-Asset Rotator (AAA family) strategy configuration ───────────────
+# Adaptive Asset Allocation on a 7-asset capital-efficient/2×-leveraged universe.
+# Each month: rank by 6m momentum on the unleveraged signal symbol, pick top-3,
+# weight inverse-vol, scale by vol-target, balance to cash. DD-30 stop forces all
+# to cash on -30% trailing-peak NAV breach.
+#
+# Universe (signal symbol → held position):
+#   SPY  → NTSD (90% US + 60% intl-futures stack)
+#   IWM  → SAA  (2× Russell 2000)
+#   EEM  → EET  (2× emerging markets)
+#   TLT  → UBT  (2× long Treasuries)
+#   IEF  → UST  (2× 7-10y Treasuries)
+#   GLD  → UGL  (2× gold)
+#   DBC  → DBC  (1× commodities — no clean 2× equivalent)
+aaa_config = {
+    "strategy_key": "aaa",                # Firestore doc id under strategy-balances-{env}
+    "alloc_key": "aaa_allo",              # Key in strategy_allocations
+    "display_name": "7-Asset Rotator",
+    "candidates": [
+        ("SPY", "NTSD"),
+        ("IWM", "SAA"),
+        ("EEM", "EET"),
+        ("TLT", "UBT"),
+        ("IEF", "UST"),
+        ("GLD", "UGL"),
+        ("DBC", "DBC"),
+    ],
+    "defensive": "SHV",                   # Held when DD-stop fires or no positive momentum
+    "lookback_days": 126,                 # 6-month momentum on signal symbols
+    "top_n": 3,                           # Hold top-3 by momentum
+    "min_score": 0.0,                     # Only include picks with positive momentum
+    "vol_window": 60,                     # 60-day trailing realized vol for inverse-vol + target
+    "target_vol": 0.25,                   # 25% annualized portfolio vol target
+    "dd_threshold": 0.30,                 # 30% trailing-peak NAV stop → all to defensive
+    "tolerance_amount": 5.0,              # Skip trades < $5
+}
+
+# ─── F4 strategy configuration ──────────────────────────────────────────
+# Static 3-asset blend, quarterly drift-rebalance. Most tax-efficient sleeve
+# (3 fixed tickers, no rotation). WLDU = 2× MSCI World (intl-tilted equity);
+# GOLY = 200%-notional triple-stack (50% gold + 50% MF + 100% corp bonds);
+# TLT = unleveraged long Treasury (clean duration, no daily-reset decay).
+f4_config = {
+    "strategy_key": "f4",
+    "alloc_key": "f4_allo",
+    "display_name": "World 40/30/30",
+    "targets": {
+        "WLDU": 0.40,
+        "GOLY": 0.30,
+        "TLT":  0.30,
+    },
+    "tolerance_amount": 5.0,              # Skip trades < $5
+    "rebal_drift_threshold": 0.05,        # Trigger early rebal if any leg drifts ≥5pp from target
 }
 
 # Dual Momentum Strategy configuration — best-of-3 multi-asset with DD-stop + vol-target.
@@ -187,50 +239,10 @@ GLOBAL_BREADTH_BASKET = [
 ]
 GLOBAL_NEWS_TICKERS = ["URTH", "EFA", "EEM", "VWO", "VEA", "ACWI", "IEFA"]
 
-regime_world_config = {
-    # Identity
-    "strategy_key": "regime_world",
-    "alloc_key": "regime_world_allo",
-    "scores_collection": "regime-world-scores",
-    "display_name": "regime_world",
-    # Universe
-    "risk_asset": "WLDU",               # 2x MSCI World (Leverage Shares, live since 2026-03-12)
-    "safe_asset": "USFR",               # Same defensive as regime_sso
-    "trend_symbol": "URTH",             # iShares MSCI World ETF — 1× world index proxy
-    "spy_sma_period": 255,              # Signal 1: URTH 255-SMA (longer window for global)
-    "sma_hysteresis_days": 3,
-    "breadth_mode": "basket",           # Signal 2: % of GLOBAL_BREADTH_BASKET above their 50-SMA
-    "breadth_basket": GLOBAL_BREADTH_BASKET,
-    "breadth_sma_period": 50,
-    "breadth_high_threshold": 0.60,
-    "breadth_low_threshold": 0.40,
-    "vix_low": 18.0,
-    "vix_high": 25.0,
-    "adx_period": 14,
-    "adx_strong": 25.0,
-    "credit_sma_period": 50,
-    "canary_sma_period": 50,
-    "news_lookback_hours": 24,
-    "news_min_articles": 15,            # Slightly relaxed — global news volume thinner than US
-    "news_pos_threshold": 0.10,
-    "news_neg_threshold": -0.10,
-    "news_tickers": GLOBAL_NEWS_TICKERS, # Filter Alpaca news to these symbols
-    "fed_hike_lookback_days": 90,
-    "fed_hike_threshold_bps": 50,
-    "slow_exit_days": 15,
-    "slow_exit_score": 0,
-    "fast_exit_days": 3,
-    "fast_exit_score": -3,
-    "credit_vix_recovery_weeks": 4,
-    "credit_vix_credit_improvement": 0.005,
-    "credit_vix_vix_decline": 0.05,
-    "nlp_acceleration_score_days": 7,
-    "nlp_acceleration_sentiment_weeks": 2,
-    "nlp_confidence_threshold": 0.80,
-    "standard_reentry_days": 15,
-    "reentry_score": 3,
-    "max_signal_failures_before_alert": 3,
-}
+# regime_world_config retired 2026-05-12 — Regime World (WLDU/USFR) discontinued
+# and replaced by two new sleeves: 7-Asset Rotator (AAA family) and World 40/30/30.
+# The make_monthly_buys_regime() / daily_regime_check() / backfill_regime_scores()
+# helpers remain in place and continue to serve regime_sso_config.
 
 # Firestore client - initialized lazily to respect .env file
 _db_client = None
@@ -1358,471 +1370,6 @@ def make_monthly_nine_sig_contributions(api, force_execute=False, investment_cal
         return error_msg
 
 
-def make_monthly_buys_rssb_wtip(api, force_execute=False, investment_calc=None, margin_result=None, skip_order_wait=False, env="live"):
-    """
-    Make monthly RSSB/WTIP purchases with margin-aware logic and dynamic investment amounts.
-    Uses All-or-Nothing approach: invest full amount or skip entirely.
-    Sends exactly one Telegram message at the end summarizing the outcome.
-    """
-    if not force_execute and not check_trading_day(mode="monthly"):
-        print("Not first trading day of the month")
-        return "Not first trading day of the month"
-    
-    if force_execute:
-        print("RSSB/WTIP: Force execution enabled - bypassing trading day check")
-    
-    if margin_result is None:
-        margin_result = check_margin_conditions(api, env=env)
-    
-    if investment_calc is None:
-        investment_calc = calculate_monthly_investments(api, margin_result, env)
-    
-    investment_amount = investment_calc["strategy_amounts"]["rssb_wtip_allo"]
-    
-    target_margin = margin_result["target_margin"]
-    metrics = margin_result["metrics"]
-    leverage = metrics.get("leverage", 1.0)
-    
-    def _skip(reason):
-        msg = f"🌐 RSSB/WTIP (17.5%) — ${investment_amount:,.2f}\n⏭ {reason}"
-        send_telegram_message(msg)
-        print(reason)
-        return reason
-    
-    if not target_margin and leverage > 1.0:
-        return _skip("Skipped — margin disabled, still leveraged")
-    
-    if investment_amount < margin_control_config["min_investment"]:
-        return _skip(f"Skipped — ${investment_amount:.2f} below $1.00 minimum")
-    
-    if target_margin > 0:
-        portfolio_value = metrics.get("portfolio_value", 0)
-        current_equity = metrics.get("equity", 0)
-        if portfolio_value > 0 and current_equity > 0:
-            projected_leverage = (portfolio_value + investment_amount) / current_equity
-            if projected_leverage >= margin_control_config["max_leverage"]:
-                return _skip(f"Skipped — projected leverage {projected_leverage:.3f}x exceeds limit")
-            print(f"RSSB/WTIP: Leverage check — Current {leverage:.3f}x → Projected {projected_leverage:.3f}x")
-    
-    # Load current strategy state from Firestore (before calculations)
-    balances = load_balances(env)
-    rssb_wtip_data = balances.get("rssb_wtip", {})
-    total_invested = rssb_wtip_data.get("total_invested", 0)
-    current_positions = rssb_wtip_data.get("current_positions", {})
-    holding_fund_position = rssb_wtip_data.get("holding_fund_position", {})
-    
-    # Get holding fund (BIL) current value and shares from Alpaca
-    bil_shares = get_holding_fund_shares(api, rssb_wtip_holding_fund)
-    bil_value = get_holding_fund_value(api, rssb_wtip_holding_fund)
-    bil_price = float(get_latest_trade(api, rssb_wtip_holding_fund)) if bil_value > 0 or investment_amount > 0 else 0
-    
-    # Get current RSSB/WTIP allocations
-    (
-        rssb_diff,
-        wtip_diff,
-        rssb_value,
-        wtip_value,
-        total_value,
-        target_rssb_value,
-        target_wtip_value,
-        current_rssb_percent,
-        current_wtip_percent,
-    ) = get_rssb_wtip_allocations(api)
-
-    # Calculate total available: current positions + BIL + new investment
-    # Strategy: MINIMIZE SELLS to avoid taxable events
-    total_to_allocate = rssb_value + wtip_value + bil_value + investment_amount
-    
-    print(f"RSSB/WTIP Strategy - Investment: ${investment_amount:.2f}")
-    print(f"Current RSSB value: ${rssb_value:.2f}")
-    print(f"Current WTIP value: ${wtip_value:.2f}")
-    print(f"BIL holding fund: ${bil_value:.2f}")
-    print(f"Total to allocate: ${total_to_allocate:.2f}")
-    
-    # Calculate target allocations (70% RSSB, 30% WTIP)
-    target_rssb_value_new = total_to_allocate * rssb_allocation
-    target_wtip_value_new = total_to_allocate * wtip_allocation
-    
-    print(f"Target RSSB: ${target_rssb_value_new:.2f} (80%)")
-    print(f"Target WTIP: ${target_wtip_value_new:.2f} (20%)")
-    
-    # Get current prices
-    rssb_price = float(get_latest_trade(api, "RSSB"))
-    wtip_price = float(get_latest_trade(api, "WTIP"))
-    
-    # Calculate how much we need to buy/sell for each
-    rssb_value_delta = target_rssb_value_new - rssb_value
-    wtip_value_delta = target_wtip_value_new - wtip_value
-    
-    # Track purchases and sells
-    rssb_shares_to_buy = 0
-    wtip_shares_to_buy = 0
-    rssb_shares_to_sell = 0
-    wtip_shares_to_sell = 0
-    actual_purchases = {}
-    uninvested_wtip_amount = 0
-    
-    # Available new funds (investment + BIL) - use these first to minimize sells
-    available_new_funds = investment_amount + bil_value
-    funds_used = 0
-    
-    # Step 1: Use new funds to buy underweight positions first (minimize sells)
-    # Priority: Buy the more underweight position first
-    positions_to_buy = []
-    if rssb_value_delta > 0.01:
-        positions_to_buy.append(("RSSB", rssb_value_delta, rssb_price, True))  # True = fractionable
-    if wtip_value_delta > 0.01:
-        positions_to_buy.append(("WTIP", wtip_value_delta, wtip_price, False))  # False = non-fractionable
-    
-    # Sort by underweight amount (largest first)
-    positions_to_buy.sort(key=lambda x: x[1], reverse=True)
-    
-    for symbol, value_delta, price, is_fractionable in positions_to_buy:
-        if funds_used >= available_new_funds:
-            break  # No more funds available
-            
-        remaining_funds = available_new_funds - funds_used
-        max_we_can_buy = min(value_delta, remaining_funds)
-        
-        # For fractionable assets (RSSB), we can buy with any amount > 0
-        # For non-fractionable assets (WTIP), we need at least 1 share worth
-        can_buy = (is_fractionable and max_we_can_buy > 0.01) or (not is_fractionable and max_we_can_buy >= price)
-        
-        if can_buy:
-            if is_fractionable:
-                # RSSB supports fractional shares - buy with all available funds
-                shares_to_buy = max_we_can_buy / price
-                actual_cost = shares_to_buy * price
-            else:
-                # WTIP doesn't support fractional - round to whole shares
-                shares_to_buy = round(max_we_can_buy / price)
-                if shares_to_buy >= 1:
-                    actual_cost = shares_to_buy * price
-                else:
-                    # Can't buy even 1 share
-                    if symbol == "WTIP":
-                        uninvested_wtip_amount = max_we_can_buy
-                    continue
-            
-            if shares_to_buy > 0:
-                try:
-                    buy_order = submit_order(api, symbol, shares_to_buy, "buy")
-                    if not skip_order_wait:
-                        wait_for_order_fill(api, buy_order["id"])
-                    
-                    shares_display = f"{shares_to_buy:.4f}" if is_fractionable else f"{shares_to_buy:.0f}"
-                    print(f"Bought {shares_display} shares of {symbol} (${actual_cost:.2f})")
-                    actual_purchases[symbol] = actual_cost
-                    funds_used += actual_cost
-                    
-                    if symbol == "RSSB":
-                        rssb_shares_to_buy = shares_to_buy
-                    else:
-                        wtip_shares_to_buy = shares_to_buy
-                except Exception as e:
-                    error_msg = f"RSSB/WTIP: Failed to buy {symbol}: {str(e)}"
-                    print(error_msg)
-                    send_telegram_message(f"🌐 RSSB/WTIP (17.5%)\n❌ Error buying {symbol}: {str(e)}")
-                    return error_msg
-    
-    # Step 2: Only sell if still overweight after using all new funds
-    # TAX-EFFICIENT: Only sell if deviation is significant (>5% of target) to minimize taxable events
-    # Recalculate current values after purchases
-    rssb_value_after = rssb_value + (rssb_shares_to_buy * rssb_price if rssb_shares_to_buy > 0 else 0)
-    wtip_value_after = wtip_value + (wtip_shares_to_buy * wtip_price if wtip_shares_to_buy > 0 else 0)
-    
-    # Check if still overweight after purchases
-    rssb_value_delta_after = target_rssb_value_new - rssb_value_after
-    wtip_value_delta_after = target_wtip_value_new - wtip_value_after
-    
-    # Calculate percentage deviations from target (for tax-efficient threshold)
-    rssb_overweight_pct = abs(rssb_value_delta_after) / target_rssb_value_new if target_rssb_value_new > 0 else 0
-    wtip_overweight_pct = abs(wtip_value_delta_after) / target_wtip_value_new if target_wtip_value_new > 0 else 0
-    
-    # Tax-efficient threshold: Only sell if overweight by >5% of target allocation
-    # This minimizes taxable events while still maintaining reasonable allocation
-    sell_threshold_pct = 0.05  # 5% threshold
-    
-    # Determine which positions need selling (only if significantly overweight)
-    positions_to_sell = []
-    if rssb_value_delta_after < -0.01 and rssb_overweight_pct > sell_threshold_pct:
-        # RSSB is overweight by more than threshold
-        positions_to_sell.append(("RSSB", abs(rssb_value_delta_after), rssb_price, True, rssb_overweight_pct))
-    
-    if wtip_value_delta_after < -0.01 and wtip_overweight_pct > sell_threshold_pct:
-        # WTIP is overweight by more than threshold
-        positions_to_sell.append(("WTIP", abs(wtip_value_delta_after), wtip_price, False, wtip_overweight_pct))
-    
-    # Sort by overweight percentage (most overweight first) - sell the worst offender
-    positions_to_sell.sort(key=lambda x: x[4], reverse=True)
-    
-    # Only sell if we have significant deviation AND we can't fix it through buying alone
-    # Strategy: Sell only the minimum needed to get closer to target, not necessarily all the way
-    for symbol, overweight_amount, price, is_fractionable, overweight_pct in positions_to_sell:
-        # Calculate how much we need to sell to get within threshold
-        # We don't need to sell all the way to target - just enough to get within acceptable range
-        target_after_sell = target_rssb_value_new if symbol == "RSSB" else target_wtip_value_new
-        current_after_buy = rssb_value_after if symbol == "RSSB" else wtip_value_after
-        
-        # Calculate maximum acceptable value (target + threshold)
-        max_acceptable_value = target_after_sell * (1 + sell_threshold_pct)
-        excess_value = current_after_buy - max_acceptable_value
-        
-        # Only sell if we're still significantly over the acceptable range
-        if excess_value > 0.01:
-            if is_fractionable:
-                # RSSB: Sell the excess amount (fractional shares allowed)
-                shares_to_sell = excess_value / price
-                if shares_to_sell > 0.0001:  # Meaningful amount
-                    try:
-                        sell_order = submit_order(api, symbol, shares_to_sell, "sell")
-                        if not skip_order_wait:
-                            wait_for_order_fill(api, sell_order["id"])
-                        rssb_shares_to_sell = shares_to_sell
-                        print(f"Sold {shares_to_sell:.4f} shares of {symbol} (${excess_value:.2f}) to reduce overweight from {overweight_pct:.1%} to within {sell_threshold_pct:.1%} threshold")
-                    except Exception as e:
-                        print(f"RSSB/WTIP: Failed to sell {symbol}: {str(e)}")
-            else:
-                shares_to_sell = round(excess_value / price)
-                whole_shares_to_sell = int(shares_to_sell)
-                if whole_shares_to_sell > 0:
-                    try:
-                        sell_order = submit_order(api, symbol, whole_shares_to_sell, "sell")
-                        if not skip_order_wait:
-                            wait_for_order_fill(api, sell_order["id"])
-                        wtip_shares_to_sell = whole_shares_to_sell
-                        actual_sold_value = whole_shares_to_sell * price
-                        print(f"Sold {whole_shares_to_sell:.0f} shares of {symbol} (${actual_sold_value:.2f})")
-                    except Exception as e:
-                        print(f"RSSB/WTIP: Failed to sell {symbol}: {str(e)}")
-        else:
-            # Within acceptable range after buys - no need to sell
-            print(f"{symbol}: Overweight {overweight_pct:.1%} but within acceptable threshold ({sell_threshold_pct:.1%}) - skipping sell to minimize taxable event")
-    
-    # Step 2.5: Use proceeds from sales to buy underweight positions
-    # Recalculate values after all sells to see what we still need
-    rssb_value_after_all = rssb_value + (rssb_shares_to_buy * rssb_price if rssb_shares_to_buy > 0 else 0) - (rssb_shares_to_sell * rssb_price if rssb_shares_to_sell > 0 else 0)
-    wtip_value_after_all = wtip_value + (wtip_shares_to_buy * wtip_price if wtip_shares_to_buy > 0 else 0) - (wtip_shares_to_sell * wtip_price if wtip_shares_to_sell > 0 else 0)
-    
-    # Calculate proceeds from sales
-    sale_proceeds = 0
-    if rssb_shares_to_sell > 0:
-        sale_proceeds += rssb_shares_to_sell * rssb_price
-    if wtip_shares_to_sell > 0:
-        sale_proceeds += wtip_shares_to_sell * wtip_price
-    
-    # Use sale proceeds to buy underweight positions
-    if sale_proceeds > 0:
-        # Recalculate what we still need after all buys and sells
-        rssb_value_delta_final = target_rssb_value_new - rssb_value_after_all
-        wtip_value_delta_final = target_wtip_value_new - wtip_value_after_all
-        
-        # Priority: Buy the more underweight position first
-        positions_to_buy_with_proceeds = []
-        if rssb_value_delta_final > 0.01:
-            positions_to_buy_with_proceeds.append(("RSSB", rssb_value_delta_final, rssb_price, True))  # True = fractionable
-        if wtip_value_delta_final > 0.01:
-            positions_to_buy_with_proceeds.append(("WTIP", wtip_value_delta_final, wtip_price, False))  # False = non-fractionable
-        
-        # Sort by underweight amount (largest first)
-        positions_to_buy_with_proceeds.sort(key=lambda x: x[1], reverse=True)
-        
-        proceeds_used = 0
-        for symbol, value_delta, price, is_fractionable in positions_to_buy_with_proceeds:
-            if proceeds_used >= sale_proceeds:
-                break  # No more proceeds available
-                
-            remaining_proceeds = sale_proceeds - proceeds_used
-            max_we_can_buy = min(value_delta, remaining_proceeds)
-            
-            # For fractionable assets (RSSB), we can buy with any amount > 0
-            # For non-fractionable assets (WTIP), we need at least 1 share worth
-            can_buy = (is_fractionable and max_we_can_buy > 0.01) or (not is_fractionable and max_we_can_buy >= price)
-            
-            if can_buy:
-                if is_fractionable:
-                    # RSSB supports fractional shares - buy with all available proceeds
-                    shares_to_buy = max_we_can_buy / price
-                    actual_cost = shares_to_buy * price
-                else:
-                    # WTIP doesn't support fractional - round to whole shares
-                    shares_to_buy = round(max_we_can_buy / price)
-                    if shares_to_buy >= 1:
-                        actual_cost = shares_to_buy * price
-                    else:
-                        # Can't buy even 1 share - will go to BIL later
-                        continue
-                
-                if shares_to_buy > 0:
-                    try:
-                        buy_order = submit_order(api, symbol, shares_to_buy, "buy")
-                        if not skip_order_wait:
-                            wait_for_order_fill(api, buy_order["id"])
-                        
-                        shares_display = f"{shares_to_buy:.4f}" if is_fractionable else f"{shares_to_buy:.0f}"
-                        print(f"Bought {shares_display} shares of {symbol} (${actual_cost:.2f}) using sale proceeds")
-                        actual_purchases[symbol] = actual_purchases.get(symbol, 0) + actual_cost
-                        proceeds_used += actual_cost
-                        
-                        if symbol == "RSSB":
-                            rssb_shares_to_buy += shares_to_buy
-                        else:
-                            wtip_shares_to_buy += shares_to_buy
-                    except Exception as e:
-                        print(f"RSSB/WTIP: Failed to buy {symbol} with sale proceeds: {str(e)}")
-        
-        # Any remaining proceeds after buying should go to BIL
-        remaining_proceeds_after_buys = sale_proceeds - proceeds_used
-        if remaining_proceeds_after_buys > 0.01:
-            # This will be handled in Step 4 (uninvested amounts)
-            uninvested_wtip_amount += remaining_proceeds_after_buys
-    
-    # Step 3: Sell BIL to fund purchases (BIL was included in total_to_allocate)
-    bil_shares_to_sell = 0
-    bil_amount_to_sell = 0
-    total_purchases = sum(actual_purchases.values())
-    
-    if total_purchases > 0 and bil_value > 0:
-        # Calculate how much BIL to sell: proportional to purchases
-        bil_amount_to_sell = min(bil_value, total_purchases)
-        
-        if bil_amount_to_sell > 0:
-            bil_shares_to_sell = bil_amount_to_sell / bil_price if bil_price > 0 else 0
-            
-            # Get actual available BIL shares right before selling
-            actual_bil_shares_available = get_holding_fund_shares(api, rssb_wtip_holding_fund)
-            bil_shares_to_sell = min(bil_shares_to_sell, actual_bil_shares_available)
-            
-            if bil_shares_to_sell > 0.0001:  # Only sell if meaningful amount
-                try:
-                    sell_order = submit_order(api, rssb_wtip_holding_fund, bil_shares_to_sell, "sell")
-                    if not skip_order_wait:
-                        wait_for_order_fill(api, sell_order["id"])
-                    
-                    actual_bil_sold_value = bil_shares_to_sell * bil_price
-                    bil_value -= actual_bil_sold_value
-                    print(f"Sold {bil_shares_to_sell:.6f} shares of BIL (${actual_bil_sold_value:.2f}) to fund purchases")
-                except Exception as e:
-                    print(f"RSSB/WTIP: Failed to sell BIL: {str(e)}")
-                    print("Continuing despite BIL sell failure...")
-    
-    # Step 4: Handle uninvested amounts - add to BIL holding fund (up to max)
-    bil_leftover_after_wtip = 0
-    bil_shares_to_buy = 0
-    bil_amount_to_buy = 0
-    
-    # Handle BIL holding fund for uninvested amounts
-    total_bil_to_add = uninvested_wtip_amount + bil_leftover_after_wtip
-    
-    if total_bil_to_add > 0:
-        # Check if we can add to BIL holding fund
-        # Note: bil_value was already reduced if we sold BIL
-        current_bil_value_after_sale = bil_value
-        bil_value_after_investment = current_bil_value_after_sale + total_bil_to_add
-        
-        if bil_value_after_investment <= rssb_wtip_holding_fund_max:
-            # Can add all leftover/uninvested amount to BIL
-            bil_amount_to_buy = total_bil_to_add
-            bil_shares_to_buy = bil_amount_to_buy / bil_price if bil_price > 0 else 0
-        else:
-            # Can only add up to max, try to buy WTIP with excess
-            bil_amount_to_buy = rssb_wtip_holding_fund_max - current_bil_value_after_sale
-            if bil_amount_to_buy > 0:
-                bil_shares_to_buy = bil_amount_to_buy / bil_price if bil_price > 0 else 0
-            
-            # Try to buy WTIP with excess
-            excess_amount = total_bil_to_add - bil_amount_to_buy
-            if excess_amount > 0:
-                excess_wtip_shares = round(excess_amount / wtip_price)
-                if excess_wtip_shares >= 1:
-                    try:
-                        excess_buy_order = submit_order(api, "WTIP", excess_wtip_shares, "buy")
-                        if not skip_order_wait:
-                            wait_for_order_fill(api, excess_buy_order["id"])
-                        wtip_shares_to_buy += excess_wtip_shares
-                        print(f"Using excess ${excess_amount:.2f} to buy additional {excess_wtip_shares} shares of WTIP")
-                    except Exception as e:
-                        print(f"Failed to buy WTIP with excess: {e}")
-                else:
-                    # Still can't buy WTIP, add excess to BIL if under max
-                    if current_bil_value_after_sale + bil_amount_to_buy + excess_amount <= rssb_wtip_holding_fund_max:
-                        bil_amount_to_buy += excess_amount
-                        bil_shares_to_buy = bil_amount_to_buy / bil_price if bil_price > 0 else 0
-                    else:
-                        # Can't add to BIL (over max) and can't buy WTIP - this money will remain as cash
-                        print(f"Warning: ${excess_amount:.2f} cannot be invested (BIL at max, WTIP too expensive)")
-    
-    # Execute market orders tracking
-    trades_executed = []
-    
-    # Note: Purchases and sells were already executed above in the tax-efficient logic
-    # Just track them for reporting
-    if rssb_shares_to_buy > 0:
-        trades_executed.append(f"Bought {rssb_shares_to_buy:.4f} shares of RSSB")
-    if wtip_shares_to_buy > 0:
-        trades_executed.append(f"Bought {wtip_shares_to_buy:.0f} shares of WTIP")
-    if rssb_shares_to_sell > 0:
-        trades_executed.append(f"Sold {rssb_shares_to_sell:.4f} shares of RSSB")
-    if wtip_shares_to_sell > 0:
-        trades_executed.append(f"Sold {wtip_shares_to_sell:.0f} shares of WTIP")
-    
-    # Buy BIL holding fund if needed (for uninvested amounts)
-    if bil_shares_to_buy > 0:
-        try:
-            bil_order = submit_order(api, rssb_wtip_holding_fund, bil_shares_to_buy, "buy")
-            if not skip_order_wait:
-                wait_for_order_fill(api, bil_order["id"])
-            trades_executed.append(f"Bought {bil_shares_to_buy:.6f} shares of BIL (${bil_amount_to_buy:.2f}) - holding fund")
-            print(f"Bought {bil_shares_to_buy:.6f} shares of BIL (${bil_amount_to_buy:.2f}) - holding fund")
-        except Exception as e:
-            print(f"RSSB/WTIP: Failed to buy BIL: {e}")
-            # Continue - BIL buy failure shouldn't stop the strategy
-    
-    # Update Firestore with new positions (even if no trades executed, update holding fund)
-    if trades_executed or bil_shares_to_buy > 0:
-        total_invested += investment_amount
-        current_positions.update({
-            "RSSB": current_positions.get("RSSB", 0) + rssb_shares_to_buy,
-            "WTIP": current_positions.get("WTIP", 0) + wtip_shares_to_buy
-        })
-        
-        # Update holding fund position (get fresh from Alpaca to be accurate)
-        updated_bil_shares = get_holding_fund_shares(api, rssb_wtip_holding_fund)
-        holding_fund_position[rssb_wtip_holding_fund] = updated_bil_shares
-        
-        # Get actual positions from Alpaca to update Firestore accurately
-        positions_dict = {p["symbol"]: float(p["qty"]) for p in list_positions(api)}
-        current_positions["RSSB"] = positions_dict.get("RSSB", 0)
-        current_positions["WTIP"] = positions_dict.get("WTIP", 0)
-        
-        save_balance("rssb_wtip", {
-            "total_invested": total_invested,
-            "current_positions": current_positions,
-            "holding_fund_position": holding_fund_position,
-            "last_updated": datetime.datetime.utcnow().isoformat()
-        }, env)
-    
-    # Calculate strategy performance
-    current_value = rssb_value + wtip_value + bil_value
-    if trades_executed:
-        current_value = current_value + investment_amount
-    strategy_return = (current_value / total_invested - 1) if total_invested > 0 else 0
-    
-    # Single clean Telegram message
-    msg = f"🌐 RSSB/WTIP (17.5%) — ${investment_amount:,.2f}\n\n"
-    if trades_executed:
-        for trade in trades_executed:
-            msg += f"{trade}\n"
-        msg += f"\nTotal invested: ${total_invested:,.2f}\n"
-        msg += f"Current value: ${current_value:,.2f}\n"
-        msg += f"Return: {strategy_return:+.1%}"
-    else:
-        msg += "No trades executed"
-    send_telegram_message(msg)
-    
-    return "Monthly investment executed."
-
-
 def make_monthly_buys(api, force_execute=False, investment_calc=None, margin_result=None, skip_order_wait=False, env="live"):
     """
     Make monthly HFEA purchases (UPRO/TMF/KMLM) with margin-aware logic.
@@ -2301,237 +1848,6 @@ def get_spxl_sma_value(api):
             "position_breakdown": {},
             "invested_amount": 0
         }
-
-
-def get_rssb_wtip_allocations(api):
-    """
-    Get RSSB/WTIP allocations (70/30).
-    Returns current values, percentages, target values, and deviations.
-    Includes BIL holding fund value in total_value calculation.
-    """
-    positions = {p["symbol"]: float(p["market_value"]) for p in list_positions(api)}
-    rssb_value = positions.get("RSSB", 0)
-    wtip_value = positions.get("WTIP", 0)
-    bil_value = get_holding_fund_value(api, rssb_wtip_holding_fund)
-    total_value = rssb_value + wtip_value + bil_value
-    
-    # Calculate current and target allocations
-    current_rssb_percent = rssb_value / total_value if total_value else 0
-    current_wtip_percent = wtip_value / total_value if total_value else 0
-    target_rssb_value = total_value * rssb_allocation
-    target_wtip_value = total_value * wtip_allocation
-    
-    # Calculate deviations
-    rssb_diff = rssb_value - target_rssb_value
-    wtip_diff = wtip_value - target_wtip_value
-    
-    return (
-        rssb_diff,
-        wtip_diff,
-        rssb_value,
-        wtip_value,
-        total_value,
-        target_rssb_value,
-        target_wtip_value,
-        current_rssb_percent,
-        current_wtip_percent,
-    )
-
-
-def rebalance_rssb_wtip_portfolio(api):
-    """
-    Rebalance RSSB/WTIP portfolio (70/30) quarterly.
-    Executes on first trading day of each quarter.
-    Handles non-fractionable shares for WTIP and pending investments.
-    """
-    if not check_trading_day(mode="quarterly"):
-        print("Not first trading day of the month in this Quarter")
-        return "Not first trading day of the month in this Quarter"
-    if quarterly_run_complete("rssb_wtip", env=alpaca_environment):
-        msg = f"RSSB/WTIP quarterly rebalance already executed for {current_quarter_id()} — skipping."
-        print(msg)
-        return msg
-
-    # Load pending investments from Firestore
-    balances = load_balances()
-    rssb_wtip_data = balances.get("rssb_wtip", {})
-    holding_fund_position = rssb_wtip_data.get("holding_fund_position", {})
-    
-    # Get BIL holding fund value
-    bil_value = get_holding_fund_value(api, rssb_wtip_holding_fund)
-    bil_price = float(get_latest_trade(api, rssb_wtip_holding_fund)) if bil_value > 0 else 0
-    
-    # Get RSSB and WTIP values and deviations from target allocation
-    (
-        rssb_diff,
-        wtip_diff,
-        rssb_value,
-        wtip_value,
-        total_value,
-        target_rssb_value,
-        target_wtip_value,
-        current_rssb_percent,
-        current_wtip_percent,
-    ) = get_rssb_wtip_allocations(api)
-
-    # Apply a margin for fees (e.g., 0.5%)
-    fee_margin = 0.995
-
-    # If the total value is 0, nothing to rebalance
-    if total_value == 0:
-        print("No holdings to rebalance for RSSB/WTIP.")
-        send_telegram_message("No holdings to rebalance for RSSB/WTIP Strategy.")
-        return "No holdings to rebalance for RSSB/WTIP Strategy."
-
-    # Get current prices
-    rssb_price = float(get_latest_trade(api, "RSSB"))
-    wtip_price = float(get_latest_trade(api, "WTIP"))
-
-    # Define trade parameters for each ETF
-    rebalance_actions = []
-
-    # Track leftover funds that need to go into BIL
-    bil_rebalance_leftover = 0
-    
-    # If RSSB is over-allocated, adjust WTIP if under-allocated
-    if rssb_diff > 0:
-        if wtip_diff < 0:
-            rssb_shares_to_sell = min(rssb_diff, abs(wtip_diff)) / rssb_price
-            wtip_value_to_buy = (
-                rssb_shares_to_sell
-                * rssb_price
-                / wtip_price
-            ) * fee_margin
-            
-            # Calculate WTIP shares to buy (round to whole shares)
-            wtip_shares_to_buy = round(wtip_value_to_buy / wtip_price)
-            
-            # Handle non-fractionable WTIP shares
-            if wtip_shares_to_buy >= 1:
-                actual_wtip_cost = wtip_shares_to_buy * wtip_price
-                bil_rebalance_leftover = wtip_value_to_buy - actual_wtip_cost
-                rebalance_actions.append(("RSSB", rssb_shares_to_sell, "sell"))
-                rebalance_actions.append(("WTIP", wtip_shares_to_buy, "buy"))
-            else:
-                # Can't buy any WTIP shares - put all funds into BIL
-                bil_rebalance_leftover = wtip_value_to_buy
-                rebalance_actions.append(("RSSB", rssb_shares_to_sell, "sell"))
-
-    # If WTIP is over-allocated, adjust RSSB if under-allocated
-    if wtip_diff > 0:
-        if rssb_diff < 0:
-            # Round down to whole shares when selling WTIP (non-fractionable)
-            wtip_value_to_sell = min(wtip_diff, abs(rssb_diff))
-            wtip_shares_to_sell = int(wtip_value_to_sell / wtip_price)  # Round down to whole shares
-            
-            if wtip_shares_to_sell > 0:
-                actual_wtip_sale_value = wtip_shares_to_sell * wtip_price
-                rssb_value_to_buy = (
-                    actual_wtip_sale_value
-                    / rssb_price
-                ) * fee_margin
-                rssb_shares_to_buy = rssb_value_to_buy / rssb_price
-                
-                # RSSB supports fractional shares, so no leftover here
-                rebalance_actions.append(("WTIP", wtip_shares_to_sell, "sell"))
-                rebalance_actions.append(("RSSB", rssb_shares_to_buy, "buy"))
-                
-                # If we couldn't sell all the WTIP value (due to rounding), put leftover in BIL
-                wtip_leftover = wtip_value_to_sell - actual_wtip_sale_value
-                if wtip_leftover > 0:
-                    bil_rebalance_leftover += wtip_leftover
-            else:
-                print(f"Skipping WTIP sell: value ${wtip_value_to_sell:.2f} is less than 1 whole share (price: ${wtip_price:.2f})")
-                # Put this small amount into BIL
-                bil_rebalance_leftover += wtip_value_to_sell
-    
-    # Check if we can use BIL holding fund to buy WTIP if underweight
-    if bil_value > 0 and wtip_diff < 0:
-        # WTIP is underweight, try to use BIL funds to buy WTIP
-        wtip_value_needed = abs(wtip_diff)
-        wtip_shares_needed = round(wtip_value_needed / wtip_price)
-        
-        if wtip_shares_needed >= 1:
-            # Calculate exact amount needed (with 1% buffer)
-            bil_amount_needed = wtip_shares_needed * wtip_price * 1.01
-            bil_value_to_use = min(bil_value, bil_amount_needed)
-            # BIL may not support fractional shares - round to whole shares or use fractional if supported
-            # Check current BIL shares to determine if fractional is supported
-            bil_shares_to_sell = bil_value_to_use / bil_price if bil_price > 0 else 0
-            
-            # Try fractional first, but catch error if BIL doesn't support it
-            if bil_shares_to_sell > 0:
-                actual_wtip_cost = wtip_shares_needed * wtip_price
-                bil_leftover = bil_value_to_use - actual_wtip_cost
-                bil_rebalance_leftover += max(0, bil_leftover)
-                
-                # Note: BIL selling will be wrapped in try-catch in execution loop
-                rebalance_actions.append((rssb_wtip_holding_fund, bil_shares_to_sell, "sell"))
-                rebalance_actions.append(("WTIP", wtip_shares_needed, "buy"))
-                print(f"Using ${bil_value_to_use:.2f} from BIL holding fund to buy {wtip_shares_needed} shares of WTIP")
-
-    # Execute rebalancing actions
-    for symbol, qty, action in rebalance_actions:
-        if qty > 0:
-            try:
-                order = submit_order(api, symbol, qty, action)
-                action_verb = "Bought" if action == "buy" else "Sold"
-                wait_for_order_fill(api, order["id"])
-                print(f"RSSB/WTIP: {action_verb} {qty:.6f} shares of {symbol} to rebalance.")
-                send_telegram_message(
-                    f"RSSB/WTIP: {action_verb} {qty:.6f} shares of {symbol} to rebalance."
-                )
-            except Exception as e:
-                error_msg = f"RSSB/WTIP: Failed to {action} {symbol}: {str(e)}"
-                print(error_msg)
-                send_telegram_message(error_msg)
-                # Continue with other trades even if one fails
-                continue
-    
-    # Handle leftover funds from rebalancing - put into BIL if under max
-    if bil_rebalance_leftover > 0:
-        current_bil_value = get_holding_fund_value(api, rssb_wtip_holding_fund)
-        bil_value_after_leftover = current_bil_value + bil_rebalance_leftover
-        
-        if bil_value_after_leftover <= rssb_wtip_holding_fund_max:
-            # Can add all leftover to BIL
-            bil_price_rebalance = float(get_latest_trade(api, rssb_wtip_holding_fund))
-            bil_shares_to_buy_rebalance = bil_rebalance_leftover / bil_price_rebalance if bil_price_rebalance > 0 else 0
-            
-            if bil_shares_to_buy_rebalance > 0:
-                try:
-                    bil_order = submit_order(api, rssb_wtip_holding_fund, bil_shares_to_buy_rebalance, "buy")
-                    wait_for_order_fill(api, bil_order["id"])
-                    print(f"RSSB/WTIP: Added ${bil_rebalance_leftover:.2f} leftover from rebalancing to BIL holding fund")
-                    send_telegram_message(f"RSSB/WTIP: Added ${bil_rebalance_leftover:.2f} leftover from rebalancing to BIL")
-                except Exception as e:
-                    print(f"RSSB/WTIP: Failed to add leftover to BIL: {e}")
-        else:
-            # Can only add up to max
-            bil_amount_to_add = rssb_wtip_holding_fund_max - current_bil_value
-            if bil_amount_to_add > 0:
-                bil_price_rebalance = float(get_latest_trade(api, rssb_wtip_holding_fund))
-                bil_shares_to_buy_rebalance = bil_amount_to_add / bil_price_rebalance if bil_price_rebalance > 0 else 0
-                
-                if bil_shares_to_buy_rebalance > 0:
-                    try:
-                        bil_order = submit_order(api, rssb_wtip_holding_fund, bil_shares_to_buy_rebalance, "buy")
-                        wait_for_order_fill(api, bil_order["id"])
-                        print(f"RSSB/WTIP: Added ${bil_amount_to_add:.2f} leftover from rebalancing to BIL (max reached)")
-                    except Exception as e:
-                        print(f"RSSB/WTIP: Failed to add leftover to BIL: {e}")
-    
-    # Update Firestore with holding fund position after rebalancing
-    if rebalance_actions or bil_rebalance_leftover > 0:
-        updated_bil_shares = get_holding_fund_shares(api, rssb_wtip_holding_fund)
-        holding_fund_position[rssb_wtip_holding_fund] = updated_bil_shares
-        rssb_wtip_data["holding_fund_position"] = holding_fund_position
-        save_balance("rssb_wtip", rssb_wtip_data)
-    
-    # Report completion of rebalancing check
-    print("RSSB/WTIP rebalance check completed.")
-    mark_quarterly_run_complete("rssb_wtip", "REBALANCED", env=alpaca_environment)
-    return "RSSB/WTIP rebalance executed."
 
 
 def rebalance_portfolio(api):
@@ -4038,7 +3354,6 @@ def get_all_strategy_values(api):
         dict: {
             "hfea": float,
             "spxl_sma": float,
-            "rssb_wtip": float,
             "nine_sig": float,
             "dual_momentum": float,
             "regime_sso": float,
@@ -4060,13 +3375,6 @@ def get_all_strategy_values(api):
         spxl_sma_value = (
             positions.get("SPXL", 0) +
             positions.get(spxl_sma_holding_fund, 0)
-        )
-        
-        # RSSB/WTIP: RSSB, WTIP, BIL (holding fund)
-        rssb_wtip_value = (
-            positions.get("RSSB", 0) +
-            positions.get("WTIP", 0) +
-            positions.get(rssb_wtip_holding_fund, 0)
         )
         
         # 9-Sig: TQQQ, AGG
@@ -4103,26 +3411,31 @@ def get_all_strategy_values(api):
             return v
 
         regime_sso_value = _regime_value(regime_sso_config)
-        regime_world_value = _regime_value(regime_world_config)
+
+        # 7-Asset Rotator: sum of all 7-asset universe + SHV defensive
+        aaa_value = sum(positions.get(sym, 0) for sym in STRATEGY_SYMBOLS["aaa"])
+
+        # World 40/30/30: WLDU + GOLY + TLT
+        f4_value = sum(positions.get(sym, 0) for sym in STRATEGY_SYMBOLS["f4"])
 
         total_value = (
             hfea_value +
             spxl_sma_value +
-            rssb_wtip_value +
             nine_sig_value +
             dual_momentum_value +
             regime_sso_value +
-            regime_world_value
+            aaa_value +
+            f4_value
         )
 
         return {
             "hfea": hfea_value,
             "spxl_sma": spxl_sma_value,
-            "rssb_wtip": rssb_wtip_value,
             "nine_sig": nine_sig_value,
             "dual_momentum": dual_momentum_value,
             "regime_sso": regime_sso_value,
-            "regime_world": regime_world_value,
+            "aaa": aaa_value,
+            "f4": f4_value,
             "total": total_value
         }
 
@@ -4131,11 +3444,11 @@ def get_all_strategy_values(api):
         return {
             "hfea": 0,
             "spxl_sma": 0,
-            "rssb_wtip": 0,
             "nine_sig": 0,
             "dual_momentum": 0,
             "regime_sso": 0,
-            "regime_world": 0,
+            "aaa": 0,
+            "f4": 0,
             "total": 0
         }
 
@@ -4174,11 +3487,11 @@ def calculate_rebalanced_allocations(api, aggressiveness=None):
     strategy_to_allo_key = {
         "hfea": "hfea_allo",
         "spxl_sma": "spxl_allo",
-        "rssb_wtip": "rssb_wtip_allo",
         "nine_sig": "nine_sig_allo",
         "dual_momentum": "dual_momentum_allo",
         "regime_sso": "regime_sso_allo",
-        "regime_world": "regime_world_allo",
+        "aaa": "aaa_allo",
+        "f4": "f4_allo",
     }
     
     # Get target percentages from strategy_allocations
@@ -4379,11 +3692,11 @@ def print_allocation_dashboard(rebalance_result, contribution_amount=None):
     strategy_display_names = {
         "hfea": "HFEA",
         "spxl_sma": "SPXL SMA",
-        "rssb_wtip": "RSSB/WTIP",
         "nine_sig": "9-Sig",
         "dual_momentum": "Dual Momentum",
         "regime_sso": "Regime SSO",
-        "regime_world": "Regime World",
+        "aaa": "7-Asset Rotator",
+        "f4": "World 40/30/30",
     }
     
     current_values = rebalance_result["current_values"]
@@ -5755,6 +5068,593 @@ def make_monthly_buys_regime(api, cfg=None, force_execute=False, investment_calc
     return f"{name} bought {qty:.4f} {target}"
 
 
+# ════════════════════════════════════════════════════════════════════
+# World 40/30/30 (F4) STRATEGY — WLDU+GOLY+TLT static 40/30/30 blend
+# Quarterly rebalance, monthly contributions tilted to underweight legs.
+# Promoted 2026-05-12 from Wave 8 research. Most tax-efficient sleeve
+# (3 fixed tickers, no rotation logic).
+# ════════════════════════════════════════════════════════════════════
+
+# Non-fractionable tickers on Alpaca — must be traded in whole shares.
+# These are typically newer or smaller ETFs that Alpaca hasn't added to
+# its fractional list yet. Submitting a fractional order errors with
+# Alpaca code 40310000. The F4 + 7-Asset Rotator functions check this
+# set when sizing orders and floor to integer for these tickers.
+NON_FRACTIONABLE_TICKERS = {
+    "WLDU",   # Leverage Shares 2× World ETP (confirmed via paper test 2026-05-12)
+    "GOLY",   # Quantify Gold + MF + Corp Bonds — newer ETF (Q2 2025), likely non-fractionable
+    "NTSD",   # WisdomTree US Plus Intl — may be non-fractionable, defensive listing
+    # Add more here as discovered. To check: try a fractional order and watch
+    # for `code: 40310000` in the error response.
+}
+
+
+def _size_buy_order(symbol: str, dollar_amount: float, price: float) -> tuple[float, str]:
+    """Convert a dollar buy amount into shares, handling non-fractionable tickers.
+
+    Returns (shares_to_buy, note). If the ticker is non-fractionable and the
+    dollar amount is less than one share's price, returns (0, skip-reason).
+    For fractionable tickers, returns the exact fractional share count.
+    """
+    if symbol in NON_FRACTIONABLE_TICKERS:
+        whole = int(dollar_amount / price)  # floor
+        if whole < 1:
+            return 0.0, f"insufficient for 1 whole share (${dollar_amount:.2f} < ${price:.2f})"
+        residual = dollar_amount - (whole * price)
+        return float(whole), f"whole-share rounded ({whole} shares, ${residual:.2f} residual cash)"
+    return dollar_amount / price, ""
+
+
+def _size_sell_order(symbol: str, shares_to_sell: float) -> float:
+    """Floor sells to integer shares for non-fractionable tickers."""
+    if symbol in NON_FRACTIONABLE_TICKERS:
+        return float(int(shares_to_sell))
+    return shares_to_sell
+
+
+def get_f4_position_value(api):
+    """Get current F4 portfolio value and per-symbol breakdown."""
+    try:
+        positions = list_positions(api)
+        f4_symbols = STRATEGY_SYMBOLS["f4"]
+        by_symbol = {sym: {"value": 0.0, "shares": 0.0} for sym in f4_symbols}
+        total_value = 0.0
+        for position in positions:
+            ticker = position.get("symbol")
+            if ticker in f4_symbols:
+                value = float(position.get("market_value", 0))
+                shares = float(position.get("qty", 0))
+                by_symbol[ticker] = {"value": value, "shares": shares}
+                total_value += value
+        return {"total_value": total_value, "by_symbol": by_symbol}
+    except Exception as e:
+        print(f"Error getting F4 position value: {e}")
+        return {"total_value": 0.0, "by_symbol": {sym: {"value": 0.0, "shares": 0.0} for sym in STRATEGY_SYMBOLS["f4"]}}
+
+
+def make_monthly_buys_f4(api, force_execute=False, investment_calc=None,
+                          margin_result=None, skip_order_wait=False, env="live"):
+    """
+    F4 monthly buy: deploy this month's allocation toward the most-underweight
+    legs of WLDU/GOLY/TLT relative to the 40/30/30 target. Drift-correcting —
+    full rebalance is handled separately by quarterly_rebalance_f4().
+    """
+    if not force_execute and not check_trading_day(mode="monthly"):
+        return "Not first trading day of the month"
+    if force_execute:
+        print("F4: Force execution enabled — bypassing trading day check")
+
+    if margin_result is None:
+        margin_result = check_margin_conditions(api, env=env)
+    if investment_calc is None:
+        investment_calc = calculate_monthly_investments(api, margin_result, env)
+
+    cfg = f4_config
+    alloc_key = cfg["alloc_key"]
+    name = cfg["display_name"]
+    investment_amount = investment_calc["strategy_amounts"].get(alloc_key, 0)
+    target_margin = margin_result["target_margin"]
+    metrics = margin_result["metrics"]
+    leverage = metrics.get("leverage", 1.0)
+    buying_power = investment_calc["total_available"] + investment_calc["margin_approved"]
+    pct_label = strategy_allocations.get(alloc_key, 0) * 100
+
+    def _skip(reason):
+        msg = f"🌐 {name} ({pct_label:.2f}%) — ${investment_amount:,.2f}\n⏭ {reason}"
+        send_telegram_message(msg)
+        print(reason)
+        return reason
+
+    if target_margin == 0 and leverage > 1.0:
+        return _skip(f"Skipped — deleveraging required ({leverage:.2f}x)")
+    if buying_power < investment_amount:
+        return _skip(f"Skipped — insufficient buying power (${buying_power:,.2f})")
+    if investment_amount < margin_control_config["min_investment"]:
+        return _skip(f"Skipped — ${investment_amount:.2f} below $1.00 minimum")
+
+    # Project leverage if the contribution adds leveraged exposure (WLDU is 2×, GOLY is 2× notional)
+    if target_margin > 0:
+        pv = metrics.get("portfolio_value", 0)
+        equity = metrics.get("equity", 0)
+        if pv > 0 and equity > 0:
+            projected_leverage = (pv + investment_amount) / equity
+            if projected_leverage >= margin_control_config["max_leverage"]:
+                return _skip(f"Skipped — projected leverage {projected_leverage:.3f}x exceeds limit")
+
+    value_data = get_f4_position_value(api)
+    current_value = value_data["total_value"]
+    by_symbol = value_data["by_symbol"]
+    targets = cfg["targets"]
+
+    # Total dollars target per leg after this contribution
+    new_total = current_value + investment_amount
+    target_dollars = {sym: new_total * w for sym, w in targets.items()}
+    underweight = {sym: max(0.0, target_dollars[sym] - by_symbol[sym]["value"]) for sym in targets}
+    total_under = sum(underweight.values())
+
+    # If everything is at or above target (rare), fall back to proportional buys
+    if total_under <= 0:
+        buys = {sym: investment_amount * w for sym, w in targets.items()}
+    else:
+        # Tilt every dollar of contribution toward the underweight legs
+        buys = {sym: investment_amount * (underweight[sym] / total_under) for sym in targets}
+
+    # Execute buys
+    trades_info = []
+    prices = {}
+    for sym in targets:
+        if buys[sym] < cfg["tolerance_amount"]:
+            continue
+        try:
+            prices[sym] = float(get_latest_trade(api, sym))
+            shares, note = _size_buy_order(sym, buys[sym], prices[sym])
+            if shares <= 0:
+                trades_info.append(f"⏭ Skipped {sym}: {note}")
+                print(f"  skipped {sym}: {note}")
+                continue
+            order = submit_order(api, sym, shares, "buy")
+            if not skip_order_wait:
+                wait_for_order_fill(api, order["id"])
+            actual_dollars = shares * prices[sym]
+            suffix = f" [{note}]" if note else ""
+            trades_info.append(f"Bought {shares:.4f} {sym} @ ${prices[sym]:.2f} (${actual_dollars:.2f}){suffix}")
+            print(f"  bought {shares:.4f} {sym} @ ${prices[sym]:.2f} (${actual_dollars:.2f}){suffix}")
+        except Exception as e:
+            send_telegram_message(f"🌐 {name}\n❌ Buy {sym} failed: {e}")
+            return f"F4: failed to buy {sym}: {e}"
+
+    if not trades_info:
+        trades_info.append("No buys executed (all legs at/above target).")
+
+    # Persist state
+    balances = load_balances(env)
+    state = balances.get(cfg["strategy_key"], {})
+    final_value_data = get_f4_position_value(api)
+    final_total = final_value_data["total_value"]
+    total_invested = state.get("total_invested", 0) + investment_amount
+    peak_nav = max(state.get("peak_nav", 0) or 0, final_total)
+    strategy_return = (final_total / total_invested - 1) if total_invested > 0 else 0
+    save_balance(cfg["strategy_key"], {
+        "total_invested": total_invested,
+        "current_positions": {sym: final_value_data["by_symbol"][sym]["shares"] for sym in targets},
+        "current_values": {sym: final_value_data["by_symbol"][sym]["value"] for sym in targets},
+        "peak_nav": peak_nav,
+        "last_buy_date": datetime.datetime.now().strftime("%Y-%m-%d"),
+    }, env)
+
+    # Telegram summary
+    weight_str = ", ".join(
+        f"{sym}: {final_value_data['by_symbol'][sym]['value'] / max(1, final_total) * 100:.1f}%"
+        for sym in targets
+    )
+    msg = f"🌐 {name} ({pct_label:.2f}%) — ${investment_amount:,.2f}\n\n"
+    for t in trades_info:
+        msg += f"{t}\n"
+    msg += f"\nNew weights: {weight_str}\n"
+    msg += f"Total invested: ${total_invested:,.2f}\n"
+    msg += f"Current value: ${final_total:,.2f}\n"
+    msg += f"Peak NAV: ${peak_nav:,.2f}\n"
+    msg += f"Return: {strategy_return:+.1%}"
+    send_telegram_message(msg)
+    return f"F4 monthly buys complete. Value ${final_total:,.2f}, return {strategy_return:.2%}"
+
+
+def quarterly_rebalance_f4(api, force_execute=False, env="live"):
+    """
+    F4 quarterly rebalance: bring WLDU/GOLY/TLT positions back to exact 40/30/30.
+    Run idempotently on the 1st-7th trading day of each calendar quarter.
+    """
+    if quarterly_run_complete(f4_config["strategy_key"], env=env) and not force_execute:
+        return f"F4 quarterly rebalance already complete for {current_quarter_id()}"
+    if not force_execute and not check_trading_day(mode="quarterly"):
+        return "Not first 7 trading days of the quarter"
+
+    cfg = f4_config
+    name = cfg["display_name"]
+    targets = cfg["targets"]
+    value_data = get_f4_position_value(api)
+    total_value = value_data["total_value"]
+    by_symbol = value_data["by_symbol"]
+
+    if total_value < 10.0:
+        return f"F4: portfolio value ${total_value:.2f} too small to rebalance"
+
+    target_dollars = {sym: total_value * w for sym, w in targets.items()}
+    deltas = {sym: target_dollars[sym] - by_symbol[sym]["value"] for sym in targets}
+    prices = {}
+    trades_info = []
+
+    # Sells first
+    for sym in targets:
+        if deltas[sym] >= -cfg["tolerance_amount"]:
+            continue
+        try:
+            prices[sym] = float(get_latest_trade(api, sym))
+            shares_have = by_symbol[sym]["shares"]
+            shares_to_sell = min(shares_have, (-deltas[sym]) / prices[sym])
+            shares_to_sell = _size_sell_order(sym, shares_to_sell)
+            if shares_to_sell <= 0 or shares_to_sell * prices[sym] < margin_control_config["min_investment"]:
+                continue
+            order = submit_order(api, sym, shares_to_sell, "sell")
+            wait_for_order_fill(api, order["id"])
+            trades_info.append(f"Sold {shares_to_sell:.4f} {sym} (${shares_to_sell * prices[sym]:.2f})")
+        except Exception as e:
+            send_telegram_message(f"🌐 {name} (rebal)\n❌ Sell {sym} failed: {e}")
+            return f"F4 rebalance: failed to sell {sym}: {e}"
+
+    # Buys
+    for sym in targets:
+        if deltas[sym] <= cfg["tolerance_amount"]:
+            continue
+        try:
+            if sym not in prices:
+                prices[sym] = float(get_latest_trade(api, sym))
+            shares_to_buy, note = _size_buy_order(sym, deltas[sym], prices[sym])
+            if shares_to_buy <= 0:
+                trades_info.append(f"⏭ Skipped {sym} rebal buy: {note}")
+                continue
+            order = submit_order(api, sym, shares_to_buy, "buy")
+            wait_for_order_fill(api, order["id"])
+            actual_dollars = shares_to_buy * prices[sym]
+            suffix = f" [{note}]" if note else ""
+            trades_info.append(f"Bought {shares_to_buy:.4f} {sym} (${actual_dollars:.2f}){suffix}")
+        except Exception as e:
+            send_telegram_message(f"🌐 {name} (rebal)\n❌ Buy {sym} failed: {e}")
+            return f"F4 rebalance: failed to buy {sym}: {e}"
+
+    # Save state + mark quarter complete
+    final_value_data = get_f4_position_value(api)
+    final_total = final_value_data["total_value"]
+    balances = load_balances(env)
+    state = balances.get(cfg["strategy_key"], {})
+    peak_nav = max(state.get("peak_nav", 0) or 0, final_total)
+    save_balance(cfg["strategy_key"], {
+        **state,
+        "current_positions": {sym: final_value_data["by_symbol"][sym]["shares"] for sym in targets},
+        "current_values": {sym: final_value_data["by_symbol"][sym]["value"] for sym in targets},
+        "peak_nav": peak_nav,
+        "last_rebal_date": datetime.datetime.now().strftime("%Y-%m-%d"),
+    }, env)
+    mark_quarterly_run_complete(cfg["strategy_key"], "rebalance", env=env)
+
+    if not trades_info:
+        trades_info.append("No trades needed; weights already on target.")
+    weight_str = ", ".join(
+        f"{sym}: {final_value_data['by_symbol'][sym]['value'] / max(1, final_total) * 100:.1f}%"
+        for sym in targets
+    )
+    msg = f"🌐 {name} — quarterly rebalance ({current_quarter_id()})\n\n"
+    for t in trades_info:
+        msg += f"{t}\n"
+    msg += f"\nWeights after: {weight_str}\nTotal: ${final_total:,.2f}"
+    send_telegram_message(msg)
+    return f"F4 quarterly rebalance complete. Total ${final_total:,.2f}"
+
+
+# ════════════════════════════════════════════════════════════════════
+# AAA FREE 2× + NTSD STRATEGY — 7-asset top-3 momentum rotation
+# Universe (signal → held position, all ≤2× per ticker):
+#   SPY → NTSD,  IWM → SAA,  EEM → EET,  TLT → UBT,
+#   IEF → UST,   GLD → UGL,  DBC → DBC.
+# Monthly: 6m momentum rank → top-3 with positive scores → inverse-vol
+# weight → vol-target scale → balance to SHV. DD-30 stop on trailing-peak
+# NAV. Promoted to deployed 2026-05-12 from research.
+# ════════════════════════════════════════════════════════════════════
+
+
+def _aaa_six_month_momentum(api, signal_symbol, lookback_days):
+    """Trailing-N-day price return on the unleveraged signal symbol."""
+    try:
+        bars = get_alpaca_historical_bars(api, signal_symbol, days=max(300, lookback_days + 100))
+    except Exception as e:
+        print(f"AAA: error fetching bars for {signal_symbol}: {e}")
+        return None
+    if len(bars) < lookback_days + 1:
+        print(f"AAA: insufficient bars for {signal_symbol} ({len(bars)} < {lookback_days + 1})")
+        return None
+    price_now = bars[-1]
+    price_past = bars[-(lookback_days + 1)]
+    if price_now <= 0 or price_past <= 0:
+        return None
+    return price_now / price_past - 1
+
+
+def _aaa_realized_vol(api, symbol, window=60):
+    """60-day annualized realized vol of close-to-close simple returns."""
+    try:
+        bars = get_alpaca_historical_bars(api, symbol, days=max(150, window + 60))
+    except Exception as e:
+        print(f"AAA: error fetching bars for {symbol} vol: {e}")
+        return None
+    if len(bars) < window + 1:
+        return None
+    rets = [(bars[i + 1] / bars[i]) - 1 for i in range(len(bars) - window - 1, len(bars) - 1) if bars[i] > 0]
+    if len(rets) < window // 2:
+        return None
+    mean = sum(rets) / len(rets)
+    var = sum((r - mean) ** 2 for r in rets) / max(1, len(rets) - 1)
+    return (var ** 0.5) * (252 ** 0.5)
+
+
+def get_aaa_position_value(api):
+    """Total AAA value + per-symbol breakdown across the 7-asset universe + SHV."""
+    try:
+        positions = list_positions(api)
+        aaa_symbols = STRATEGY_SYMBOLS["aaa"]
+        by_symbol = {sym: {"value": 0.0, "shares": 0.0} for sym in aaa_symbols}
+        total_value = 0.0
+        for position in positions:
+            ticker = position.get("symbol")
+            if ticker in aaa_symbols:
+                value = float(position.get("market_value", 0))
+                shares = float(position.get("qty", 0))
+                by_symbol[ticker] = {"value": value, "shares": shares}
+                total_value += value
+        return {"total_value": total_value, "by_symbol": by_symbol}
+    except Exception as e:
+        print(f"Error getting AAA position value: {e}")
+        return {"total_value": 0.0, "by_symbol": {sym: {"value": 0.0, "shares": 0.0} for sym in STRATEGY_SYMBOLS["aaa"]}}
+
+
+def make_monthly_buys_aaa(api, force_execute=False, investment_calc=None,
+                           margin_result=None, skip_order_wait=False, env="live"):
+    """
+    7-Asset Rotator (AAA family) monthly execution. Each call:
+      1. Add this month's contribution to the AAA pool.
+      2. Compute 6m momentum on the 7 signal symbols (SPY/IWM/EEM/TLT/IEF/GLD/DBC).
+      3. Check DD-30 trailing-peak NAV stop — if breached, dump everything to SHV.
+      4. Pick top-3 positive-momentum signals; if fewer than 1 positive, go to SHV.
+      5. Inverse-vol weight the top-N (using 60d trailing vol of the *held* positions).
+      6. Apply portfolio vol-target scale = min(1, 25% / weighted_vol). Excess to SHV.
+      7. Generate buy/sell deltas, sells-first then buys.
+      8. Save state and update Firestore.
+    """
+    if not force_execute and not check_trading_day(mode="monthly"):
+        return "Not first trading day of the month"
+    if force_execute:
+        print("AAA: Force execution enabled — bypassing trading day check")
+
+    if margin_result is None:
+        margin_result = check_margin_conditions(api, env=env)
+    if investment_calc is None:
+        investment_calc = calculate_monthly_investments(api, margin_result, env)
+
+    cfg = aaa_config
+    alloc_key = cfg["alloc_key"]
+    name = cfg["display_name"]
+    investment_amount = investment_calc["strategy_amounts"].get(alloc_key, 0)
+    target_margin = margin_result["target_margin"]
+    metrics = margin_result["metrics"]
+    leverage = metrics.get("leverage", 1.0)
+    buying_power = investment_calc["total_available"] + investment_calc["margin_approved"]
+    pct_label = strategy_allocations.get(alloc_key, 0) * 100
+    check_date = datetime.datetime.now().strftime("%Y-%m-%d")
+
+    def _skip(reason):
+        msg = f"🎛 {name} ({pct_label:.2f}%) — ${investment_amount:,.2f}\n⏭ {reason}"
+        send_telegram_message(msg)
+        print(reason)
+        return reason
+
+    # Gate checks
+    if target_margin == 0 and leverage > 1.0:
+        return _skip(f"Skipped — deleveraging required ({leverage:.2f}x)")
+    if buying_power < investment_amount:
+        return _skip(f"Skipped — insufficient buying power (${buying_power:,.2f})")
+    if investment_amount < margin_control_config["min_investment"]:
+        return _skip(f"Skipped — ${investment_amount:.2f} below $1.00 minimum")
+    if target_margin > 0:
+        pv = metrics.get("portfolio_value", 0)
+        equity = metrics.get("equity", 0)
+        if pv > 0 and equity > 0:
+            projected_leverage = (pv + investment_amount) / equity
+            if projected_leverage >= margin_control_config["max_leverage"]:
+                return _skip(f"Skipped — projected leverage {projected_leverage:.3f}x exceeds limit")
+
+    # Load state
+    balances = load_balances(env)
+    state = balances.get(cfg["strategy_key"], {})
+    total_invested = state.get("total_invested", 0)
+    peak_nav = float(state.get("peak_nav", 0) or 0)
+
+    # Current AAA value (before today's contribution)
+    value_data = get_aaa_position_value(api)
+    current_value = value_data["total_value"]
+    by_symbol = value_data["by_symbol"]
+    print(f"AAA — investment ${investment_amount:.2f}, current value ${current_value:.2f}")
+
+    # DD-30 stop check
+    new_peak_nav = max(peak_nav, current_value) if peak_nav > 0 else current_value
+    dd = (current_value - new_peak_nav) / new_peak_nav if new_peak_nav > 0 else 0.0
+    dd_triggered = peak_nav > 0 and dd < -cfg["dd_threshold"]
+    if dd_triggered:
+        print(f"  DD-stop TRIGGERED: drawdown {dd:.1%} < -{cfg['dd_threshold']:.0%} — forcing defensive")
+        new_peak_nav = current_value  # reset peak
+
+    # Compute momentum scores (skip if DD-triggered)
+    scores = {}
+    if not dd_triggered:
+        for signal_sym, pos_sym in cfg["candidates"]:
+            sc = _aaa_six_month_momentum(api, signal_sym, cfg["lookback_days"])
+            if sc is not None:
+                scores[pos_sym] = sc
+        print(f"  momentum scores: {scores}")
+
+    # Pick top-N positive-momentum picks
+    if dd_triggered:
+        picks = []
+    else:
+        ranked = sorted(scores.items(), key=lambda kv: -kv[1])
+        picks = [pos for pos, sc in ranked[: cfg["top_n"]] if sc > cfg["min_score"]]
+
+    # Compute inverse-vol weights on the picks, then portfolio vol-target scale
+    weights = {pos: 0.0 for _, pos in cfg["candidates"]}
+    cash_weight = 1.0
+    realized_vols = {}
+    scale = 0.0
+    if picks:
+        invvols = {}
+        for pos in picks:
+            v = _aaa_realized_vol(api, pos, window=cfg["vol_window"])
+            if v is not None and v > 0:
+                invvols[pos] = 1.0 / v
+                realized_vols[pos] = v
+        if not invvols:
+            # Vol data unavailable — equal-weight the picks
+            raw = {pos: 1.0 / len(picks) for pos in picks}
+        else:
+            tot = sum(invvols.values())
+            raw = {pos: invvols.get(pos, 0.0) / tot for pos in picks}
+        # Portfolio vol estimate (weighted sum of underlying vols — conservative)
+        est_vol = sum(raw[pos] * realized_vols.get(pos, cfg["target_vol"]) for pos in picks)
+        scale = min(1.0, cfg["target_vol"] / est_vol) if est_vol > 0 else 1.0
+        for pos in picks:
+            weights[pos] = raw[pos] * scale
+        cash_weight = 1.0 - sum(weights.values())
+        print(f"  picks: {picks}, inverse-vol scale: {scale:.3f}, est vol: {est_vol:.1%}")
+
+    # Compute target dollar amounts
+    total_to_allocate = current_value + investment_amount
+    targets = {sym: 0.0 for sym in STRATEGY_SYMBOLS["aaa"]}
+    for pos, w in weights.items():
+        if pos in targets:
+            targets[pos] = w * total_to_allocate
+    targets[cfg["defensive"]] = cash_weight * total_to_allocate
+
+    print(f"  target $: {{ {', '.join(f'{s}: ${v:,.2f}' for s, v in targets.items() if v > 0)} }}")
+
+    # Fetch prices for any symbols we'll trade
+    prices = {}
+    for sym in STRATEGY_SYMBOLS["aaa"]:
+        if targets[sym] > 0 or by_symbol[sym]["value"] > cfg["tolerance_amount"]:
+            try:
+                prices[sym] = float(get_latest_trade(api, sym))
+            except Exception as e:
+                send_telegram_message(f"🎛 {name}\n❌ Failed to fetch price for {sym}: {e}")
+                return f"AAA: failed to fetch price for {sym}: {e}"
+
+    current_dollars = {sym: by_symbol[sym]["value"] for sym in STRATEGY_SYMBOLS["aaa"]}
+    deltas = {sym: targets[sym] - current_dollars[sym] for sym in STRATEGY_SYMBOLS["aaa"]}
+    trades_info = []
+
+    # Sells first (negative deltas)
+    for sym in STRATEGY_SYMBOLS["aaa"]:
+        if deltas[sym] >= -cfg["tolerance_amount"]:
+            continue
+        if sym not in prices:
+            continue
+        shares_have = by_symbol[sym]["shares"]
+        sell_dollars = -deltas[sym]
+        shares_to_sell = min(shares_have, sell_dollars / prices[sym])
+        shares_to_sell = _size_sell_order(sym, shares_to_sell)
+        if shares_to_sell <= 0 or shares_to_sell * prices[sym] < margin_control_config["min_investment"]:
+            continue
+        try:
+            order = submit_order(api, sym, shares_to_sell, "sell")
+            if not skip_order_wait:
+                wait_for_order_fill(api, order["id"])
+            trades_info.append(f"Sold {shares_to_sell:.4f} {sym} (${shares_to_sell * prices[sym]:.2f})")
+        except Exception as e:
+            send_telegram_message(f"🎛 {name}\n❌ Sell {sym} failed: {e}")
+            return f"AAA: failed to sell {sym}: {e}"
+
+    # Buys (positive deltas)
+    for sym in STRATEGY_SYMBOLS["aaa"]:
+        if deltas[sym] <= cfg["tolerance_amount"]:
+            continue
+        if sym not in prices:
+            continue
+        buy_dollars = deltas[sym]
+        shares_to_buy, note = _size_buy_order(sym, buy_dollars, prices[sym])
+        if shares_to_buy <= 0:
+            trades_info.append(f"⏭ Skipped {sym}: {note}")
+            continue
+        try:
+            order = submit_order(api, sym, shares_to_buy, "buy")
+            if not skip_order_wait:
+                wait_for_order_fill(api, order["id"])
+            actual_dollars = shares_to_buy * prices[sym]
+            suffix = f" [{note}]" if note else ""
+            trades_info.append(f"Bought {shares_to_buy:.4f} {sym} @ ${prices[sym]:.2f} (${actual_dollars:.2f}){suffix}")
+        except Exception as e:
+            send_telegram_message(f"🎛 {name}\n❌ Buy {sym} failed: {e}")
+            return f"AAA: failed to buy {sym}: {e}"
+
+    if not trades_info:
+        trades_info.append("No trades needed; targets already aligned.")
+
+    # Persist state
+    final_value_data = get_aaa_position_value(api)
+    final_total = final_value_data["total_value"]
+    final_by_symbol = final_value_data["by_symbol"]
+    final_peak_nav = max(new_peak_nav, final_total)
+    final_total_invested = total_invested + investment_amount
+    strategy_return = (final_total / final_total_invested - 1) if final_total_invested > 0 else 0
+    save_balance(cfg["strategy_key"], {
+        "total_invested": final_total_invested,
+        "current_positions": {sym: final_by_symbol[sym]["shares"] for sym in STRATEGY_SYMBOLS["aaa"]},
+        "current_values": {sym: final_by_symbol[sym]["value"] for sym in STRATEGY_SYMBOLS["aaa"]},
+        "peak_nav": final_peak_nav,
+        "last_momentum_check": {
+            "scores": scores,
+            "picks": picks,
+            "weights": weights,
+            "vol_scale": scale,
+            "realized_vols": realized_vols,
+            "dd_triggered": dd_triggered,
+            "drawdown": dd,
+        },
+        "last_signal_check_date": check_date,
+        "last_trade_date": check_date if any(("No trades" not in t) for t in trades_info) else state.get("last_trade_date"),
+    }, env)
+
+    # Telegram summary
+    scores_str = ", ".join(f"{s}: {sc:+.1%}" for s, sc in scores.items()) if scores else "n/a"
+    msg = f"🎛 {name} ({pct_label:.2f}%) — ${investment_amount:,.2f}\n\n"
+    msg += f"6m scores: {scores_str}\n"
+    if dd_triggered:
+        msg += f"⚠️ DD-stop triggered (DD {dd:.1%}) — all to {cfg['defensive']}\n"
+    elif not picks:
+        msg += f"Signal: defensive ({cfg['defensive']}, no positive momentum)\n"
+    else:
+        picks_str = ", ".join(f"{p} ({weights[p]*100:.1f}%)" for p in picks)
+        msg += f"Picks: {picks_str}\n"
+        msg += f"Cash ({cfg['defensive']}): {cash_weight*100:.1f}%\n"
+        msg += f"Vol-scale: {scale:.2f}\n"
+    msg += "\n"
+    for t in trades_info[:8]:  # cap message size
+        msg += f"{t}\n"
+    if len(trades_info) > 8:
+        msg += f"... and {len(trades_info) - 8} more trades\n"
+    msg += f"\nTotal invested: ${final_total_invested:,.2f}\n"
+    msg += f"Current value: ${final_total:,.2f}\n"
+    msg += f"Peak NAV: ${final_peak_nav:,.2f}\n"
+    msg += f"Return: {strategy_return:+.1%}"
+    send_telegram_message(msg)
+
+    return f"AAA monthly complete. Picks: {picks}. Value ${final_total:,.2f}, return {strategy_return:.2%}"
+
+
 # Helper function to wait for an order to be filled
 def wait_for_order_fill(api, order_id, timeout=300, poll_interval=5):
     elapsed_time = 0
@@ -5825,11 +5725,11 @@ def monthly_invest_all_strategies(api, force_execute=False, skip_order_wait=Fals
     print(f"Total investing power: ${total_investing:.2f}")
     print(f"  HFEA ({get_pct('hfea_allo'):.1f}%): ${strategy_amounts['hfea_allo']:.2f}")
     print(f"  SPXL ({get_pct('spxl_allo'):.1f}%): ${strategy_amounts['spxl_allo']:.2f}")
-    print(f"  RSSB/WTIP ({get_pct('rssb_wtip_allo'):.1f}%): ${strategy_amounts['rssb_wtip_allo']:.2f}")
     print(f"  9-Sig ({get_pct('nine_sig_allo'):.1f}%): ${strategy_amounts['nine_sig_allo']:.2f}")
     print(f"  Dual Momentum ({get_pct('dual_momentum_allo'):.1f}%): ${strategy_amounts['dual_momentum_allo']:.2f}")
     print(f"  Regime SSO ({get_pct('regime_sso_allo'):.1f}%): ${strategy_amounts['regime_sso_allo']:.2f}")
-    print(f"  Regime World ({get_pct('regime_world_allo'):.1f}%): ${strategy_amounts['regime_world_allo']:.2f}")
+    print(f"  7-Asset Rotator ({get_pct('aaa_allo'):.1f}%): ${strategy_amounts['aaa_allo']:.2f}")
+    print(f"  World 40/30/30 ({get_pct('f4_allo'):.1f}%): ${strategy_amounts['f4_allo']:.2f}")
     
     # Send one shared account status message to Telegram before executing strategies
     metrics = margin_result.get("metrics", {})
@@ -5851,16 +5751,17 @@ def monthly_invest_all_strategies(api, force_execute=False, skip_order_wait=Fals
     account_msg += f"Equity: ${equity:,.2f} | Portfolio: ${portfolio_value:,.2f}\n"
     account_msg += f"Investing: ${total_investing:,.2f}\n\n"
     
-    # Show per-strategy budget breakdown
+    # Per-strategy budget breakdown (allocations updated 2026-05-12 — F4 promoted,
+    # Regime World retired, 7-Asset Rotator promoted with tax-aware caps).
     account_msg += "Budget per strategy:\n"
     for label, key in [
         ("HFEA 15%", "hfea_allo"),
         ("SPXL SMA 15%", "spxl_allo"),
-        ("RSSB/WTIP 10%", "rssb_wtip_allo"),
         ("9-Sig 5%", "nine_sig_allo"),
         ("Dual Momentum 20%", "dual_momentum_allo"),
-        ("Regime SSO 15%", "regime_sso_allo"),
-        ("Regime World 20%", "regime_world_allo"),
+        ("Regime SSO 12%", "regime_sso_allo"),
+        ("7-Asset Rotator 15%", "aaa_allo"),
+        ("World 40/30/30 18%", "f4_allo"),
     ]:
         account_msg += f"  • {label}: ${strategy_amounts[key]:,.2f}\n"
     
@@ -5882,11 +5783,11 @@ def monthly_invest_all_strategies(api, force_execute=False, skip_order_wait=Fals
 
     _run("hfea", "HFEA", lambda: make_monthly_buys(api, force_execute, investment_calc, margin_result, skip_order_wait, env))
     _run("spxl", "SPXL SMA", lambda: monthly_buying_sma(api, "SPXL", force_execute, investment_calc, margin_result, skip_order_wait, env))
-    _run("rssb_wtip", "RSSB/WTIP", lambda: make_monthly_buys_rssb_wtip(api, force_execute, investment_calc, margin_result, skip_order_wait, env))
     _run("nine_sig", "9-Sig", lambda: make_monthly_nine_sig_contributions(api, force_execute, investment_calc, margin_result, skip_order_wait, env))
     _run("dual_momentum", "Dual Momentum", lambda: monthly_dual_momentum_strategy(api, force_execute, investment_calc, margin_result, skip_order_wait, env))
     _run("regime_sso", "Regime SSO", lambda: make_monthly_buys_regime(api, cfg=regime_sso_config, force_execute=force_execute, investment_calc=investment_calc, margin_result=margin_result, skip_order_wait=skip_order_wait, env=env))
-    _run("regime_world", "Regime World", lambda: make_monthly_buys_regime(api, cfg=regime_world_config, force_execute=force_execute, investment_calc=investment_calc, margin_result=margin_result, skip_order_wait=skip_order_wait, env=env))
+    _run("aaa", "7-Asset Rotator", lambda: make_monthly_buys_aaa(api, force_execute=force_execute, investment_calc=investment_calc, margin_result=margin_result, skip_order_wait=skip_order_wait, env=env))
+    _run("f4", "World 40/30/30", lambda: make_monthly_buys_f4(api, force_execute=force_execute, investment_calc=investment_calc, margin_result=margin_result, skip_order_wait=skip_order_wait, env=env))
 
     print("\n=== All Monthly Strategies Complete ===")
 
@@ -5895,11 +5796,11 @@ def monthly_invest_all_strategies(api, force_execute=False, skip_order_wait=Fals
     label_map = {
         "hfea": "HFEA",
         "spxl": "SPXL SMA",
-        "rssb_wtip": "RSSB/WTIP",
         "nine_sig": "9-Sig",
         "dual_momentum": "Dual Momentum",
         "regime_sso": "Regime SSO",
-        "regime_world": "Regime World",
+        "aaa": "7-Asset Rotator",
+        "f4": "World 40/30/30",
     }
     for key, label in label_map.items():
         outcome = results.get(key, "(no result)")
@@ -5920,77 +5821,6 @@ def monthly_invest_all_strategies(api, force_execute=False, skip_order_wait=Fals
     return results
 
 
-def test_monthly_buy_rssb_wtip(api, investment_amount=10.0, force_execute=True, skip_order_wait=False, env="live"):
-    """
-    Test function to run RSSB/WTIP monthly buy with a custom investment amount.
-    Useful for testing the strategy with small amounts (e.g., $10).
-    
-    Args:
-        api: Alpaca API credentials
-        investment_amount: Investment amount in dollars (default: $10.0)
-        force_execute: Bypass trading day check (default: True for testing)
-        skip_order_wait: Skip waiting for order fills (default: False)
-        env: Environment ("live" or "paper")
-    
-    Returns:
-        Result from make_monthly_buys_rssb_wtip function
-    """
-    print("=== Testing RSSB/WTIP Monthly Buy ===")
-    print(f"Investment amount: ${investment_amount:.2f}")
-    
-    # Step 1: Sync cost basis from Alpaca to Firestore BEFORE executing trades
-    print("\nStep 1: Syncing cost basis from Alpaca to Firestore...")
-    cost_basis_result = recalculate_all_strategies_cost_basis(api, env, silent=True)
-    if cost_basis_result.get("success"):
-        if cost_basis_result.get("total_difference", 0) != 0:
-            print(f"✅ Cost basis synced: ${cost_basis_result['total_difference']:.2f} correction applied")
-        else:
-            print("✅ Cost basis already in sync")
-    else:
-        print(f"⚠️  Warning: Cost basis sync had issues: {cost_basis_result.get('error', 'Unknown error')}")
-    
-    # Step 2: Get margin conditions (needed for strategy function)
-    print("\nStep 2: Getting margin conditions...")
-    margin_result = check_margin_conditions(api, env=env)
-    
-    # Step 3: Create custom investment_calc dict with only RSSB/WTIP strategy
-    # The function expects this structure but we'll override the amount
-    investment_calc = {
-        "total_cash": investment_amount,
-        "total_reserved": 0,
-        "total_available": investment_amount,
-        "margin_approved": 0,
-        "used_margin": 0,
-        "total_investing": investment_amount,
-        "strategy_amounts": {
-            "rssb_wtip_allo": investment_amount,
-            # Set other strategies to 0 (they won't be called anyway)
-            "hfea_allo": 0,
-            "spxl_allo": 0,
-            "nine_sig_allo": 0,
-            "dual_momentum_allo": 0,
-            "regime_sso_allo": 0,
-        },
-        "reserved_amounts": {}
-    }
-    
-    # Step 4: Run RSSB/WTIP strategy with custom investment amount
-    print("\n=== Executing RSSB/WTIP Monthly Buy ===")
-    result = make_monthly_buys_rssb_wtip(
-        api, 
-        force_execute=force_execute, 
-        investment_calc=investment_calc, 
-        margin_result=margin_result, 
-        skip_order_wait=skip_order_wait, 
-        env=env
-    )
-    
-    print("\n=== RSSB/WTIP Test Complete ===")
-    
-    return result
-
-
-@app.route("/monthly_invest_all", methods=["POST"])
 def monthly_invest_all(request):
     """
     Orchestrator endpoint that runs all three monthly strategies in one coordinated execution.
@@ -6015,24 +5845,6 @@ def rebalance_hfea(request):
         env=alpaca_environment
     )  # or 'paper' based on your needs
     return rebalance_portfolio(api)
-
-
-@app.route("/monthly_buy_rssb_wtip", methods=["POST"])
-def monthly_buy_rssb_wtip(request):
-    api = set_alpaca_environment(env=alpaca_environment)
-    return make_monthly_buys_rssb_wtip(api, env=alpaca_environment)
-
-
-@app.route("/rebalance_rssb_wtip", methods=["POST"])
-def rebalance_rssb_wtip(request):
-    api = set_alpaca_environment(env=alpaca_environment)
-    return rebalance_rssb_wtip_portfolio(api)
-
-
-@app.route("/monthly_nine_sig_contributions", methods=["POST"])
-def monthly_nine_sig_contributions(request):
-    api = set_alpaca_environment(env=alpaca_environment)
-    return make_monthly_nine_sig_contributions(api, env=alpaca_environment)
 
 
 @app.route("/quarterly_nine_sig_signal", methods=["POST"])
@@ -6097,23 +5909,25 @@ def backfill_regime_scores_route(request):
     return backfill_regime_scores(api, cfg=regime_sso_config, days=30, env=alpaca_environment)
 
 
-@app.route("/daily_regime_world_check", methods=["POST"])
-def daily_regime_world_check_route(request):
+@app.route("/monthly_buy_aaa", methods=["POST"])
+def monthly_buy_aaa(request):
+    """7-Asset Rotator (AAA family) — monthly momentum rotation + risk-controlled buys."""
     api = set_alpaca_environment(env=alpaca_environment)
-    return daily_regime_check(api, cfg=regime_world_config, env=alpaca_environment)
+    return make_monthly_buys_aaa(api, env=alpaca_environment)
 
 
-@app.route("/monthly_buy_regime_world", methods=["POST"])
-def monthly_buy_regime_world(request):
+@app.route("/monthly_buy_f4", methods=["POST"])
+def monthly_buy_f4(request):
+    """F4 (WLDU+GOLY+TLT) — monthly drift-correcting buys toward 40/30/30 target."""
     api = set_alpaca_environment(env=alpaca_environment)
-    return make_monthly_buys_regime(api, cfg=regime_world_config, env=alpaca_environment)
+    return make_monthly_buys_f4(api, env=alpaca_environment)
 
 
-@app.route("/backfill_regime_world_scores", methods=["POST"])
-def backfill_regime_world_scores_route(request):
-    """One-shot endpoint: backfill ~30 trading days of historical regime_world scores."""
+@app.route("/quarterly_rebalance_f4", methods=["POST"])
+def quarterly_rebalance_f4_route(request):
+    """F4 quarterly rebalance — bring positions back to exact 40/30/30 weights."""
     api = set_alpaca_environment(env=alpaca_environment)
-    return backfill_regime_scores(api, cfg=regime_world_config, days=30, env=alpaca_environment)
+    return quarterly_rebalance_f4(api, env=alpaca_environment)
 
 
 @app.route("/index_alert", methods=["POST"])
@@ -6165,11 +5979,11 @@ def audit_monthly_run(api, env="live", lookback_days=14):
     expected_symbols = {
         "HFEA": ["UPRO", "TMF", "KMLM"],
         "SPXL SMA": ["SPXL", "SGOV"],
-        "RSSB/WTIP": ["RSSB", "WTIP", "BIL"],
         "9-Sig": ["TQQQ", "AGG"],
         "Dual Momentum": ["SPUU", "QLD", "EFO", "BND"],
         "Regime SSO": [regime_sso_config["risk_asset"], regime_sso_config["safe_asset"]],
-        "Regime World": [regime_world_config["risk_asset"], regime_world_config["safe_asset"]],
+        "7-Asset Rotator": STRATEGY_SYMBOLS["aaa"],
+        "World 40/30/30": STRATEGY_SYMBOLS["f4"],
     }
 
     strategy_activity = {label: [] for label in expected_symbols}
@@ -6235,18 +6049,14 @@ def run_local(action, env="paper", request="test", force_execute=False, investme
         return make_monthly_buys_regime(api, cfg=regime_sso_config, force_execute=force_execute, skip_order_wait=True, env=env)
     elif action == "daily_regime_check":
         return daily_regime_check(api, cfg=regime_sso_config, env=env)
-    elif action == "monthly_buy_regime_world":
-        return make_monthly_buys_regime(api, cfg=regime_world_config, force_execute=force_execute, skip_order_wait=True, env=env)
-    elif action == "daily_regime_world_check":
-        return daily_regime_check(api, cfg=regime_world_config, env=env)
+    elif action == "monthly_buy_aaa":
+        return make_monthly_buys_aaa(api, force_execute=force_execute, skip_order_wait=True, env=env)
+    elif action == "monthly_buy_f4":
+        return make_monthly_buys_f4(api, force_execute=force_execute, skip_order_wait=True, env=env)
+    elif action == "quarterly_rebalance_f4":
+        return quarterly_rebalance_f4(api, force_execute=force_execute, env=env)
     elif action == "backfill_regime_sso_scores":
         return backfill_regime_scores(api, cfg=regime_sso_config, days=30, env=env)
-    elif action == "backfill_regime_world_scores":
-        return backfill_regime_scores(api, cfg=regime_world_config, days=30, env=env)
-    elif action == "test_monthly_buy_rssb_wtip":
-        # Test RSSB/WTIP monthly buy with custom investment amount (default: $10)
-        investment = investment_amount if investment_amount is not None else 10.0
-        return test_monthly_buy_rssb_wtip(api, investment_amount=investment, force_execute=True, skip_order_wait=True, env=env)
     else:
         return "No valid action provided."
 
@@ -6270,11 +6080,10 @@ if __name__ == "__main__":
             "monthly_dual_momentum",
             "monthly_buy_regime_sso",
             "daily_regime_check",
-            "monthly_buy_regime_world",
-            "daily_regime_world_check",
+            "monthly_buy_aaa",
+            "monthly_buy_f4",
+            "quarterly_rebalance_f4",
             "backfill_regime_sso_scores",
-            "backfill_regime_world_scores",
-            "test_monthly_buy_rssb_wtip"
         ],
         required=True,
         help="Action to perform: 'monthly_invest_all' runs all five monthly strategies with coordinated budgets (recommended)",
@@ -6299,7 +6108,6 @@ if __name__ == "__main__":
         "--investment_amount",
         type=float,
         default=None,
-        help="Investment amount for test_monthly_buy_rssb_wtip (default: $10.0)",
     )
     args = parser.parse_args()
 

@@ -223,6 +223,47 @@ SYMBOL_TFS_RATE = {
     "GLD":  Decimal("0.00"),
     "KMLM": Decimal("0.00"),
     "WTIP": Decimal("0.00"),
+    "DBC":  Decimal("0.00"),    # commodity ETF (basket; not InvStG fund)
+    "SLV":  Decimal("0.00"),    # silver ETC
+    "DBMF": Decimal("0.00"),    # managed-futures ETF (>51% equities not met)
+    "TIP":  Decimal("0.00"),    # bond ETF
+    "LQD":  Decimal("0.00"),    # bond ETF
+    "HYG":  Decimal("0.00"),    # bond ETF
+    "BNDX": Decimal("0.00"),    # bond ETF
+    "EDV":  Decimal("0.00"),    # bond ETF (long-term Treasuries)
+    "TLT":  Decimal("0.00"),    # bond ETF (long-term Treasuries)
+    "IEF":  Decimal("0.00"),    # bond ETF (7-10y Treasuries)
+    "TYD":  Decimal("0.00"),    # 3× IEF, bond ETF
+    "UBT":  Decimal("0.00"),    # 2× TLT, bond ETF
+    "UST":  Decimal("0.00"),    # 2× IEF, bond ETF
+    "USFR": Decimal("0.00"),    # ultra-short Treasury floating-rate, bond ETF
+    "SGOV": Decimal("0.00"),    # 0-3M T-bill ETF
+    "UGL":  Decimal("0.00"),    # 2× gold (still gold exposure → ETC-like)
+
+    # Equity ETFs added — 30% Teilfreistellung (>51% equities under InvStG)
+    "QLD":  Decimal("0.30"),    # 2× Nasdaq-100
+    "WLDU": Decimal("0.30"),    # 2× MSCI World
+    "URTH": Decimal("0.30"),    # 1× MSCI World
+    "SAA":  Decimal("0.30"),    # 2× Russell 2000
+    "EFA":  Decimal("0.30"),    # 1× EAFE
+    "EEM":  Decimal("0.30"),    # 1× EM
+    "IWM":  Decimal("0.30"),    # 1× Russell 2000
+    "QQQ":  Decimal("0.30"),    # 1× Nasdaq-100
+    "SPY":  Decimal("0.30"),    # 1× S&P 500
+    "SOXL": Decimal("0.30"),    # 3× semis (underlying equity index)
+    "EDC":  Decimal("0.30"),    # 3× EEM
+    "TNA":  Decimal("0.30"),    # 3× Russell 2000
+    "VT":   Decimal("0.30"),    # 1× global equity
+    "NTSD": Decimal("0.30"),    # 90/60 equity/Treasury stacked — >51% equity component
+    "NTSI": Decimal("0.30"),    # 90/60 intl variant — >51% equity component
+    "NTSX": Decimal("0.30"),    # 90/60 US variant — >51% equity component
+
+    # Mischfonds (>25% equities, <51%) — 15% Teilfreistellung
+    "GOLY": Decimal("0.15"),    # triple stack: gold + managed-futures + corp bonds
+    "GDE":  Decimal("0.15"),    # gold + equity stack
+    "GDT":  Decimal("0.15"),    # gold + Treasuries stack
+    "RSSB": Decimal("0.30"),    # already set above (stocks + bonds, >51% equity exposure)
+    "RSIT": Decimal("0.30"),    # return-stacked international + Treasuries (>51% equity)
 
     # Cash sweep — not applicable
     "SWEEPFDIC": Decimal("0.00"),
