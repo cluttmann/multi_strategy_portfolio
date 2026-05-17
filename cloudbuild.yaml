@@ -1,140 +1,181 @@
 steps:
-  #Step 1: Deploy the monthly_buy_hfeaFunction
-  - name: 'gcr.io/cloud-builders/gcloud'
-    args:
-    - functions
-    - deploy
-    - monthly_buy_hfea  # The name of the Cloud Function for monthly buys
-    - --source=.
-    - --trigger-http
-    - --region=europe-west3
-    - --runtime=python310
-    - --timeout=540s
-    - --entry-point=monthly_buy_hfea  # Entry point function in your Python code
-    - --memory=512MB
-    - --set-env-vars=GOOGLE_CLOUD_PROJECT=1098661711782,GOOGLE_CLOUD_PROJECT_ID=trading-436516
-    waitFor: ['-'] # start in parallel and actually needs to be set, otherwise deployment is sequential
 
-  #Step 2: Deploy the rebalance_hfeaFunction
-  - name: 'gcr.io/cloud-builders/gcloud'
-    args:
-    - functions
-    - deploy
-    - rebalance_hfea  # The name of the Cloud Function for rebalancing
-    - --source=.
-    - --trigger-http
-    - --region=europe-west3
-    - --runtime=python310
-    - --timeout=540s
-    - --entry-point=rebalance_hfea  # Entry point function in your Python code
-    - --memory=512MB
-    - --set-env-vars=GOOGLE_CLOUD_PROJECT=1098661711782,GOOGLE_CLOUD_PROJECT_ID=trading-436516
-    waitFor: ['-'] # start in parallel and actually needs to be set, otherwise deployment is sequential
+# ─────────────────────────────────────────────────────────────────────────────
+# WAVE A — first 5 function deploys (run in parallel, no dependency).
+#
+# Cloud Build has a per-project concurrent-build quota; each `gcloud functions
+# deploy` spawns ITS OWN inner Cloud Build to construct the container image.
+# With 16 functions all set to `waitFor: ['-']`, the inner builds queue up,
+# and the ones at the back of the queue EXPIRE after ~10 min, failing the
+# whole parent build. Splitting deploys into 3 waves caps peak concurrent
+# inner builds at ~6, which fits comfortably under quota. (See Cloud Build
+# failure 2026-05-17T15:35Z that triggered this refactor.)
+# ─────────────────────────────────────────────────────────────────────────────
 
-  # Step 3: Deploy the monthly_buy_spxl
+  # Step 1: Deploy the monthly_buy_hfea Function
   - name: 'gcr.io/cloud-builders/gcloud'
+    id: 'deploy-hfea'
     args:
     - functions
     - deploy
-    - monthly_buy_spxl  # The name of the Cloud Function for rebalancing
+    - monthly_buy_hfea
     - --source=.
     - --trigger-http
     - --region=europe-west3
     - --runtime=python310
     - --timeout=540s
-    - --entry-point=monthly_buy_spxl  # Entry point function in your Python code
+    - --entry-point=monthly_buy_hfea
     - --memory=512MB
     - --set-env-vars=GOOGLE_CLOUD_PROJECT=1098661711782,GOOGLE_CLOUD_PROJECT_ID=trading-436516
-    waitFor: ['-'] # start in parallel and actually needs to be set, otherwise deployment is sequential
+    waitFor: ['-']
 
-  # Step 4: Deploy the monthly_nine_sig_contributions
+  # Step 2: Deploy the rebalance_hfea Function
   - name: 'gcr.io/cloud-builders/gcloud'
+    id: 'deploy-rebalance-hfea'
     args:
     - functions
     - deploy
-    - monthly_nine_sig_contributions  # The name of the Cloud Function for 9-sig monthly contributions
+    - rebalance_hfea
     - --source=.
     - --trigger-http
     - --region=europe-west3
     - --runtime=python310
     - --timeout=540s
-    - --entry-point=monthly_nine_sig_contributions  # Entry point function in your Python code
+    - --entry-point=rebalance_hfea
     - --memory=512MB
     - --set-env-vars=GOOGLE_CLOUD_PROJECT=1098661711782,GOOGLE_CLOUD_PROJECT_ID=trading-436516
-    waitFor: ['-'] # start in parallel and actually needs to be set, otherwise deployment is sequential
+    waitFor: ['-']
 
-  # Step 4b: Deploy the monthly_invest_all ORCHESTRATOR (runs all 4 monthly strategies)
+  # Step 3: Deploy the monthly_buy_spxl Function
   - name: 'gcr.io/cloud-builders/gcloud'
+    id: 'deploy-spxl'
     args:
     - functions
     - deploy
-    - monthly_invest_all  # Orchestrator function for coordinated monthly investing
+    - monthly_buy_spxl
     - --source=.
     - --trigger-http
     - --region=europe-west3
     - --runtime=python310
     - --timeout=540s
-    - --entry-point=monthly_invest_all  # Entry point function in your Python code
+    - --entry-point=monthly_buy_spxl
     - --memory=512MB
     - --set-env-vars=GOOGLE_CLOUD_PROJECT=1098661711782,GOOGLE_CLOUD_PROJECT_ID=trading-436516
-    waitFor: ['-'] # start in parallel and actually needs to be set, otherwise deployment is sequential
+    waitFor: ['-']
 
-  # Step 4c: Deploy the monthly_dual_momentum function
+  # Step 4: Deploy the monthly_nine_sig_contributions Function
   - name: 'gcr.io/cloud-builders/gcloud'
+    id: 'deploy-nine-sig-monthly'
     args:
     - functions
     - deploy
-    - monthly_dual_momentum  # Dual Momentum Strategy function
+    - monthly_nine_sig_contributions
     - --source=.
     - --trigger-http
     - --region=europe-west3
     - --runtime=python310
     - --timeout=540s
-    - --entry-point=monthly_dual_momentum  # Entry point function in your Python code
+    - --entry-point=monthly_nine_sig_contributions
     - --memory=512MB
     - --set-env-vars=GOOGLE_CLOUD_PROJECT=1098661711782,GOOGLE_CLOUD_PROJECT_ID=trading-436516
-    waitFor: ['-'] # start in parallel and actually needs to be set, otherwise deployment is sequential
+    waitFor: ['-']
+
+  # Step 5: Deploy the monthly_invest_all ORCHESTRATOR (runs all 7 monthly strategies)
+  - name: 'gcr.io/cloud-builders/gcloud'
+    id: 'deploy-orchestrator'
+    args:
+    - functions
+    - deploy
+    - monthly_invest_all
+    - --source=.
+    - --trigger-http
+    - --region=europe-west3
+    - --runtime=python310
+    - --timeout=540s
+    - --entry-point=monthly_invest_all
+    - --memory=512MB
+    - --set-env-vars=GOOGLE_CLOUD_PROJECT=1098661711782,GOOGLE_CLOUD_PROJECT_ID=trading-436516
+    waitFor: ['-']
+
+# ─────────────────────────────────────────────────────────────────────────────
+# WAVE B — next 6 function deploys (start after Wave A completes).
+# ─────────────────────────────────────────────────────────────────────────────
+
+  # Step 6: Deploy the monthly_dual_momentum Function
+  - name: 'gcr.io/cloud-builders/gcloud'
+    id: 'deploy-dm'
+    args:
+    - functions
+    - deploy
+    - monthly_dual_momentum
+    - --source=.
+    - --trigger-http
+    - --region=europe-west3
+    - --runtime=python310
+    - --timeout=540s
+    - --entry-point=monthly_dual_momentum
+    - --memory=512MB
+    - --set-env-vars=GOOGLE_CLOUD_PROJECT=1098661711782,GOOGLE_CLOUD_PROJECT_ID=trading-436516
+    waitFor:
+      - 'deploy-hfea'
+      - 'deploy-rebalance-hfea'
+      - 'deploy-spxl'
+      - 'deploy-nine-sig-monthly'
+      - 'deploy-orchestrator'
 
   # Steps 4e + 4f (monthly_buy_rssb_wtip + rebalance_rssb_wtip) removed 2026-05-12 —
   # RSSB/WTIP strategy discontinued for poor performance. The deployed Cloud Functions
   # and the Cloud Scheduler job will be deleted from GCP separately (see ops cleanup).
 
-  # Step 5: Deploy the quarterly_nine_sig_signal
+  # Step 7: Deploy the quarterly_nine_sig_signal Function
   - name: 'gcr.io/cloud-builders/gcloud'
+    id: 'deploy-nine-sig-quarterly'
     args:
     - functions
     - deploy
-    - quarterly_nine_sig_signal  # The name of the Cloud Function for 9-sig quarterly signals
+    - quarterly_nine_sig_signal
     - --source=.
     - --trigger-http
     - --region=europe-west3
     - --runtime=python310
     - --timeout=540s
-    - --entry-point=quarterly_nine_sig_signal  # Entry point function in your Python code
+    - --entry-point=quarterly_nine_sig_signal
     - --memory=512MB
     - --set-env-vars=GOOGLE_CLOUD_PROJECT=1098661711782,GOOGLE_CLOUD_PROJECT_ID=trading-436516
-    waitFor: ['-'] # start in parallel and actually needs to be set, otherwise deployment is sequential
+    waitFor:
+      - 'deploy-hfea'
+      - 'deploy-rebalance-hfea'
+      - 'deploy-spxl'
+      - 'deploy-nine-sig-monthly'
+      - 'deploy-orchestrator'
 
-  # Step 4: Deploy the daily_trade_spxl_200sma
+  # Step 8: Deploy the daily_trade_spxl_200sma Function
   - name: 'gcr.io/cloud-builders/gcloud'
+    id: 'deploy-spxl-200sma'
     args:
     - functions
     - deploy
-    - daily_trade_spxl_200sma  # The name of the Cloud Function for rebalancing
+    - daily_trade_spxl_200sma
     - --source=.
     - --trigger-http
     - --region=europe-west3
     - --runtime=python310
     - --timeout=540s
-    - --entry-point=daily_trade_spxl_200sma  # Entry point function in your Python code
+    - --entry-point=daily_trade_spxl_200sma
     - --memory=512MB
     - --set-env-vars=GOOGLE_CLOUD_PROJECT=1098661711782,GOOGLE_CLOUD_PROJECT_ID=trading-436516
-    waitFor: ['-'] # start in parallel and actually needs to be set, otherwise deployment is sequential
+    waitFor:
+      - 'deploy-hfea'
+      - 'deploy-rebalance-hfea'
+      - 'deploy-spxl'
+      - 'deploy-nine-sig-monthly'
+      - 'deploy-orchestrator'
 
-  # Step 5b: Deploy daily_regime_check (SSO/USFR regime detector daily run)
+  # Step 9: Deploy daily_regime_check (SSO/USFR regime detector daily run).
   # Memory bumped to 2GB to fit FinBERT (~440MB at runtime) plus the 500-stock
   # market breadth scan in a single invocation.
   - name: 'gcr.io/cloud-builders/gcloud'
+    id: 'deploy-regime-check'
     args:
     - functions
     - deploy
@@ -147,10 +188,16 @@ steps:
     - --entry-point=daily_regime_check_route
     - --memory=2048MB
     - --set-env-vars=GOOGLE_CLOUD_PROJECT=1098661711782,GOOGLE_CLOUD_PROJECT_ID=trading-436516
-    waitFor: ['-']
+    waitFor:
+      - 'deploy-hfea'
+      - 'deploy-rebalance-hfea'
+      - 'deploy-spxl'
+      - 'deploy-nine-sig-monthly'
+      - 'deploy-orchestrator'
 
-  # Step 5c: Deploy monthly_buy_regime_sso (regime detector monthly contribution)
+  # Step 10: Deploy monthly_buy_regime_sso (regime detector monthly contribution)
   - name: 'gcr.io/cloud-builders/gcloud'
+    id: 'deploy-regime-sso'
     args:
     - functions
     - deploy
@@ -163,10 +210,16 @@ steps:
     - --entry-point=monthly_buy_regime_sso
     - --memory=512MB
     - --set-env-vars=GOOGLE_CLOUD_PROJECT=1098661711782,GOOGLE_CLOUD_PROJECT_ID=trading-436516
-    waitFor: ['-']
+    waitFor:
+      - 'deploy-hfea'
+      - 'deploy-rebalance-hfea'
+      - 'deploy-spxl'
+      - 'deploy-nine-sig-monthly'
+      - 'deploy-orchestrator'
 
-  # Step 5d: Deploy backfill_regime_scores (one-shot history seeder, manually triggered)
+  # Step 11: Deploy backfill_regime_scores (one-shot history seeder, manually triggered)
   - name: 'gcr.io/cloud-builders/gcloud'
+    id: 'deploy-regime-backfill'
     args:
     - functions
     - deploy
@@ -179,16 +232,26 @@ steps:
     - --entry-point=backfill_regime_scores_route
     - --memory=1024MB
     - --set-env-vars=GOOGLE_CLOUD_PROJECT=1098661711782,GOOGLE_CLOUD_PROJECT_ID=trading-436516
-    waitFor: ['-']
+    waitFor:
+      - 'deploy-hfea'
+      - 'deploy-rebalance-hfea'
+      - 'deploy-spxl'
+      - 'deploy-nine-sig-monthly'
+      - 'deploy-orchestrator'
 
   # Steps 5e + 5f + 5g (daily_regime_world_check + monthly_buy_regime_world + backfill_regime_world_scores)
   # removed 2026-05-12 — Regime World strategy discontinued, replaced by World 40/30/30 (F4) +
   # 7-Asset Rotator (AAA). The deployed Cloud Functions and the daily_regime_world_check
-  # Cloud Scheduler job must be deleted from GCP separately (see ops cleanup).
+  # Cloud Scheduler job have been deleted from GCP (cleanup completed 2026-05-17).
 
-  # Step 5h: Deploy monthly_buy_aaa (7-Asset Rotator — momentum rotation across NTSD/SAA/EET/UBT/UST/UGL/DBC).
+# ─────────────────────────────────────────────────────────────────────────────
+# WAVE C — final 5 function deploys (start after Wave B completes).
+# ─────────────────────────────────────────────────────────────────────────────
+
+  # Step 12: Deploy monthly_buy_aaa (7-Asset Rotator — momentum rotation across NTSD/SAA/EET/UBT/UST/UGL/DBC).
   # Called in-process by the monthly_invest_all orchestrator; deployed individually for manual/debug use.
   - name: 'gcr.io/cloud-builders/gcloud'
+    id: 'deploy-aaa'
     args:
     - functions
     - deploy
@@ -201,11 +264,18 @@ steps:
     - --entry-point=monthly_buy_aaa
     - --memory=512MB
     - --set-env-vars=GOOGLE_CLOUD_PROJECT=1098661711782,GOOGLE_CLOUD_PROJECT_ID=trading-436516
-    waitFor: ['-']
+    waitFor:
+      - 'deploy-dm'
+      - 'deploy-nine-sig-quarterly'
+      - 'deploy-spxl-200sma'
+      - 'deploy-regime-check'
+      - 'deploy-regime-sso'
+      - 'deploy-regime-backfill'
 
-  # Step 5i: Deploy monthly_buy_f4 (World 40/30/30 — drift-correcting monthly buys toward WLDU/GOLY/TLT).
+  # Step 13: Deploy monthly_buy_f4 (World 40/30/30 — drift-correcting monthly buys toward WLDU/GOLY/TLT).
   # Called in-process by the monthly_invest_all orchestrator; deployed individually for manual/debug use.
   - name: 'gcr.io/cloud-builders/gcloud'
+    id: 'deploy-f4'
     args:
     - functions
     - deploy
@@ -218,12 +288,19 @@ steps:
     - --entry-point=monthly_buy_f4
     - --memory=512MB
     - --set-env-vars=GOOGLE_CLOUD_PROJECT=1098661711782,GOOGLE_CLOUD_PROJECT_ID=trading-436516
-    waitFor: ['-']
+    waitFor:
+      - 'deploy-dm'
+      - 'deploy-nine-sig-quarterly'
+      - 'deploy-spxl-200sma'
+      - 'deploy-regime-check'
+      - 'deploy-regime-sso'
+      - 'deploy-regime-backfill'
 
-  # Step 5j: Deploy quarterly_rebalance_f4 (full F4 rebalance to exact 40/30/30 weights).
+  # Step 14: Deploy quarterly_rebalance_f4 (full F4 rebalance to exact 40/30/30 weights).
   # NOT called by the monthly orchestrator — needs its own Cloud Scheduler (see scheduler section).
   # Firestore idempotency marker (`quarterly-runs-{env}/f4-{quarter}`) makes repeated calls safe.
   - name: 'gcr.io/cloud-builders/gcloud'
+    id: 'deploy-quarterly-f4'
     args:
     - functions
     - deploy
@@ -236,26 +313,40 @@ steps:
     - --entry-point=quarterly_rebalance_f4_route
     - --memory=512MB
     - --set-env-vars=GOOGLE_CLOUD_PROJECT=1098661711782,GOOGLE_CLOUD_PROJECT_ID=trading-436516
-    waitFor: ['-']
+    waitFor:
+      - 'deploy-dm'
+      - 'deploy-nine-sig-quarterly'
+      - 'deploy-spxl-200sma'
+      - 'deploy-regime-check'
+      - 'deploy-regime-sso'
+      - 'deploy-regime-backfill'
 
-  # Step 6: Deploy the unified index_alert Cloud Function with Alpaca and Telegram settings
+  # Step 15: Deploy the unified index_alert Cloud Function with Alpaca and Telegram settings
   - name: 'gcr.io/cloud-builders/gcloud'
+    id: 'deploy-index-alert'
     args:
     - functions
     - deploy
-    - index_alert  # Single Cloud Function for all indices
+    - index_alert
     - --source=.
     - --trigger-http
     - --region=europe-west3
     - --runtime=python310
     - --timeout=540s
-    - --entry-point=index_alert  # Python function entry point
+    - --entry-point=index_alert
     - --memory=512MB
     - --set-env-vars=GOOGLE_CLOUD_PROJECT=1098661711782,GOOGLE_CLOUD_PROJECT_ID=trading-436516
-    waitFor: ['-'] # start in parallel and actually needs to be set, otherwise deployment is sequential
+    waitFor:
+      - 'deploy-dm'
+      - 'deploy-nine-sig-quarterly'
+      - 'deploy-spxl-200sma'
+      - 'deploy-regime-check'
+      - 'deploy-regime-sso'
+      - 'deploy-regime-backfill'
 
-  # Step 7: Deploy the audit_monthly_run watchdog (verifies the monthly orchestrator actually ran)
+  # Step 16: Deploy the audit_monthly_run watchdog (verifies the monthly orchestrator actually ran)
   - name: 'gcr.io/cloud-builders/gcloud'
+    id: 'deploy-audit'
     args:
     - functions
     - deploy
@@ -268,10 +359,22 @@ steps:
     - --entry-point=audit_monthly_run_route
     - --memory=512MB
     - --set-env-vars=GOOGLE_CLOUD_PROJECT=1098661711782,GOOGLE_CLOUD_PROJECT_ID=trading-436516
-    waitFor: ['-']
+    waitFor:
+      - 'deploy-dm'
+      - 'deploy-nine-sig-quarterly'
+      - 'deploy-spxl-200sma'
+      - 'deploy-regime-check'
+      - 'deploy-regime-sso'
+      - 'deploy-regime-backfill'
 
+# ─────────────────────────────────────────────────────────────────────────────
+# WAVE D — Cloud Scheduler (re)creation. Schedulers don't trigger inner Cloud
+# Builds, so they can all run in parallel once Wave C is done. Gated on the
+# last Wave C step so a scheduler is never created pointing at a function URL
+# that hasn't been deployed yet.
+# ─────────────────────────────────────────────────────────────────────────────
 
-# Create Cloud Scheduler job for 'monthly_invest_all' ORCHESTRATOR (runs all 4 monthly strategies)
+  # Cloud Scheduler job for 'monthly_invest_all' ORCHESTRATOR (runs all 7 monthly strategies)
   - name: 'gcr.io/cloud-builders/gcloud'
     entrypoint: 'bash'
     args:
@@ -291,55 +394,76 @@ steps:
           --time-zone='America/New_York' \
           --location='europe-west3' \
           --oidc-service-account-email='1098661711782-compute@developer.gserviceaccount.com'
-    waitFor: ['-'] # start in parallel and actually needs to be set, otherwise deployment is sequential
+    waitFor:
+      - 'deploy-aaa'
+      - 'deploy-f4'
+      - 'deploy-quarterly-f4'
+      - 'deploy-index-alert'
+      - 'deploy-audit'
 
-  # Create Cloud Scheduler job for 'rebalance_hfea' function
+  # Cloud Scheduler job for 'rebalance_hfea' function
   - name: 'gcr.io/cloud-builders/gcloud'
     args: [
       'scheduler', 'jobs', 'update', 'http', 'rebalance_hfea',
-      '--schedule', '0 14 1-7 1,4,7,10 *',  
+      '--schedule', '0 14 1-7 1,4,7,10 *',
       '--uri', 'https://europe-west3-trading-436516.cloudfunctions.net/rebalance_hfea',
       '--http-method', 'POST',
       '--time-zone', 'America/New_York',
       '--location', 'europe-west3',
       '--oidc-service-account-email', '1098661711782-compute@developer.gserviceaccount.com'
     ]
-    waitFor: ['-'] # start in parallel and actually needs to be set, otherwise deployment is sequential
+    waitFor:
+      - 'deploy-aaa'
+      - 'deploy-f4'
+      - 'deploy-quarterly-f4'
+      - 'deploy-index-alert'
+      - 'deploy-audit'
 
   # Cloud Scheduler job 'rebalance_rssb_wtip' removed 2026-05-12 — RSSB/WTIP strategy
-  # discontinued. The existing GCP scheduler job must be deleted manually (see ops cleanup).
+  # discontinued. The existing GCP scheduler job has been deleted (cleanup completed 2026-05-17).
 
-  # NOTE: monthly_buy_spxl, monthly_nine_sig_contributions, monthly_buy_hfea, and monthly_dual_momentum schedulers
-  # have been REPLACED by the monthly_invest_all orchestrator for coordinated budget management.
-  # The individual functions are still deployed for manual/debugging use but not scheduled.
+  # NOTE: monthly_buy_spxl, monthly_nine_sig_contributions, monthly_buy_hfea, monthly_dual_momentum,
+  # monthly_buy_aaa, and monthly_buy_f4 schedulers are intentionally absent — they have all been
+  # REPLACED by the monthly_invest_all orchestrator for coordinated budget management.
+  # The individual functions are deployed for manual/debugging use but never directly scheduled.
 
-  # Create Cloud Scheduler job for 'quarterly_nine_sig_signal' function
+  # Cloud Scheduler job for 'quarterly_nine_sig_signal' function
   - name: 'gcr.io/cloud-builders/gcloud'
     args: [
       'scheduler', 'jobs', 'update', 'http', 'quarterly_nine_sig_signal',
-      '--schedule', '0 13 1-7 1,4,7,10 *',  
+      '--schedule', '0 13 1-7 1,4,7,10 *',
       '--uri', 'https://europe-west3-trading-436516.cloudfunctions.net/quarterly_nine_sig_signal',
       '--http-method', 'POST',
       '--time-zone', 'America/New_York',
       '--location', 'europe-west3',
       '--oidc-service-account-email', '1098661711782-compute@developer.gserviceaccount.com'
     ]
-    waitFor: ['-'] # start in parallel and actually needs to be set, otherwise deployment is sequential
+    waitFor:
+      - 'deploy-aaa'
+      - 'deploy-f4'
+      - 'deploy-quarterly-f4'
+      - 'deploy-index-alert'
+      - 'deploy-audit'
 
-  # Create Cloud Scheduler job for 'buy_spxl_above_200sma' function
+  # Cloud Scheduler job for 'daily_trade_spxl_200sma' function
   - name: 'gcr.io/cloud-builders/gcloud'
     args: [
       'scheduler', 'jobs', 'update', 'http', 'daily_trade_spxl_200sma',
-      '--schedule', '56 15 * * 1-5',  
+      '--schedule', '56 15 * * 1-5',
       '--uri', 'https://europe-west3-trading-436516.cloudfunctions.net/daily_trade_spxl_200sma',
       '--http-method', 'POST',
       '--time-zone', 'America/New_York',
       '--location', 'europe-west3',
       '--oidc-service-account-email', '1098661711782-compute@developer.gserviceaccount.com'
     ]
-    waitFor: ['-'] # start in parallel and actually needs to be set, otherwise deployment is sequential
+    waitFor:
+      - 'deploy-aaa'
+      - 'deploy-f4'
+      - 'deploy-quarterly-f4'
+      - 'deploy-index-alert'
+      - 'deploy-audit'
 
-  # Cloud Scheduler Job for S&P 500 ATH Drop Alert (try update first, then create if needed)
+  # Cloud Scheduler Job for S&P 500 ATH Drop Alert
   - name: 'gcr.io/cloud-builders/gcloud'
     entrypoint: 'bash'
     args:
@@ -361,13 +485,18 @@ steps:
           --location='europe-west3' \
           --oidc-service-account-email='1098661711782-compute@developer.gserviceaccount.com' \
           --message-body='{"index_symbol": "SPY", "index_name": "S&P 500 (SPY)", "alert_type": "ath_drop", "threshold_percent": 30.0}'
-    waitFor: ['-'] # start in parallel and actually needs to be set, otherwise deployment is sequential
+    waitFor:
+      - 'deploy-aaa'
+      - 'deploy-f4'
+      - 'deploy-quarterly-f4'
+      - 'deploy-index-alert'
+      - 'deploy-audit'
 
   # Cloud Scheduler Job for MSCI World ATH Drop Alert
   - name: 'gcr.io/cloud-builders/gcloud'
     args: [
       'scheduler', 'jobs', 'update', 'http', 'msci_drop_alert',
-      '--schedule', '30 9-15 * * 1-5',  # Runs at the 30th minute of every hour from 9 AM to 3 PM (inclusive)
+      '--schedule', '30 9-15 * * 1-5',
       '--uri', 'https://europe-west3-trading-436516.cloudfunctions.net/index_alert',
       '--http-method', 'POST',
       '--time-zone', 'America/New_York',
@@ -375,9 +504,14 @@ steps:
       '--oidc-service-account-email', '1098661711782-compute@developer.gserviceaccount.com',
       '--message-body', '{"index_symbol": "URTH", "index_name": "MSCI World", "alert_type": "ath_drop", "threshold_percent": 30.0}'
     ]
-    waitFor: ['-'] # start in parallel and actually needs to be set, otherwise deployment is sequential
+    waitFor:
+      - 'deploy-aaa'
+      - 'deploy-f4'
+      - 'deploy-quarterly-f4'
+      - 'deploy-index-alert'
+      - 'deploy-audit'
 
-  # Cloud Scheduler Job for URTH 255-day SMA crossing alert (try update first, then create if needed)
+  # Cloud Scheduler Job for URTH 255-day SMA crossing alert
   - name: 'gcr.io/cloud-builders/gcloud'
     entrypoint: 'bash'
     args:
@@ -399,9 +533,14 @@ steps:
           --location='europe-west3' \
           --oidc-service-account-email='1098661711782-compute@developer.gserviceaccount.com' \
           --message-body='{"index_symbol": "URTH", "index_name": "iShares MSCI World ETF", "alert_type": "sma_crossing", "sma_period": 255, "noise_threshold": 1.0}'
-    waitFor: ['-'] # start in parallel and actually needs to be set, otherwise deployment is sequential
+    waitFor:
+      - 'deploy-aaa'
+      - 'deploy-f4'
+      - 'deploy-quarterly-f4'
+      - 'deploy-index-alert'
+      - 'deploy-audit'
 
-  # Cloud Scheduler Job for SPY 200-day SMA crossing alert (try update first, then create if needed)
+  # Cloud Scheduler Job for SPY 200-day SMA crossing alert
   - name: 'gcr.io/cloud-builders/gcloud'
     entrypoint: 'bash'
     args:
@@ -423,9 +562,14 @@ steps:
           --location='europe-west3' \
           --oidc-service-account-email='1098661711782-compute@developer.gserviceaccount.com' \
           --message-body='{"index_symbol": "SPY", "index_name": "S&P 500 (SPY)", "alert_type": "sma_crossing", "sma_period": 200, "noise_threshold": 1.0}'
-    waitFor: ['-'] # start in parallel and actually needs to be set, otherwise deployment is sequential
+    waitFor:
+      - 'deploy-aaa'
+      - 'deploy-f4'
+      - 'deploy-quarterly-f4'
+      - 'deploy-index-alert'
+      - 'deploy-audit'
 
-  # Create Cloud Scheduler job for the monthly run audit watchdog
+  # Cloud Scheduler job for the monthly run audit watchdog.
   # Runs once on day 8 of each month at 14:00 ET — after the day-1-7 buy window —
   # so a missed orchestrator run produces a Telegram alert.
   - name: 'gcr.io/cloud-builders/gcloud'
@@ -450,9 +594,14 @@ steps:
             --location='europe-west3' \
             --oidc-service-account-email='1098661711782-compute@developer.gserviceaccount.com'
         fi
-    waitFor: ['-']
+    waitFor:
+      - 'deploy-aaa'
+      - 'deploy-f4'
+      - 'deploy-quarterly-f4'
+      - 'deploy-index-alert'
+      - 'deploy-audit'
 
-  # Cloud Scheduler for the daily regime detection check (SSO/SHV).
+  # Cloud Scheduler for the daily regime detection check (SSO/USFR).
   # Runs every weekday at 4:30 PM ET — 30 min after market close so end-of-day
   # data is settled. Trades execute next morning if a rotation triggers.
   - name: 'gcr.io/cloud-builders/gcloud'
@@ -479,10 +628,15 @@ steps:
             --oidc-service-account-email='1098661711782-compute@developer.gserviceaccount.com' \
             --attempt-deadline='300s'
         fi
-    waitFor: ['-']
+    waitFor:
+      - 'deploy-aaa'
+      - 'deploy-f4'
+      - 'deploy-quarterly-f4'
+      - 'deploy-index-alert'
+      - 'deploy-audit'
 
   # Cloud Scheduler 'daily_regime_world_check' removed 2026-05-12 — Regime World strategy
-  # discontinued. The existing GCP scheduler job must be deleted manually (see ops cleanup).
+  # discontinued. The existing GCP scheduler job has been deleted (cleanup completed 2026-05-17).
 
   # Cloud Scheduler for the F4 (World 40/30/30) quarterly rebalance.
   # Fires day 1-7 of Jan/Apr/Jul/Oct at 15:00 ET — after the monthly orchestrator (12:00 ET),
@@ -513,7 +667,15 @@ steps:
             --location='europe-west3' \
             --oidc-service-account-email='1098661711782-compute@developer.gserviceaccount.com'
         fi
-    waitFor: ['-']
+    waitFor:
+      - 'deploy-aaa'
+      - 'deploy-f4'
+      - 'deploy-quarterly-f4'
+      - 'deploy-index-alert'
+      - 'deploy-audit'
+
+# Overall build timeout 60min: 3 deploy waves × ~3-5min each + scheduler wave = ~10-16min total.
+timeout: '3600s'
 
 options:
   logging: CLOUD_LOGGING_ONLY  # Send logs to Cloud Logging only
