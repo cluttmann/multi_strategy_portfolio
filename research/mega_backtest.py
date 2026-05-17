@@ -192,6 +192,26 @@ AGGREGATE_WEIGHTS = {
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# RETIREMENT PROJECTION CONFIG
+# ═══════════════════════════════════════════════════════════════════════
+# Forward-projects the deployed aggregate to answer "when can I retire?".
+# All math runs in REAL dollars (today's purchasing power):
+#   real_cagr = (1 + after_tax_cagr) / (1 + inflation) - 1
+# Contributions are treated as constant in real terms (i.e. you index them
+# to inflation each year — the realistic case).
+RETIREMENT_BIRTH_DATE = "1993-07-16"
+RETIREMENT_TARGET_REAL = 1_500_000        # $1.5M in 2026 purchasing power
+RETIREMENT_DEFAULT_MONTHLY = 300          # current monthly contribution (real $)
+RETIREMENT_INFLATION = 0.025              # 2.5% long-term US inflation
+RETIREMENT_SWR = 0.035                    # 3.5% safe withdrawal rate
+RETIREMENT_MAX_YEARS = 50
+RETIREMENT_AGE_BUCKETS = [40, 45, 50, 55, 60, 65]
+RETIREMENT_MONTHLY_SCENARIOS = [300, 500, 1000, 1500, 2000, 3000]
+RETIREMENT_TARGET_SCENARIOS = [1_000_000, 1_500_000, 2_000_000, 3_000_000]
+RETIREMENT_MC_SIMS = 5000
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # STRATEGY REGISTRY — three tiers
 # ═══════════════════════════════════════════════════════════════════════
 #
@@ -1432,6 +1452,22 @@ def alpaca_creds():
          "--account=cayookenz@gmail.com"],
     ).decode().strip()
     return {"APCA-API-KEY-ID": api_key, "APCA-API-SECRET-KEY": secret}
+
+
+def fetch_alpaca_live_equity() -> float | None:
+    """
+    Fetch current LIVE Alpaca portfolio_value via the same gcloud-secrets
+    pattern as alpaca_creds(). Used as the starting value for the retirement
+    projection. Returns None on any failure (caller falls back to override).
+    """
+    try:
+        r = requests.get("https://api.alpaca.markets/v2/account",
+                         headers=alpaca_creds(), timeout=15)
+        r.raise_for_status()
+        return float(r.json().get("portfolio_value", 0))
+    except Exception as e:
+        print(f"  ⚠ Could not fetch live Alpaca equity: {e}")
+        return None
 
 
 def eodhd_token():
@@ -8732,6 +8768,79 @@ def _plot_tax_drag_comparison(deployed_names: list, metrics: dict,
     print(f"  ✓ {filename}")
 
 
+def plot_retirement_projection(mc_ret: dict, det: dict, age_today: float,
+                                target: float, monthly: float, filename: str,
+                                swr: float = RETIREMENT_SWR,
+                                mc_basis: str = "after-tax"):
+    """
+    Forward wealth projection chart in real dollars.
+
+    Shows the deterministic median path + p5/p50/p95 MC bands + target line.
+    X-axis is age (today → today + max_years). Annotates the median
+    retirement age at the target intersection.
+    """
+    paths_yearly = mc_ret["paths_yearly"]
+    max_years = mc_ret["max_years"]
+    n_years = paths_yearly.shape[1]
+    ages = age_today + np.arange(n_years)
+
+    p5 = np.percentile(paths_yearly, 5, axis=0)
+    p50 = np.percentile(paths_yearly, 50, axis=0)
+    p95 = np.percentile(paths_yearly, 95, axis=0)
+
+    fig, ax = plt.subplots(figsize=(13, 7))
+    ax.fill_between(ages, p5, p95, alpha=0.18, color="#2c7fb8",
+                    label="MC p5–p95 band")
+    ax.plot(ages, p50, lw=2.4, color="#2c7fb8", label="MC median (p50)")
+    ax.plot(ages, p5, lw=1.0, color="#2c7fb8", alpha=0.6, linestyle=":",
+            label="MC p5 (pessimistic)")
+    ax.plot(ages, p95, lw=1.0, color="#2c7fb8", alpha=0.6, linestyle=":",
+            label="MC p95 (optimistic)")
+
+    # Deterministic path — sample at year ends
+    det_path = det["path"]
+    det_yearly = det_path[::12][:n_years]
+    if len(det_yearly) < n_years:
+        det_yearly = np.concatenate([det_yearly,
+                                     np.full(n_years - len(det_yearly), det_yearly[-1])])
+    ax.plot(ages, det_yearly, lw=2.0, color="#444",
+            linestyle="--", label="Deterministic (after-tax median CAGR)")
+
+    # Target line
+    ax.axhline(target, color="#c00", lw=1.6, linestyle="-",
+               label=f"Target ${target/1e6:.2f}M (real)")
+
+    # Median retirement-age marker
+    yrs = mc_ret["years_to_target"]
+    finite = yrs[np.isfinite(yrs)]
+    if len(finite) > 0:
+        p50_yrs = float(np.median(finite))
+        if np.isfinite(p50_yrs):
+            ret_age = age_today + p50_yrs
+            ax.axvline(ret_age, color="#0a0", lw=1.2, linestyle=":", alpha=0.7)
+            ax.annotate(f"Median FI: age {ret_age:.1f}\n({p50_yrs:.1f} yrs)",
+                        xy=(ret_age, target), xytext=(ret_age + 1.5, target * 1.15),
+                        fontsize=10, color="#0a0",
+                        arrowprops=dict(arrowstyle="->", color="#0a0", lw=1))
+
+    ax.set_yscale("log")
+    ax.yaxis.set_major_formatter(plt.FuncFormatter(
+        lambda x, _: f"${x/1e6:.1f}M" if x >= 1e6 else f"${x/1e3:.0f}k"))
+    ax.set_xlabel("Age")
+    ax.set_ylabel("Real wealth (today's dollars, log scale)")
+    ax.set_title(f"Retirement projection — ${mc_ret['starting']:,.0f} start, "
+                 f"${monthly:,.0f}/mo, target ${target/1e6:.2f}M real "
+                 f"(SWR {swr*100:.1f}% → ${target*swr:,.0f}/yr) "
+                 f"[MC: {mc_basis} returns]",
+                 fontsize=12, fontweight="bold")
+    ax.grid(alpha=0.3, which="both")
+    ax.legend(loc="upper left", fontsize=9)
+    plt.tight_layout()
+    plt.savefig(filename, dpi=120, bbox_inches="tight")
+    plt.close()
+    print(f"  ✓ {filename}")
+
+
 def plot_rolling_sharpe_custom(sharpe_dict: dict, title: str, filename: str):
     """Plot pre-computed rolling Sharpe series. Used for the candidate-vs-aggregate
     rolling 3Y Sharpe view on the promotion-decision page."""
@@ -8878,6 +8987,180 @@ def compute_partial_coverage_aggregate(results: dict, deployed_specs: dict,
     # Element-wise: weight × return, fill NaN with 0 (strategy absent), sum across columns
     agg = (mat.fillna(0.0) * w).sum(axis=1)
     return agg
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# RETIREMENT PROJECTION
+# ═══════════════════════════════════════════════════════════════════════
+# Math is in REAL dollars. real_cagr = (1+after_tax_cagr)/(1+inflation) - 1.
+# Monthly contributions are assumed indexed to inflation (= constant in real $).
+
+
+def retirement_age_today(birth_date_str: str) -> float:
+    """Current age in years, as of today."""
+    birth = pd.Timestamp(birth_date_str)
+    return (pd.Timestamp.now().normalize() - birth).days / 365.25
+
+
+def project_wealth_deterministic(starting: float, monthly: float,
+                                 annual_return: float, target: float,
+                                 max_years: int = RETIREMENT_MAX_YEARS) -> dict:
+    """
+    Monthly-compounding forward projection in real dollars.
+    Returns {"path": np.ndarray (months+1,), "years_to_target": float (inf if never),
+             "final_wealth": float}.
+    """
+    months = max_years * 12
+    monthly_r = (1.0 + annual_return) ** (1.0 / 12) - 1.0
+    path = np.empty(months + 1, dtype=np.float64)
+    path[0] = starting
+    years_to_target = float("inf")
+    for m in range(1, months + 1):
+        path[m] = path[m - 1] * (1.0 + monthly_r) + monthly
+        if years_to_target == float("inf") and path[m] >= target:
+            years_to_target = m / 12.0
+    return {"path": path, "years_to_target": years_to_target,
+            "final_wealth": float(path[-1])}
+
+
+def monte_carlo_retirement(aggregate_returns: pd.Series, starting: float,
+                            monthly: float, target: float, inflation: float,
+                            max_years: int = RETIREMENT_MAX_YEARS,
+                            n_sims: int = RETIREMENT_MC_SIMS,
+                            mean_block: int = 63, seed: int = 42) -> dict:
+    """
+    Stationary block bootstrap of forward wealth paths in REAL dollars.
+
+    For each sim: resample max_years*252 daily nominal returns from the
+    aggregate's native window, deflate each to a real return, compound
+    forward, drop in a monthly contribution every 21 trading days.
+
+    Returns:
+      paths_yearly: (n_sims, max_years+1) wealth at end of each year (year 0 = starting)
+      years_to_target: (n_sims,) first year wealth crosses target (np.inf if never)
+      starting, monthly, target, inflation, max_years, n_sims  (echoed for plotting)
+    """
+    ret = aggregate_returns.dropna()
+    # Trim leading zeros (pre-coverage of any strategy)
+    nz = ret[ret != 0]
+    if len(nz) > 0:
+        ret = ret.loc[nz.index[0]:]
+    if len(ret) < 252:
+        return None  # not enough history
+
+    rng = np.random.default_rng(seed)
+    nominal = ret.values
+    n_source = len(nominal)
+
+    infl_daily = (1.0 + inflation) ** (1.0 / 252) - 1.0
+    # Convert nominal daily returns → real daily returns once, up front
+    real_daily = (1.0 + nominal) / (1.0 + infl_daily) - 1.0
+
+    days = max_years * 252
+    monthly_step = 21  # ~21 trading days per month
+    p_block = 1.0 / mean_block
+
+    paths_yearly = np.empty((n_sims, max_years + 1), dtype=np.float64)
+    paths_yearly[:, 0] = starting
+    years_to_target = np.full(n_sims, np.inf, dtype=np.float64)
+
+    # Inline stationary bootstrap into [0, n_source) for `days` output steps.
+    # We can't reuse stationary_bootstrap_indices() here because it uses one
+    # `n` for both source range and output length.
+    def _boot(out_len: int, src_n: int):
+        idx = np.empty(out_len, dtype=np.int64)
+        idx[0] = rng.integers(0, src_n)
+        coin = rng.random(out_len) < p_block
+        rand_idx = rng.integers(0, src_n, size=out_len)
+        for t in range(1, out_len):
+            if coin[t]:
+                idx[t] = rand_idx[t]
+            else:
+                idx[t] = (idx[t - 1] + 1) % src_n
+        return idx
+
+    for sim in range(n_sims):
+        idx = _boot(days, n_source)
+        sim_r = real_daily[idx]
+        wealth = starting
+        crossed = False
+        for d in range(1, days + 1):
+            wealth = wealth * (1.0 + sim_r[d - 1])
+            if d % monthly_step == 0:
+                wealth += monthly
+            if (not crossed) and wealth >= target:
+                years_to_target[sim] = d / 252.0
+                crossed = True
+            if d % 252 == 0:
+                paths_yearly[sim, d // 252] = wealth
+
+    return {
+        "paths_yearly": paths_yearly,
+        "years_to_target": years_to_target,
+        "starting": starting,
+        "monthly": monthly,
+        "target": target,
+        "inflation": inflation,
+        "max_years": max_years,
+        "n_sims": n_sims,
+    }
+
+
+def retirement_age_probability_grid(mc_ret: dict, age_today: float,
+                                    age_buckets: list = None,
+                                    target_scenarios: list = None) -> pd.DataFrame:
+    """
+    Probability of reaching each target by each age. Re-uses paths_yearly so
+    we don't have to re-simulate per target — for targets we didn't run, we
+    derive the crossing year from the same paths.
+    """
+    age_buckets = age_buckets or RETIREMENT_AGE_BUCKETS
+    target_scenarios = target_scenarios or RETIREMENT_TARGET_SCENARIOS
+    paths = mc_ret["paths_yearly"]  # (n_sims, max_years+1)
+    n_sims, n_years_plus_1 = paths.shape
+    max_year_idx = n_years_plus_1 - 1
+
+    rows = []
+    for age in age_buckets:
+        years_from_now = age - age_today
+        if years_from_now <= 0:
+            row = {"age": age}
+            for t in target_scenarios:
+                row[t] = 1.0 if mc_ret["starting"] >= t else 0.0
+            rows.append(row)
+            continue
+        year_idx = min(int(np.ceil(years_from_now)), max_year_idx)
+        row = {"age": age}
+        for t in target_scenarios:
+            # P(wealth at year_idx >= target) — running max over years to
+            # account for the possibility that wealth peaked then dipped.
+            running_max = np.maximum.accumulate(paths[:, :year_idx + 1], axis=1)
+            prob = float((running_max[:, year_idx] >= t).mean())
+            row[t] = prob
+        rows.append(row)
+    return pd.DataFrame(rows).set_index("age")
+
+
+def retirement_sensitivity_grid(starting: float, annual_return: float,
+                                age_today: float,
+                                monthlies: list = None,
+                                targets: list = None,
+                                max_years: int = RETIREMENT_MAX_YEARS) -> pd.DataFrame:
+    """
+    Deterministic monthly × target grid. Each cell: years to reach target
+    (and the corresponding age). Returns a DataFrame indexed by monthly,
+    columns are targets, values are (years, age) tuples.
+    """
+    monthlies = monthlies or RETIREMENT_MONTHLY_SCENARIOS
+    targets = targets or RETIREMENT_TARGET_SCENARIOS
+    rows = []
+    for m in monthlies:
+        row = {"monthly": m}
+        for t in targets:
+            res = project_wealth_deterministic(starting, m, annual_return, t, max_years)
+            row[t] = res["years_to_target"]
+        rows.append(row)
+    return pd.DataFrame(rows).set_index("monthly")
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -10155,6 +10438,202 @@ def _tax_section_html(deployed_names: list, deployed_alloc: dict,
     return "\n".join(out)
 
 
+def _retirement_section_html(retirement: dict) -> str:
+    """
+    Render the Retirement Projection section (1b). Inserted between the
+    Executive Summary KPI row and Section 2. Includes:
+      • headline paragraph
+      • deterministic + MC summary numbers
+      • sensitivity grid (monthly × target → years and age)
+      • probability-by-age grid
+      • embedded retirement_projection.png chart
+    """
+    if not retirement:
+        return ""
+
+    starting = retirement["starting"]
+    monthly = retirement["monthly"]
+    target = retirement["target"]
+    inflation = retirement["inflation"]
+    swr = retirement["swr"]
+    after_tax_cagr = retirement["after_tax_cagr"]
+    real_cagr = retirement["real_cagr"]
+    age_today = retirement["age_today"]
+    det = retirement["deterministic"]
+    sens = retirement["sensitivity"]
+    mc_ret = retirement["mc"]
+    prob_grid = retirement.get("prob_grid")
+
+    yrs_det = det["years_to_target"]
+    det_str = (f"{yrs_det:.1f} years → age {age_today + yrs_det:.1f}"
+               if np.isfinite(yrs_det) else "not reached in 50 years")
+
+    # MC summary
+    mc_basis = retirement.get("mc_basis", "after-tax")
+    mc_html = "<p><em>Monte Carlo simulation skipped or unavailable.</em></p>"
+    if mc_ret is not None:
+        yrs = mc_ret["years_to_target"]
+        finite = yrs[np.isfinite(yrs)]
+        pct_never = (1 - len(finite) / len(yrs)) * 100
+        if len(finite) >= 10:
+            p5_y, p50_y, p95_y = np.percentile(finite, [5, 50, 95])
+            mc_html = (
+                "<p><strong>Monte Carlo bootstrap</strong> "
+                f"({mc_ret['n_sims']:,} simulations of {mc_ret['max_years']}-year wealth paths, "
+                f"stationary block bootstrap on the deployed-aggregate <strong>{mc_basis}</strong> daily returns, "
+                "inflation-deflated to real dollars, $X/mo contributions injected every 21 trading days):</p>"
+                "<p style='color:#555;font-size:0.92em'><em>Reading the table: "
+                "<strong>shorter years = luckier</strong>. p5 means \"5% of sims hit the target "
+                "this fast or faster\" (best case). p95 means \"only 5% of sims took this long or "
+                "longer\" (worst case). Median p50 = half of sims reach the target by this age.</em></p>"
+                "<table style='max-width:700px'>"
+                "<tr><th>Percentile</th><th>Years to target</th><th>Age at retirement</th></tr>"
+                f"<tr><td>Optimistic case (p5 — lucky 5%)</td>"
+                f"<td>{p5_y:.1f}</td><td>{age_today+p5_y:.1f}</td></tr>"
+                f"<tr><td><strong>Median (p50)</strong></td>"
+                f"<td><strong>{p50_y:.1f}</strong></td>"
+                f"<td><strong>{age_today+p50_y:.1f}</strong></td></tr>"
+                f"<tr><td>Pessimistic case (p95 — unlucky 5%)</td>"
+                f"<td>{p95_y:.1f}</td><td>{age_today+p95_y:.1f}</td></tr>"
+                f"<tr><td>Never reached</td><td colspan='2'>{pct_never:.1f}% of sims</td></tr>"
+                "</table>"
+            )
+
+    # Callout: why deterministic and MC median don't match.
+    # Both are valid — they answer slightly different questions.
+    callout_html = ""
+    if mc_ret is not None and np.isfinite(yrs_det):
+        finite_yrs = mc_ret["years_to_target"][np.isfinite(mc_ret["years_to_target"])]
+        if len(finite_yrs) >= 10:
+            p50_y = float(np.median(finite_yrs))
+            p95_y = float(np.percentile(finite_yrs, 95))
+            callout_html = f"""
+<div style="background:#fff8e1;border-left:4px solid #f80;padding:14px 20px;margin:18px 0;border-radius:4px;">
+<h4 style="margin:0 0 8px 0;color:#222;">Why do deterministic and MC median disagree?</h4>
+<p style="margin:6px 0;line-height:1.55;">
+<strong>Deterministic ({yrs_det:.1f}y → age {age_today+yrs_det:.1f})</strong> assumes every year
+delivers the exact same {real_cagr*100:.2f}% real return — a perfectly smooth path.
+<strong>MC median ({p50_y:.1f}y → age {age_today+p50_y:.1f})</strong> simulates 5,000 noisy market
+paths and asks <em>"by what age has half of futures hit ${target/1e6:.2f}M?"</em>
+</p>
+<p style="margin:6px 0;line-height:1.55;">
+The distribution of years-to-target is <strong>right-skewed</strong>: lucky paths reach the target
+fast and cluster on the left, unlucky paths have a long tail to the right. This is a textbook
+first-passage-time effect for noisy positive-drift processes — the median is always
+<em>shorter</em> than the smooth-return projection. <em>Both numbers are correct;</em> they just
+answer different questions.
+</p>
+<p style="margin:6px 0;line-height:1.55;">
+<strong>How to read this for planning:</strong>
+</p>
+<ul style="margin:4px 0 6px 24px;line-height:1.55;">
+<li><strong>Anchor your goal on age {age_today+yrs_det:.1f}</strong> (deterministic) — the "if I get the average return every year" answer. Conservative.</li>
+<li><strong>MC median age {age_today+p50_y:.1f}</strong> is the actual 50/50 statistical odds. Useful but easy to over-trust because it implicitly downweights the asymmetric pain of unlucky paths.</li>
+<li><strong>Plan around age {age_today+p95_y:.1f}</strong> (MC p95, pessimistic) — the realistic worst-case floor for stress-testing.</li>
+</ul>
+</div>
+"""
+
+    # Sensitivity table — monthly × target
+    sens_html = "<h3>Sensitivity — monthly contribution × target</h3>"
+    sens_html += "<p style='color:#555;font-size:0.92em'>Deterministic projection at the median real CAGR. "
+    sens_html += f"Each cell shows years to target (and age at that point — you are {age_today:.1f} today).</p>"
+    sens_html += "<table style='max-width:1100px'>"
+    sens_html += "<tr><th>Monthly contribution</th>"
+    for t in sens.columns:
+        sens_html += f"<th>${t/1e6:.2f}M (real)</th>"
+    sens_html += "</tr>"
+    for m in sens.index:
+        sens_html += f"<tr><td><strong>${int(m):,}/mo</strong></td>"
+        for t in sens.columns:
+            y = sens.loc[m, t]
+            if np.isfinite(y):
+                age = age_today + y
+                # Color highlight: green if reachable by 50, amber by 60, red beyond
+                if age <= 50:
+                    color = "#0a0"
+                elif age <= 60:
+                    color = "#c80"
+                else:
+                    color = "#c00"
+                cell = f"<span style='color:{color}'>{y:.1f}y (age {age:.1f})</span>"
+            else:
+                cell = "<span style='color:#888'>never</span>"
+            sens_html += f"<td>{cell}</td>"
+        sens_html += "</tr>"
+    sens_html += "</table>"
+
+    # Probability-by-age grid
+    prob_html = ""
+    if prob_grid is not None and not prob_grid.empty:
+        prob_html = "<h3>Probability of reaching target by age</h3>"
+        prob_html += ("<p style='color:#555;font-size:0.92em'>From the Monte Carlo bootstrap. "
+                      "Uses running-max wealth (so 'reached by age X' counts sims that touched the "
+                      "target at any point through that age — closer to how you'd actually behave).</p>")
+        prob_html += "<table style='max-width:900px'>"
+        prob_html += "<tr><th>Age</th>"
+        for t in prob_grid.columns:
+            prob_html += f"<th>P(≥ ${t/1e6:.2f}M real)</th>"
+        prob_html += "</tr>"
+        for age in prob_grid.index:
+            prob_html += f"<tr><td><strong>{age}</strong></td>"
+            for t in prob_grid.columns:
+                p = float(prob_grid.loc[age, t])
+                if p >= 0.75:
+                    color = "#0a0"
+                elif p >= 0.50:
+                    color = "#7a3"
+                elif p >= 0.25:
+                    color = "#c80"
+                else:
+                    color = "#c00"
+                prob_html += f"<td><span style='color:{color};font-weight:600'>{p*100:.1f}%</span></td>"
+            prob_html += "</tr>"
+        prob_html += "</table>"
+
+    chart_html = ""
+    if os.path.exists("retirement_projection.png"):
+        chart_html = "<h3>Projected wealth (real dollars)</h3><img src='retirement_projection.png'>"
+
+    return f"""
+<h2>1b. Retirement Projection
+  <span style="font-size:0.6em;color:#666;">
+  (forward-projects the deployed aggregate at after-tax real CAGR, in today's dollars)
+  </span>
+</h2>
+<div class="kpi-row">
+    <div class="kpi"><div class="label">Live equity (Alpaca)</div>
+        <div class="value">${starting:,.0f}</div></div>
+    <div class="kpi"><div class="label">Current age</div>
+        <div class="value">{age_today:.1f}</div></div>
+    <div class="kpi"><div class="label">Monthly contribution (real)</div>
+        <div class="value">${monthly:,.0f}</div></div>
+    <div class="kpi"><div class="label">Target (real)</div>
+        <div class="value">${target/1e6:.2f}M</div></div>
+    <div class="kpi positive"><div class="label">SWR income at target</div>
+        <div class="value">${target*swr:,.0f}/yr</div></div>
+</div>
+
+<p>Math runs in <strong>real dollars</strong> (today's purchasing power). The deployed aggregate
+has an after-tax CAGR of <strong>{after_tax_cagr*100:.2f}%/yr</strong> nominal; deducting
+{inflation*100:.1f}% inflation leaves a <strong>real CAGR of {real_cagr*100:.2f}%/yr</strong>.
+Contributions are treated as ${monthly:,.0f}/mo in today's dollars (i.e. you raise them with inflation each year — the realistic case).</p>
+
+<p><strong>Deterministic projection:</strong> {det_str}. At a {swr*100:.1f}% safe withdrawal rate,
+the ${target/1e6:.2f}M target yields <strong>${target*swr:,.0f}/yr</strong> of income in today's dollars.</p>
+
+{mc_html}
+
+{callout_html}
+
+{sens_html}
+
+{prob_html}
+
+{chart_html}
+"""
+
+
 def _stress_table_html(targets: list, results: dict, windows: list) -> str:
     """Compute total return per (strategy, window) and emit an HTML table."""
     head = "<tr><th>Period</th>" + "".join(f"<th>{t}</th>" for t in targets) + "</tr>"
@@ -10398,6 +10877,7 @@ def write_unified_html_report(
     after_tax_metrics: dict = None,
     tax_logs: dict = None,
     tax_assumptions: dict = None,
+    retirement: dict = None,
 ):
     deployed_alloc = {n: DEPLOYED_STRATEGIES[n]["alloc"] for n in deployed_names if n in DEPLOYED_STRATEGIES}
     deployed_quality = {n: DEPLOYED_STRATEGIES[n].get("quality", "?") for n in deployed_names if n in DEPLOYED_STRATEGIES}
@@ -10432,6 +10912,23 @@ def write_unified_html_report(
         agg_drag_tile_class = "warn"
     else:
         agg_drag_tile_class = "negative"
+
+    # Retirement KPIs (median MC years-to-target + age)
+    retirement_tiles_html = ""
+    if retirement is not None and retirement.get("mc") is not None:
+        yrs = retirement["mc"]["years_to_target"]
+        finite = yrs[np.isfinite(yrs)]
+        if len(finite) >= 10:
+            p50_yrs = float(np.median(finite))
+            ret_age = retirement["age_today"] + p50_yrs
+            retirement_tiles_html = (
+                f'<div class="kpi positive"><div class="label">Years to FI '
+                f'<span style="font-size:0.7em;color:#999">(MC p50)</span></div>'
+                f'<div class="value">{p50_yrs:.1f}</div></div>'
+                f'<div class="kpi positive"><div class="label">Age at retirement '
+                f'<span style="font-size:0.7em;color:#999">(MC p50)</span></div>'
+                f'<div class="value">{ret_age:.1f}</div></div>'
+            )
 
     # Bronze (candidate) section
     candidate_section = ""
@@ -10547,7 +11044,10 @@ weight redistributed pro-rata among available sleeves at each point in time).</p
     <div class="kpi negative"><div class="label">Max Drawdown</div><div class="value">{agg_maxdd:.1f}%</div></div>
     <div class="kpi warn"><div class="label">Worst Year</div><div class="value">{agg_worst:.1f}%</div></div>
     <div class="kpi"><div class="label">Years tested</div><div class="value">{agg_years:.1f}</div></div>
+    {retirement_tiles_html}
 </div>
+
+{_retirement_section_html(retirement) if retirement is not None else ''}
 
 <h3>Currently qualified candidate</h3>
 {candidate_section if candidate_section else "<p><em>No active candidate.</em></p>"}
@@ -10751,10 +11251,34 @@ sampled with the same date indices so cross-strategy correlations stay intact.</
 # ═══════════════════════════════════════════════════════════════════════
 
 
+def _parse_arg_float(flag: str, default: float | None) -> float | None:
+    """Parse `--flag VALUE` or `--flag=VALUE` from sys.argv. Returns default if absent."""
+    for i, a in enumerate(sys.argv):
+        if a == flag and i + 1 < len(sys.argv):
+            try:
+                return float(sys.argv[i + 1])
+            except ValueError:
+                return default
+        if a.startswith(flag + "="):
+            try:
+                return float(a.split("=", 1)[1])
+            except ValueError:
+                return default
+    return default
+
+
 def main():
     include_historic = "--include-historic" in sys.argv
     skip_mc = "--no-mc" in sys.argv
     skip_plots = "--no-plots" in sys.argv
+    skip_retirement = "--no-retirement" in sys.argv
+
+    # Retirement overrides (all optional)
+    cli_starting = _parse_arg_float("--starting-equity", None)
+    cli_monthly = _parse_arg_float("--monthly", RETIREMENT_DEFAULT_MONTHLY)
+    cli_target = _parse_arg_float("--target", RETIREMENT_TARGET_REAL)
+    cli_inflation = _parse_arg_float("--inflation", RETIREMENT_INFLATION)
+    cli_swr = _parse_arg_float("--swr", RETIREMENT_SWR)
 
     print("=" * 78)
     print(" MEGA BACKTEST — Unified 1970–2026")
@@ -10938,6 +11462,121 @@ def main():
         traceback.print_exc()
         mc = None
 
+    # 9b. Retirement projection — forward project the aggregate into the future
+    # at the user's contribution rate. All math is in REAL dollars (today's $).
+    retirement = None
+    if not skip_retirement:
+        print("\n── Retirement projection ──")
+        starting = cli_starting
+        if starting is None:
+            starting = fetch_alpaca_live_equity()
+        if starting is None:
+            starting = float(os.environ.get("STARTING_EQUITY", 0))
+        if starting <= 0:
+            print("  ⚠ No starting equity (Alpaca fetch failed and no --starting-equity / "
+                  "STARTING_EQUITY override). Skipping retirement section.")
+        else:
+            agg_at = after_tax_metrics.get("AGGREGATE (deployed)", {})
+            after_tax_cagr = agg_at.get("After-Tax CAGR")
+            if after_tax_cagr is None:
+                # Fall back to gross aggregate CAGR if tax overlay didn't compute
+                after_tax_cagr = aggregate_metrics.get("CAGR", 0.0)
+                cagr_label = "gross CAGR (tax overlay unavailable)"
+            else:
+                cagr_label = "after-tax CAGR"
+            real_cagr = (1 + after_tax_cagr) / (1 + cli_inflation) - 1.0
+            age_today = retirement_age_today(RETIREMENT_BIRTH_DATE)
+
+            print(f"  Live equity:       ${starting:,.0f}")
+            print(f"  Age today:         {age_today:.2f}  (born {RETIREMENT_BIRTH_DATE})")
+            print(f"  Monthly contrib:   ${cli_monthly:,.0f} (real)")
+            print(f"  Target:            ${cli_target:,.0f} (real)")
+            print(f"  Inflation:         {cli_inflation*100:.2f}%/yr")
+            print(f"  {cagr_label}:    {after_tax_cagr*100:.2f}%/yr nominal")
+            print(f"  Real CAGR:         {real_cagr*100:.2f}%/yr")
+            print(f"  SWR income at target: ${cli_target * cli_swr:,.0f}/yr (today's $)")
+
+            # Deterministic projection
+            det = project_wealth_deterministic(starting, cli_monthly, real_cagr,
+                                                cli_target, RETIREMENT_MAX_YEARS)
+            yrs_det = det["years_to_target"]
+            if np.isfinite(yrs_det):
+                print(f"  → Deterministic: {yrs_det:.1f} yrs → age {age_today + yrs_det:.1f}")
+            else:
+                print(f"  → Deterministic: target not reached within {RETIREMENT_MAX_YEARS} years "
+                      f"(final wealth ${det['final_wealth']:,.0f})")
+
+            # Sensitivity grid
+            sens = retirement_sensitivity_grid(starting, real_cagr, age_today)
+            print("\n  Sensitivity: years to reach target (monthly ↓ × target →)")
+            sens_disp = sens.copy()
+            for col in sens_disp.columns:
+                sens_disp[col] = sens_disp[col].apply(
+                    lambda y: f"{y:5.1f}y (age {age_today + y:4.1f})"
+                              if np.isfinite(y) else "  never  "
+                )
+            sens_disp.columns = [f"${t/1e6:.1f}M" for t in sens_disp.columns]
+            sens_disp.index = [f"${m:,}/mo" for m in sens_disp.index]
+            print(sens_disp.to_string())
+
+            # Monte Carlo projection (real dollars). Bootstrap from the
+            # AFTER-TAX aggregate so MC and deterministic are apples-to-apples.
+            # (Gross aggregate would understate tax drag and produce
+            # over-optimistic retirement-age percentiles.)
+            mc_source = after_tax_results.get("AGGREGATE (deployed)")
+            if mc_source is None or mc_source.dropna().empty:
+                mc_source = aggregate_series
+                print("  ⚠ Using gross aggregate for MC (after-tax aggregate unavailable)")
+                mc_basis = "gross"
+            else:
+                mc_basis = "after-tax"
+            print(f"\n  Monte Carlo retirement bootstrap (n={RETIREMENT_MC_SIMS}, "
+                  f"real $, {mc_basis} returns)...")
+            mc_ret = monte_carlo_retirement(
+                mc_source, starting, cli_monthly, cli_target,
+                cli_inflation, RETIREMENT_MAX_YEARS,
+                n_sims=RETIREMENT_MC_SIMS, mean_block=63, seed=42,
+            )
+            if mc_ret is not None:
+                yrs = mc_ret["years_to_target"]
+                finite = yrs[np.isfinite(yrs)]
+                pct_never = (1 - len(finite) / len(yrs)) * 100
+                if len(finite) >= 10:
+                    p5_y, p50_y, p95_y = np.percentile(finite, [5, 50, 95])
+                    print(f"  → MC years-to-target: p5 {p5_y:.1f} (age {age_today+p5_y:.1f}) · "
+                          f"p50 {p50_y:.1f} (age {age_today+p50_y:.1f}) · "
+                          f"p95 {p95_y:.1f} (age {age_today+p95_y:.1f})")
+                    print(f"  → P(never reached in {RETIREMENT_MAX_YEARS}y): {pct_never:.1f}%")
+
+                # Probability-by-age grid
+                prob_grid = retirement_age_probability_grid(mc_ret, age_today)
+                print(f"\n  P(reached target by age) — using paths_yearly cum-max:")
+                prob_disp = prob_grid.copy()
+                for col in prob_disp.columns:
+                    prob_disp[col] = (prob_disp[col] * 100).apply(lambda v: f"{v:5.1f}%")
+                prob_disp.columns = [f"${t/1e6:.1f}M" for t in prob_disp.columns]
+                print(prob_disp.to_string())
+
+                # Save raw MC distribution
+                pd.DataFrame({"years_to_target": yrs}).to_csv(
+                    "retirement_mc.csv", index=False)
+
+                retirement = {
+                    "starting": starting,
+                    "monthly": cli_monthly,
+                    "target": cli_target,
+                    "inflation": cli_inflation,
+                    "swr": cli_swr,
+                    "after_tax_cagr": after_tax_cagr,
+                    "real_cagr": real_cagr,
+                    "age_today": age_today,
+                    "deterministic": det,
+                    "sensitivity": sens,
+                    "mc": mc_ret,
+                    "prob_grid": prob_grid,
+                    "mc_basis": mc_basis,
+                }
+
     # 10. Plots
     plots = {}
     if not skip_plots:
@@ -10961,6 +11600,16 @@ def main():
                     deployed_ran, metrics, after_tax_metrics,
                     aggregate_metrics, "tax_drag_comparison.png"
                 )
+            # Retirement projection (real $) — embedded into the HTML report
+            if retirement is not None:
+                plot_retirement_projection(
+                    retirement["mc"], retirement["deterministic"],
+                    retirement["age_today"], retirement["target"],
+                    retirement["monthly"], "retirement_projection.png",
+                    swr=retirement["swr"],
+                    mc_basis=retirement.get("mc_basis", "after-tax"),
+                )
+                plots["Retirement projection (real $)"] = "retirement_projection.png"
         except Exception as e:
             print(f"  Plot generation partial-failed: {e}")
 
@@ -11023,6 +11672,7 @@ def main():
         after_tax_metrics=after_tax_metrics,
         tax_logs=tax_logs,
         tax_assumptions=tax_assumptions,
+        retirement=retirement,
     )
     print("  ✓ report.html")
 

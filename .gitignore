@@ -65,5 +65,7 @@ research/drawdowns.png
 research/rolling_sharpe.png
 research/rolling_3y_sharpe.png
 research/tax_drag_comparison.png
+research/retirement_mc.csv
+research/retirement_projection.png
 research/__pycache__/
 CLAUDE.md
