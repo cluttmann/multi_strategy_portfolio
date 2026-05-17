@@ -5847,6 +5847,12 @@ def rebalance_hfea(request):
     return rebalance_portfolio(api)
 
 
+@app.route("/monthly_nine_sig_contributions", methods=["POST"])
+def monthly_nine_sig_contributions(request):
+    api = set_alpaca_environment(env=alpaca_environment)
+    return make_monthly_nine_sig_contributions(api, env=alpaca_environment)
+
+
 @app.route("/quarterly_nine_sig_signal", methods=["POST"])
 def quarterly_nine_sig_signal(request):
     api = set_alpaca_environment(env=alpaca_environment)
