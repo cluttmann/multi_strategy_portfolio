@@ -245,7 +245,11 @@ steps:
   # Cloud Scheduler job have been deleted from GCP (cleanup completed 2026-05-17).
 
 # ─────────────────────────────────────────────────────────────────────────────
-# WAVE C — final 5 function deploys (start after Wave B completes).
+# WAVE C1 — 3 of the final 5 function deploys (start after Wave B completes).
+# Wave C used to deploy 5 in parallel, but build 5c2935ff (2026-05-17T16:22)
+# proved that 5 simultaneous inner Cloud Builds is at/over this project's
+# concurrency quota — one of the 5 sat queued for 8 min and EXPIRED. So the
+# final 5 are now split into Wave C1 (3 deploys) and Wave C2 (2 deploys).
 # ─────────────────────────────────────────────────────────────────────────────
 
   # Step 12: Deploy monthly_buy_aaa (7-Asset Rotator — momentum rotation across NTSD/SAA/EET/UBT/UST/UGL/DBC).
@@ -321,6 +325,10 @@ steps:
       - 'deploy-regime-sso'
       - 'deploy-regime-backfill'
 
+# ─────────────────────────────────────────────────────────────────────────────
+# WAVE C2 — final 2 function deploys (start after Wave C1 completes).
+# ─────────────────────────────────────────────────────────────────────────────
+
   # Step 15: Deploy the unified index_alert Cloud Function with Alpaca and Telegram settings
   - name: 'gcr.io/cloud-builders/gcloud'
     id: 'deploy-index-alert'
@@ -337,12 +345,9 @@ steps:
     - --memory=512MB
     - --set-env-vars=GOOGLE_CLOUD_PROJECT=1098661711782,GOOGLE_CLOUD_PROJECT_ID=trading-436516
     waitFor:
-      - 'deploy-dm'
-      - 'deploy-nine-sig-quarterly'
-      - 'deploy-spxl-200sma'
-      - 'deploy-regime-check'
-      - 'deploy-regime-sso'
-      - 'deploy-regime-backfill'
+      - 'deploy-aaa'
+      - 'deploy-f4'
+      - 'deploy-quarterly-f4'
 
   # Step 16: Deploy the audit_monthly_run watchdog (verifies the monthly orchestrator actually ran)
   - name: 'gcr.io/cloud-builders/gcloud'
@@ -360,12 +365,9 @@ steps:
     - --memory=512MB
     - --set-env-vars=GOOGLE_CLOUD_PROJECT=1098661711782,GOOGLE_CLOUD_PROJECT_ID=trading-436516
     waitFor:
-      - 'deploy-dm'
-      - 'deploy-nine-sig-quarterly'
-      - 'deploy-spxl-200sma'
-      - 'deploy-regime-check'
-      - 'deploy-regime-sso'
-      - 'deploy-regime-backfill'
+      - 'deploy-aaa'
+      - 'deploy-f4'
+      - 'deploy-quarterly-f4'
 
 # ─────────────────────────────────────────────────────────────────────────────
 # WAVE D — Cloud Scheduler (re)creation. Schedulers don't trigger inner Cloud
