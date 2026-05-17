@@ -181,51 +181,60 @@ steps:
     - --set-env-vars=GOOGLE_CLOUD_PROJECT=1098661711782,GOOGLE_CLOUD_PROJECT_ID=trading-436516
     waitFor: ['-']
 
-  # Step 5e: Deploy daily_regime_world_check (URTH 255-SMA + WLDU regime detector daily run)
-  - name: 'gcr.io/cloud-builders/gcloud'
-    args:
-    - functions
-    - deploy
-    - daily_regime_world_check
-    - --source=.
-    - --trigger-http
-    - --region=europe-west3
-    - --runtime=python310
-    - --timeout=540s
-    - --entry-point=daily_regime_world_check_route
-    - --memory=2048MB
-    - --set-env-vars=GOOGLE_CLOUD_PROJECT=1098661711782,GOOGLE_CLOUD_PROJECT_ID=trading-436516
-    waitFor: ['-']
+  # Steps 5e + 5f + 5g (daily_regime_world_check + monthly_buy_regime_world + backfill_regime_world_scores)
+  # removed 2026-05-12 — Regime World strategy discontinued, replaced by World 40/30/30 (F4) +
+  # 7-Asset Rotator (AAA). The deployed Cloud Functions and the daily_regime_world_check
+  # Cloud Scheduler job must be deleted from GCP separately (see ops cleanup).
 
-  # Step 5f: Deploy monthly_buy_regime_world (Regime World monthly contribution)
+  # Step 5h: Deploy monthly_buy_aaa (7-Asset Rotator — momentum rotation across NTSD/SAA/EET/UBT/UST/UGL/DBC).
+  # Called in-process by the monthly_invest_all orchestrator; deployed individually for manual/debug use.
   - name: 'gcr.io/cloud-builders/gcloud'
     args:
     - functions
     - deploy
-    - monthly_buy_regime_world
+    - monthly_buy_aaa
     - --source=.
     - --trigger-http
     - --region=europe-west3
     - --runtime=python310
     - --timeout=540s
-    - --entry-point=monthly_buy_regime_world
+    - --entry-point=monthly_buy_aaa
     - --memory=512MB
     - --set-env-vars=GOOGLE_CLOUD_PROJECT=1098661711782,GOOGLE_CLOUD_PROJECT_ID=trading-436516
     waitFor: ['-']
 
-  # Step 5g: Deploy backfill_regime_world_scores (one-shot history seeder for Regime World)
+  # Step 5i: Deploy monthly_buy_f4 (World 40/30/30 — drift-correcting monthly buys toward WLDU/GOLY/TLT).
+  # Called in-process by the monthly_invest_all orchestrator; deployed individually for manual/debug use.
   - name: 'gcr.io/cloud-builders/gcloud'
     args:
     - functions
     - deploy
-    - backfill_regime_world_scores
+    - monthly_buy_f4
     - --source=.
     - --trigger-http
     - --region=europe-west3
     - --runtime=python310
     - --timeout=540s
-    - --entry-point=backfill_regime_world_scores_route
-    - --memory=1024MB
+    - --entry-point=monthly_buy_f4
+    - --memory=512MB
+    - --set-env-vars=GOOGLE_CLOUD_PROJECT=1098661711782,GOOGLE_CLOUD_PROJECT_ID=trading-436516
+    waitFor: ['-']
+
+  # Step 5j: Deploy quarterly_rebalance_f4 (full F4 rebalance to exact 40/30/30 weights).
+  # NOT called by the monthly orchestrator — needs its own Cloud Scheduler (see scheduler section).
+  # Firestore idempotency marker (`quarterly-runs-{env}/f4-{quarter}`) makes repeated calls safe.
+  - name: 'gcr.io/cloud-builders/gcloud'
+    args:
+    - functions
+    - deploy
+    - quarterly_rebalance_f4
+    - --source=.
+    - --trigger-http
+    - --region=europe-west3
+    - --runtime=python310
+    - --timeout=540s
+    - --entry-point=quarterly_rebalance_f4_route
+    - --memory=512MB
     - --set-env-vars=GOOGLE_CLOUD_PROJECT=1098661711782,GOOGLE_CLOUD_PROJECT_ID=trading-436516
     waitFor: ['-']
 
@@ -472,32 +481,37 @@ steps:
         fi
     waitFor: ['-']
 
-  # Cloud Scheduler for the daily regime_world check (URTH/WLDU).
-  # Runs 35 min after market close (5 min after regime_sso) to avoid concurrent
-  # FinBERT model loads — the global news basket also needs slightly more time.
+  # Cloud Scheduler 'daily_regime_world_check' removed 2026-05-12 — Regime World strategy
+  # discontinued. The existing GCP scheduler job must be deleted manually (see ops cleanup).
+
+  # Cloud Scheduler for the F4 (World 40/30/30) quarterly rebalance.
+  # Fires day 1-7 of Jan/Apr/Jul/Oct at 15:00 ET — after the monthly orchestrator (12:00 ET),
+  # 9-Sig signal (13:00 ET), and HFEA quarterly rebalance (14:00 ET) so capital from any
+  # in-process F4 monthly drift-buy is settled before the full rebalance to exact 40/30/30.
+  # The function has its own Firestore idempotency marker (`quarterly-runs-{env}/f4-{quarter}`),
+  # so even if Cloud Scheduler retries or fires multiple days in a row, only the first call
+  # in a given quarter does work.
   - name: 'gcr.io/cloud-builders/gcloud'
     entrypoint: 'bash'
     args:
       - '-c'
       - |
-        if gcloud scheduler jobs describe daily_regime_world_check --location=europe-west3 >/dev/null 2>&1; then
-          gcloud scheduler jobs update http daily_regime_world_check \
-            --schedule='35 16 * * 1-5' \
-            --uri='https://europe-west3-trading-436516.cloudfunctions.net/daily_regime_world_check' \
+        if gcloud scheduler jobs describe quarterly_rebalance_f4 --location=europe-west3 >/dev/null 2>&1; then
+          gcloud scheduler jobs update http quarterly_rebalance_f4 \
+            --schedule='0 15 1-7 1,4,7,10 *' \
+            --uri='https://europe-west3-trading-436516.cloudfunctions.net/quarterly_rebalance_f4' \
             --http-method='POST' \
             --time-zone='America/New_York' \
             --location='europe-west3' \
-            --oidc-service-account-email='1098661711782-compute@developer.gserviceaccount.com' \
-            --attempt-deadline='300s'
+            --oidc-service-account-email='1098661711782-compute@developer.gserviceaccount.com'
         else
-          gcloud scheduler jobs create http daily_regime_world_check \
-            --schedule='35 16 * * 1-5' \
-            --uri='https://europe-west3-trading-436516.cloudfunctions.net/daily_regime_world_check' \
+          gcloud scheduler jobs create http quarterly_rebalance_f4 \
+            --schedule='0 15 1-7 1,4,7,10 *' \
+            --uri='https://europe-west3-trading-436516.cloudfunctions.net/quarterly_rebalance_f4' \
             --http-method='POST' \
             --time-zone='America/New_York' \
             --location='europe-west3' \
-            --oidc-service-account-email='1098661711782-compute@developer.gserviceaccount.com' \
-            --attempt-deadline='300s'
+            --oidc-service-account-email='1098661711782-compute@developer.gserviceaccount.com'
         fi
     waitFor: ['-']
 
