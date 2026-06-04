@@ -33,7 +33,7 @@ After full Wave 7/8 backtests + Monte Carlo + tax-aware analysis, the portfolio 
 | Regime SSO | ≤ 12% | Medium turnover (SSO↔USFR) |
 | 7-Asset Rotator | ≤ 15% | High turnover (monthly 7-asset rotation, top-3 selection) |
 | DM 2× best-of-3 | ≤ 20% | Medium turnover (monthly winner selection from 3 candidates) |
-| 9-Sig | ~ 5% | Highest MaxDD (-93%); deliberately small |
+| 9-Sig | ~ 5% | Highest MaxDD (-98%); deliberately small |
 | World 40/30/30 | 18% | Lowest turnover (quarterly, 3 fixed assets) — gets the largest single weight |
 
 ## Overview of the Strategies
@@ -241,13 +241,13 @@ The basic premise of this strategy is that when the S&P 500 index is above its 2
 ### 5. 9-Sig Strategy (Jason Kelly Methodology)
 
 #### **Strategy Overview:**
-The 9-Sig strategy is based on Jason Kelly's methodology from his book "The 3% Signal". It's a systematic approach to managing a TQQQ (3x leveraged NASDAQ-100) and AGG (iShares Core U.S. Aggregate Bond ETF) portfolio with built-in crash protection. The strategy aims for 9% quarterly growth while maintaining an 80/20 allocation between TQQQ and AGG.
+The 9-Sig strategy is based on Jason Kelly's methodology from his book "The 3% Signal". It's a systematic approach to managing a TQQQ (3x leveraged NASDAQ-100) and AGG (iShares Core U.S. Aggregate Bond ETF) portfolio with built-in crash protection. The strategy aims for 9% quarterly growth while maintaining the canonical **60/40** allocation between TQQQ and AGG.
 
 #### **Key Components:**
 
 **Target Allocation:**
-- **80% TQQQ**: 3x leveraged NASDAQ-100 ETF for growth
-- **20% AGG**: Bond ETF for stability and crash protection
+- **60% TQQQ**: 3x leveraged NASDAQ-100 ETF for growth
+- **40% AGG**: Bond ETF for stability and crash protection
 
 **Monthly Contributions (First Trading Day of Month):**
 - **ALL** monthly contributions go to AGG bonds only
@@ -262,24 +262,27 @@ Signal Line = Previous TQQQ Balance × 1.09 + (Half of Quarterly Contributions)
 ```
 
 **Rebalancing Logic:**
-- **BUY Signal**: When Current TQQQ < Signal Line → Sell AGG, Buy TQQQ
-- **SELL Signal**: When Current TQQQ > Signal Line → Sell TQQQ, Buy AGG  
-- **HOLD Signal**: When within $25 tolerance of signal line → No action
-- **First Quarter**: Signal line set to 80% of total portfolio value
+- **BUY Signal**: When Current TQQQ < Signal Line → Sell AGG, Buy TQQQ. Clamped by two safety valves: the buy may spend at most **90% of the bond holdings** (buying-power throttle) and **bonds never fall below 10% of NAV** (bond floor).
+- **SELL Signal**: When Current TQQQ > Signal Line → Sell TQQQ, Buy AGG
+- **HOLD Signal**: When within a **2.5%-of-NAV** tolerance band of the signal line → No action
+- **First Quarter**: Signal line set to 60% of total portfolio value
 
 **Crash Protection - "30 Down, Stick Around" Rule:**
-- When SPY drops >30% from all-time high, the strategy ignores the first 4 SELL signals
+- When **TQQQ** (the stock ETF) closes ≥30% below its **rolling 8-quarter (~2-year) high**, the strategy ignores the first **2** SELL signals
 - This prevents selling during major market crashes
-- After 4 ignored signals, normal operation resumes
+- After 2 ignored signals (while still in the 30-down), it performs a **base reset** — snap back to 60/40 and re-baseline the signal line
+
+**Spike Reset:**
+- If TQQQ gains **≥100% in a quarter** while held above 60% of NAV (and not in a 30-down), the position is reset to 60% of NAV — caps a runaway signal line after a parabolic move. (Historically rare; never triggered in backtest.)
 
 #### **Example Scenarios:**
 
 **First Quarter:**
 ```
 Starting: $0 TQQQ, $30.75 AGG (from 3 months of contributions)
-Signal Line: $24.60 (80% of total portfolio)
-Action: BUY $24.60 worth of TQQQ
-Result: $24.60 TQQQ, $6.15 AGG (80/20 allocation)
+Signal Line: $18.45 (60% of total portfolio)
+Action: BUY $18.45 worth of TQQQ
+Result: $18.45 TQQQ, $12.30 AGG (60/40 allocation)
 ```
 
 **Normal BUY Signal:**
@@ -430,7 +433,7 @@ Backtest engine: `research/mega_backtest.py`. Promotion-decision analyses (corre
 
 ### Deterministic Backtest (single historical path)
 
-Per-strategy native-window metrics from the 2026-05-12 unified backtest. Each strategy is evaluated on its longest available data window.
+Per-strategy native-window metrics from the 2026-05-12 unified backtest. Each strategy is evaluated on its longest available data window. **The 9-Sig row (and the dependent aggregate) were refreshed 2026-06-04** after the textbook 60/40 correction — 9-Sig CAGR fell 26.0%→18.7% and Sharpe 0.54→0.35 vs the old (implicitly aggressive) 80/20 implementation; see the 9-Sig section above.
 
 | Strategy | Weight | Native window | CAGR | Vol | Sharpe | Max DD | Worst Yr |
 |---|---:|---|---:|---:|---:|---:|---:|
@@ -439,19 +442,19 @@ Per-strategy native-window metrics from the 2026-05-12 unified backtest. Each st
 | **World 40/30/30** (new) | **18%** | 2002-2026 (24y) | 12.22% | **15.12%** | **0.68** | -43.37% | -27.91% |
 | DM 2× best-of-3 | 20% | 1987-2026 (39y) | **17.49%** | 23.65% | 0.66 | -39.20% | -26.34% |
 | HFEA | 15% | 1988-2026 (38y) | 18.53% | 28.93% | 0.57 | -65.50% | -41.74% |
-| 9-Sig | 5% | 1987-2026 (39y) | **26.01%** | 44.11% | 0.54 | -93.08% | -85.07% |
+| 9-Sig | 5% | 1987-2026 (39y) | 18.65% | 48.05% | 0.35 | -98.42% | -80.19% |
 | SPXL SMA | 15% | 1970-2026 (56y) | 17.77% | 34.86% | 0.45 | -56.19% | -41.01% |
-| **AGGREGATE (deployed, partial-coverage)** | **100%** | 1970-2026 (56y) | **18.65%** | 25.81% | **0.65** | -48.66% | -40.35% |
+| **AGGREGATE (deployed, partial-coverage)** | **100%** | 1970-2026 (56y) | **17.83%** | 25.24% | **0.63** | -48.66% | -40.35% |
 | 100% SPY (benchmark) | — | 1970-2026 (56y) | 11.02% | 17.26% | 0.52 | -55.19% | -36.79% |
 | 100% URTH MSCI World (benchmark) | — | 1970-2026 (56y) | 9.88% | 15.59% | 0.51 | -57.82% | -40.72% |
 
 The aggregate is computed with **partial coverage**: at any date, only deployed strategies with available history contribute (weights renormalize). Earliest aggregate data point is 1970-01-02 using SPXL SMA + Regime SSO + DM 2×; the full 7-sleeve aggregate is available from ~2006 onward.
 
 **Key observations:**
-- **Aggregate Sharpe 0.65 over 56 years** is strong despite the long window catching the 1973-74 oil shock, 1980 Volcker recession, 2000-02 dot-com bear, 2008 GFC, 2022 inflation, etc.
-- vs SPY: **+7.6pp CAGR, +0.13 Sharpe**, comparable tail risk
-- vs MSCI World: **+8.8pp CAGR, +0.14 Sharpe**, comparable tail risk
-- $1 → $15,400+ (deployed aggregate) vs $361 (SPY) vs $202 (MSCI World) over 56 years
+- **Aggregate Sharpe 0.63 over 56 years** is strong despite the long window catching the 1973-74 oil shock, 1980 Volcker recession, 2000-02 dot-com bear, 2008 GFC, 2022 inflation, etc.
+- vs SPY: **+6.8pp CAGR, +0.11 Sharpe**, comparable tail risk
+- vs MSCI World: **+7.9pp CAGR, +0.12 Sharpe**, comparable tail risk
+- $1 → $10,500+ (deployed aggregate) vs $370 (SPY) vs $205 (MSCI World) over 56 years
 
 ### Distribution & tail-risk statistics (2026-05-12 additions)
 
@@ -464,9 +467,9 @@ Added with the final shortlist evaluation: skew, excess kurtosis (Fisher), month
 | World 40/30/30 | -0.51 | 1.40 | -6.6% | -9.4% | -39.8% | -23.8% | -5.5% | 714 (2.8y) |
 | DM 2× best-of-3 | -0.17 | 0.75 | -8.9% | -12.3% | -29.8% | -37.4% | -11.5% | 1072 (4.3y) |
 | HFEA | -0.19 | 1.54 | -11.4% | -15.9% | -57.9% | -57.0% | -49.0% | 1209 (4.8y) |
-| 9-Sig | +0.18 | 2.42 | -15.5% | -24.7% | -88.8% | -87.4% | -84.3% | 1472 (5.8y) |
+| 9-Sig | +0.03 | 1.55 | -18.4% | -28.1% | -87.5% | -96.7% | -92.6% | 4973 (19.7y) |
 | SPXL SMA | +0.16 | 1.21 | -14.1% | -19.6% | -48.6% | -55.5% | -41.2% | 1710 (6.8y) |
-| AGGREGATE (deployed) | +0.45 | 3.76 | -10.2% | -14.7% | -43.3% | -38.7% | -30.3% | 863 (3.4y) |
+| AGGREGATE (deployed) | +0.46 | 3.90 | -9.7% | -14.6% | -43.3% | -38.7% | -30.3% | 950 (3.8y) |
 
 ⭐ = best-in-class. **The 7-Asset Rotator has never had a losing 3-year period and has never had a losing 5-year period in 20 years.**
 
@@ -478,12 +481,12 @@ Per-strategy bootstrap on each strategy's native window — Politis-Romano stati
 
 | Strategy | vs SPY (CAGR) | vs SPY (Sharpe) | vs SPY (MaxDD) | vs URTH (CAGR) | vs URTH (Sharpe) |
 |---|---:|---:|---:|---:|---:|
-| **AGGREGATE (deployed)** | **99.8%** | **83.2%** | 17.8% | **99.8%** | **82.9%** |
+| **AGGREGATE (deployed)** | **99.7%** | **76.9%** | 17.6% | **99.9%** | **78.3%** |
 | 7-Asset Rotator | 84.8% | 82.2% | **87.9%** | 94.2% | 91.8% |
 | Regime SSO | 77.1% | 79.3% | **87.0%** | 92.6% | 89.5% |
 | HFEA | 99.1% | 65.5% | 2.3% | 100.0% | 91.7% |
 | DM 2× best-of-3 | 98.7% | 88.4% | 58.3% | 99.9% | 96.7% |
-| 9-Sig | 98.5% | 64.0% | 0.1% | 99.2% | 84.2% |
+| 9-Sig | 85.8% | 9.2% | 0.0% | 91.3% | 32.6% |
 | SPXL SMA | 95.2% | 22.5% | 1.6% | 96.4% | 27.3% |
 | World 40/30/30 | 30.9% | 28.5% | 56.2% | 80.0% | 72.0% |
 
@@ -832,11 +835,12 @@ margin_control_config = {
 
 **9-Sig Strategy:**
 - Portfolio allocation: **5%** of total monthly investment
-- Target allocation: TQQQ 80%, AGG 20%
+- Target allocation: TQQQ 60%, AGG 40% (Kelly canonical)
 - Quarterly growth target: 9%
 - Monthly contributions: 100% to AGG (bonds)
-- Signal tolerance: $25 (minimum trade amount)
-- Crash protection: "30 Down, Stick Around" rule (ignores first 4 sell signals when SPY down >30% from ATH)
+- Signal tolerance: 2.5% of sleeve NAV (micro-trade guard)
+- Crash protection: 30-down on TQQQ vs rolling 8-quarter high, ignore 2 sells then base-reset; 90% buy throttle + 10% bond floor; spike reset on TQQQ +100%/quarter
+- Crash protection: "30 Down, Stick Around" rule (ignores first 2 sell signals when TQQQ ≥30% below its rolling 8-quarter high, then base-resets to 60/40)
 - Bond rebalancing threshold: 30% (triggers rebalancing when AGG exceeds this)
 
 **Dual Momentum Strategy (best-of-3):**

@@ -64,10 +64,18 @@ margin = 0.01  # band around the 200sma to avoid too many trades
 
 # 9-sig strategy configuration following Jason Kelly's methodology
 nine_sig_config = {
-    "target_allocation": {"tqqq": 0.8, "agg": 0.2},  # 80/20 target allocation
-    "quarterly_growth_rate": 0.09,  # 9% quarterly growth target
-    "bond_rebalance_threshold": 0.30,  # Rebalance when AGG > 30%
-    "tolerance_amount": 25,  # Minimum trade amount to avoid tiny trades
+    "target_allocation": {"tqqq": 0.60, "agg": 0.40},  # 60/40 anchor + base-reset target (Kelly canonical)
+    "quarterly_growth_rate": 0.09,        # 9% quarterly growth target
+    "signal_drawdown_threshold": 0.30,    # 30-Down: TQQQ close ≤ 70% of its rolling 8-quarter high
+    "signal_lookback_quarters": 8,        # rolling 2-year window for the 30-down high
+    "max_sell_ignores": 2,                # Kelly 4→2: ignore at most 2 consecutive sell signals in a 30-down
+    "spike_gain_threshold": 1.00,         # TQQQ +100% in a quarter → reset to 60%
+    "buying_power_throttle": 0.90,        # a BUY may spend at most 90% of the bond holdings
+    "bond_floor_pct": 0.10,               # bonds never drop below 10% of NAV
+    "tolerance_pct": 0.025,               # hold band = 2.5% of sleeve NAV (micro-trade guard)
+    # NOTE: a bond-drift base reset (snap to 60/40 when AGG drifts above a band) was
+    # considered but dropped — the plan's 0.30 threshold is the legacy 80/20 number and
+    # there is no clear canonical 60/40 value. Only the 30-down base reset + sell-to-signal remain.
 }
 
 # ─── 7-Asset Rotator (AAA family) strategy configuration ───────────────
@@ -1126,41 +1134,61 @@ def get_quarterly_nine_sig_contributions(env="live"):
         return 0  # Return 0 for local testing without Firestore
 
 
-def check_spy_30_down_rule():
-    """Check if SPY has dropped 30% from its 2-year all-time high."""
+def check_30_down_rule():
+    """Check if TQQQ has dropped ≥30% from its rolling 8-quarter (~2-year) high.
+
+    Canonical Kelly "30 Down, Stick Around" trigger: the *stock ETF* (TQQQ),
+    not the index, drops 30%+ from its rolling 8-quarter high. The 730-calendar-day
+    bar window ≈ the rolling 8-quarter (504-trading-day) lookback the spec calls for.
+    """
     try:
         api = set_alpaca_environment(env=alpaca_environment)
-        bars = get_alpaca_historical_bars(api, "SPY", days=730)
+        bars = get_alpaca_historical_bars(api, "TQQQ", days=730)
 
         if not bars or len(bars) < 10:
-            print(f"Insufficient SPY data for 30-down rule")
+            print(f"Insufficient TQQQ data for 30-down rule")
             return False
 
-        # bars are closing prices; use max as proxy for ATH
-        all_time_high = max(bars)
+        # bars are closing prices; max over the rolling window = the 8-quarter high
+        rolling_high = max(bars)
         current_close = bars[-1]
-        drop_percentage = (all_time_high - current_close) / all_time_high
-        return drop_percentage >= 0.30
+        drop_percentage = (rolling_high - current_close) / rolling_high
+        return drop_percentage >= nine_sig_config["signal_drawdown_threshold"]
 
     except Exception as e:
-        print(f"Error checking SPY 30 down rule: {e}")
+        print(f"Error checking TQQQ 30 down rule: {e}")
         return False
 
 
 def count_ignored_sell_signals(env="live"):
     """
-    Count how many sell signals have been ignored in the current crash protection period.
-    
+    Count *consecutive* ignored sell signals since the last streak-ending action.
+
+    Canonical "30 Down, Stick Around" counts an unbroken run of ignored sells.
+    The streak resets on any real SELL or any RESET action (base/spike reset);
+    intervening HOLD / BUY quarters do not break it (you can still be inside the
+    same crash episode). This is robust to gaps, unlike counting the last N
+    SELL_IGNORED docs.
+
     Args:
         env: Environment ("live" or "paper") - determines Firestore collection
-    
+
     Returns:
-        Number of ignored sell signals (0-4)
+        Number of consecutive ignored sell signals.
     """
+    streak_breakers = {"SELL", "BASE_RESET_30DOWN", "SPIKE_RESET"}
     try:
-        # Get recent quarters with ignored sell signals
-        docs = get_firestore_client().collection(f"nine-sig-quarters-{env}").where("action_taken", "==", "SELL_IGNORED").order_by("timestamp", direction=firestore.Query.DESCENDING).limit(4).stream()
-        return len(list(docs))
+        docs = get_firestore_client().collection(f"nine-sig-quarters-{env}").order_by(
+            "timestamp", direction=firestore.Query.DESCENDING
+        ).limit(20).stream()
+        streak = 0
+        for doc in docs:
+            action = doc.to_dict().get("action_taken", "")
+            if action in streak_breakers:
+                break
+            if action == "SELL_IGNORED":
+                streak += 1
+        return streak
     except Exception as e:
         print(f"Error counting ignored sell signals: {e}")
         return 0
@@ -1970,8 +1998,102 @@ def rebalance_portfolio(api):
     return "Rebalance executed."
 
 
+def _nine_sig_available_shares(api, symbol):
+    """Available shares for a symbol, honoring pending-order / unsettled holds.
+
+    Alpaca's position object exposes free shares as ``qty_available``; we fall
+    back to ``available`` then ``qty`` so a schema quirk never makes us overshoot.
+    """
+    pos = next((p for p in list_positions(api) if p.get("symbol") == symbol), None)
+    if not pos:
+        return 0.0
+    for field in ("qty_available", "available", "qty"):
+        val = pos.get(field)
+        if val not in (None, ""):
+            try:
+                return float(val)
+            except (TypeError, ValueError):
+                continue
+    return 0.0
+
+
+def _nine_sig_tqqq_quarterly_gain(api):
+    """TQQQ price change over ~one quarter (for the quarter-end spike-reset check).
+
+    Returns the fractional gain (e.g. 1.0 = +100%) or None if data is missing.
+    """
+    try:
+        bars = get_alpaca_historical_bars(api, "TQQQ", days=95)
+        if not bars or len(bars) < 20:
+            return None
+        start, end = bars[0], bars[-1]
+        if start <= 0:
+            return None
+        return (end / start) - 1.0
+    except Exception as e:
+        print(f"Could not compute TQQQ quarterly gain: {e}")
+        return None
+
+
+def _nine_sig_rebalance_to_target(api, current_tqqq_value, current_agg_value, target_tqqq_value):
+    """Rebalance the TQQQ/AGG split toward ``target_tqqq_value`` via one sell + one buy.
+
+    Returns ``(executed_value, note)``. Honors available shares so a pending-order
+    hold or non-settled cash can only ever produce a smaller (partial) trade,
+    never an overshoot. The residual self-corrects next quarter via the signal line.
+    """
+    delta = target_tqqq_value - current_tqqq_value
+    tqqq_price = float(get_latest_trade(api, "TQQQ"))
+    agg_price = float(get_latest_trade(api, "AGG"))
+    if tqqq_price <= 0 or agg_price <= 0:
+        return 0.0, "no price available — skipped"
+
+    if delta > 0:
+        # Buy TQQQ, funded by selling AGG.
+        avail_agg_shares = _nine_sig_available_shares(api, "AGG")
+        agg_shares_to_sell = min(delta / agg_price, avail_agg_shares)
+        spend = agg_shares_to_sell * agg_price
+        if spend <= 0:
+            return 0.0, "no AGG available to fund buy"
+        sell_order = submit_order(api, "AGG", agg_shares_to_sell, "sell")
+        wait_for_order_fill(api, sell_order["id"])
+        buy_order = submit_order(api, "TQQQ", spend / tqqq_price, "buy")
+        wait_for_order_fill(api, buy_order["id"])
+        return spend, f"bought ${spend:.2f} TQQQ (sold AGG)"
+
+    # delta < 0: sell TQQQ, proceeds into AGG.
+    need = -delta
+    avail_tqqq_shares = _nine_sig_available_shares(api, "TQQQ")
+    tqqq_shares_to_sell = min(need / tqqq_price, avail_tqqq_shares)
+    sell_value = tqqq_shares_to_sell * tqqq_price
+    if sell_value <= 0:
+        return 0.0, "no TQQQ available to sell"
+    sell_order = submit_order(api, "TQQQ", tqqq_shares_to_sell, "sell")
+    wait_for_order_fill(api, sell_order["id"])
+    buy_order = submit_order(api, "AGG", sell_value / agg_price, "buy")
+    wait_for_order_fill(api, buy_order["id"])
+    return sell_value, f"sold ${sell_value:.2f} TQQQ (bought AGG)"
+
+
 def execute_quarterly_nine_sig_signal(api, force_execute=False, env="live"):
-    """Execute quarterly 9-sig signal following Jason Kelly's exact 5-step process"""
+    """Execute the quarterly 9-Sig signal — Jason Kelly canonical (60/40 TQQQ/AGG).
+
+    The carried state is the post-trade TQQQ balance (``previous_tqqq_balance``);
+    next quarter's signal line is recomputed from it, so a "reset" simply means
+    writing a re-baselined post-trade TQQQ balance (60% of NAV).
+
+    Decision tree:
+      1. Signal line = prev_tqqq × 1.09 + ½ contributions (first quarter: 60% of NAV).
+      2. SPIKE RESET — TQQQ +100% over the quarter AND currently >60% of NAV AND not
+         in a 30-down episode → sell down to 60% of NAV (caps a runaway signal line).
+      3. SELL candidate (TQQQ > signal + tol):
+           • 30-down active AND ignore-streak < max  → SELL_IGNORED (hold).
+           • 30-down active AND ignore-streak == max → BASE_RESET_30DOWN to 60/40.
+           • else normal SELL to the signal line.
+      4. BUY candidate (TQQQ < signal - tol): buy toward the signal line, clamped by
+         the 90% bond throttle AND the 10% bond floor.
+      5. |diff| <= tol → HOLD.
+    """
     if not force_execute and not check_trading_day(mode="quarterly"):
         print("Not first trading day of the quarter")
         return "Not first trading day of the quarter"
@@ -1984,296 +2106,124 @@ def execute_quarterly_nine_sig_signal(api, force_execute=False, env="live"):
     if force_execute:
         print("9-Sig: Force execution enabled - bypassing trading day check")
         send_telegram_message("9-Sig: Force execution enabled for testing - bypassing trading day check")
-    
+
     try:
-        # Step 1: Get current positions
+        # ── Step 1: current positions / sleeve NAV ────────────────────────
         positions = {p["symbol"]: float(p["market_value"]) for p in list_positions(api)}
         current_tqqq_balance = positions.get("TQQQ", 0)
         current_agg_balance = positions.get("AGG", 0)
-        total_portfolio = current_tqqq_balance + current_agg_balance
-        
-        print(f"\n=== 9-Sig Quarterly Rebalancing ===")
-        print(f"Current TQQQ balance: ${current_tqqq_balance:.2f}")
-        print(f"Current AGG balance: ${current_agg_balance:.2f}")
-        print(f"Total portfolio: ${total_portfolio:.2f}")
-        
-        # Step 1: Determine the Quarter's Signal Line
+        nav = current_tqqq_balance + current_agg_balance
+
+        target_tqqq_pct = nine_sig_config["target_allocation"]["tqqq"]   # 0.60
+        anchor_tqqq_value = nav * target_tqqq_pct                        # snap-to-60% target
+
+        print(f"\n=== 9-Sig Quarterly Rebalancing (60/40 canonical) ===")
+        print(f"Current TQQQ: ${current_tqqq_balance:.2f}  AGG: ${current_agg_balance:.2f}  NAV: ${nav:.2f}")
+
+        # ── Step 2: signal line ───────────────────────────────────────────
         previous_tqqq_balance = get_previous_quarter_tqqq_balance(env=env)
-        
-        # Get actual contributions made during this quarter (dynamic amounts)
         quarterly_contributions = get_quarterly_nine_sig_contributions(env=env)
         half_quarterly_contributions = quarterly_contributions * 0.5
-        
-        print(f"Previous quarter TQQQ balance: ${previous_tqqq_balance:.2f}")
-        print(f"Quarterly contributions: ${quarterly_contributions:.2f}")
-        print(f"Half quarterly contributions: ${half_quarterly_contributions:.2f}")
-        
-        # Signal Line = Previous TQQQ Balance × 1.09 + (Half of Quarterly Contributions)
-        if previous_tqqq_balance == 0 and total_portfolio > 0:
-            # First quarter: Set signal line as 80% of total portfolio
-            signal_line = total_portfolio * nine_sig_config["target_allocation"]["tqqq"]
-            print(f"First quarter initialization - setting signal line as 80% of total portfolio")
-            send_telegram_message("9-Sig: First quarter initialization - setting 80/20 target allocation")
+        is_first_quarter = (previous_tqqq_balance == 0 and nav > 0)
+
+        if is_first_quarter:
+            signal_line = anchor_tqqq_value
+            print(f"First quarter initialization — signal line = 60% of NAV = ${signal_line:.2f}")
+            send_telegram_message("9-Sig: First quarter initialization — 60/40 TQQQ/AGG target")
         else:
             signal_line = (previous_tqqq_balance * (1 + nine_sig_config["quarterly_growth_rate"])) + half_quarterly_contributions
-            print(f"Signal line calculation: ${previous_tqqq_balance:.2f} × 1.09 + ${half_quarterly_contributions:.2f} = ${signal_line:.2f}")
-        
-        print(f"Signal line: ${signal_line:.2f}")
-        
-        # Step 2: Determine Action (Buy, Sell, or Hold)
+            print(f"Signal line = ${previous_tqqq_balance:.2f} × 1.09 + ${half_quarterly_contributions:.2f} = ${signal_line:.2f}")
+
         difference = current_tqqq_balance - signal_line
-        tolerance = nine_sig_config["tolerance_amount"]
-        print(f"Difference (TQQQ - Signal Line): ${difference:.2f}")
-        print(f"Tolerance: ${tolerance:.2f}")
-        
-        # Step 3: Execute the Trade
-        if abs(difference) < tolerance:
+        tolerance = nav * nine_sig_config["tolerance_pct"]
+        current_tqqq_pct = current_tqqq_balance / nav if nav > 0 else 0
+        print(f"Difference (TQQQ − signal): ${difference:.2f}   tolerance (2.5% NAV): ${tolerance:.2f}")
+
+        # 30-down state (TQQQ ≤ 70% of its rolling 8-quarter high) + consecutive ignores
+        thirty_down = check_30_down_rule()
+        ignore_streak = count_ignored_sell_signals(env=env)
+        print(f"30-down (TQQQ): {thirty_down}   consecutive ignored sells: {ignore_streak}")
+
+        # ── Step 3: decide action + post-trade TQQQ target ────────────────
+        action = None
+        target_tqqq_value = current_tqqq_balance  # default = no change
+
+        spike_gain = None if is_first_quarter else _nine_sig_tqqq_quarterly_gain(api)
+        spike_triggered = (
+            spike_gain is not None
+            and spike_gain >= nine_sig_config["spike_gain_threshold"]
+            and current_tqqq_pct > target_tqqq_pct
+            and not thirty_down
+        )
+
+        if spike_triggered:
+            action = "SPIKE_RESET"
+            target_tqqq_value = anchor_tqqq_value
+            print(f"SPIKE RESET — TQQQ +{spike_gain:.0%} this quarter, {current_tqqq_pct:.0%} of NAV → reset to 60%")
+
+        elif abs(difference) <= tolerance:
             action = "HOLD"
-            print(f"Action: HOLD - TQQQ balance within tolerance of signal line")
-            send_telegram_message(f"9-Sig: HOLD - TQQQ ${current_tqqq_balance:.2f} within tolerance of signal line ${signal_line:.2f}")
-            
+            print("Action: HOLD — TQQQ within 2.5% NAV of the signal line")
+
         elif difference < 0:
-            # BUY Signal: Need more TQQQ
-            amount_to_buy = abs(difference)
-            action = "BUY"
-            print(f"Action: BUY - Need ${amount_to_buy:.2f} more TQQQ to reach signal line")
-            
-            # Step 4: Check for bond rebalancing threshold (30% rule from README)
-            # If current AGG exceeds 30% threshold, rebalance down to 20% target during BUY signals
-            current_agg_percentage = current_agg_balance / total_portfolio if total_portfolio > 0 else 0
-            bond_rebalance_threshold = nine_sig_config["bond_rebalance_threshold"]
-            target_agg_percentage = nine_sig_config["target_allocation"]["agg"]
-            
-            print(f"Current AGG percentage: {current_agg_percentage:.1%} (threshold: {bond_rebalance_threshold:.1%}, target: {target_agg_percentage:.1%})")
-            
-            # Calculate what portfolio would look like after signal line buy
-            projected_tqqq_after_signal = current_tqqq_balance + amount_to_buy
-            projected_agg_after_signal = current_agg_balance - amount_to_buy
-            projected_total_after_signal = projected_tqqq_after_signal + projected_agg_after_signal
-            projected_agg_percentage_after_signal = projected_agg_after_signal / projected_total_after_signal if projected_total_after_signal > 0 else 0
-            
-            print(f"After signal line buy: AGG would be ${projected_agg_after_signal:.2f} ({projected_agg_percentage_after_signal:.1%})")
-            
-            # Check if bond rebalancing is needed (either current AGG > 30% OR projected AGG > 20% target)
-            # Special handling for first quarter: signal line is already set to 80% of portfolio, which naturally results in 20% AGG
-            needs_rebalancing = False
-            excess_agg = 0
-            
-            # For first quarter initialization, signal line = 80% of portfolio, so buying to signal line naturally achieves 80/20
-            # Only need additional rebalancing if projected AGG would still be above target after signal buy
-            is_first_quarter = (previous_tqqq_balance == 0 and total_portfolio > 0)
-            
-            if is_first_quarter:
-                # First quarter: signal line is 80% of portfolio, so buying to signal line should naturally result in 20% AGG
-                # Check if projected AGG after signal buy would be exactly 20% (as expected) or higher
-                if projected_agg_percentage_after_signal > target_agg_percentage:
-                    # This shouldn't happen in first quarter, but handle it if it does
-                    target_agg_balance = projected_total_after_signal * target_agg_percentage
-                    excess_agg = projected_agg_after_signal - target_agg_balance
-                    needs_rebalancing = True
-                    print(f"First quarter: Projected AGG ({projected_agg_percentage_after_signal:.1%}) would exceed {target_agg_percentage:.1%} target - adding rebalance")
-                else:
-                    print(f"First quarter: Signal line buy will naturally achieve {target_agg_percentage:.1%} AGG target - no additional rebalancing needed")
-            elif current_agg_percentage > bond_rebalance_threshold:
-                # AGG exceeds 30% threshold - rebalance down to 20% target
-                target_agg_balance = projected_total_after_signal * target_agg_percentage
-                excess_agg = projected_agg_after_signal - target_agg_balance
-                needs_rebalancing = True
-                print(f"Bond rebalancing triggered: Current AGG ({current_agg_percentage:.1%}) exceeds {bond_rebalance_threshold:.1%} threshold")
-            elif projected_agg_percentage_after_signal > target_agg_percentage:
-                # AGG would still be above 20% target after signal buy - rebalance to target
-                target_agg_balance = projected_total_after_signal * target_agg_percentage
-                excess_agg = projected_agg_after_signal - target_agg_balance
-                needs_rebalancing = True
-                print(f"Bond rebalancing needed: Projected AGG ({projected_agg_percentage_after_signal:.1%}) would exceed {target_agg_percentage:.1%} target")
-            
-            if needs_rebalancing and excess_agg > 0:
-                amount_to_buy += excess_agg
-                print(f"Adding ${excess_agg:.2f} to buy amount to rebalance AGG to {target_agg_percentage:.1%}")
-                print(f"Total buy amount: ${amount_to_buy:.2f} (signal: ${abs(difference):.2f} + rebalance: ${excess_agg:.2f})")
-                send_telegram_message(f"9-Sig: Bond rebalancing - Adding ${excess_agg:.2f} to buy amount to reach {target_agg_percentage:.1%} AGG target")
+            # BUY toward the signal line, clamped by the 90% throttle + 10% floor.
+            deficit = -difference
+            throttle_cap = nine_sig_config["buying_power_throttle"] * current_agg_balance
+            floor_cap = current_agg_balance - nine_sig_config["bond_floor_pct"] * nav
+            max_buy = max(0.0, min(deficit, throttle_cap, floor_cap))
+            target_tqqq_value = current_tqqq_balance + max_buy
+            if max_buy <= 0:
+                action = "HOLD_BOND_FLOOR"
+                print(f"Action: HOLD_BOND_FLOOR — deficit ${deficit:.2f} but throttle/floor binding (no buy)")
             else:
-                print(f"Signal line buy will naturally rebalance AGG to target - no additional rebalancing needed")
-            
-            print(f"Required AGG to sell: ${amount_to_buy:.2f}, Available AGG balance: ${current_agg_balance:.2f}")
-            
-            # Check available shares (excluding held for orders, unsettled, etc.)
-            positions = list_positions(api)
-            agg_position = next((p for p in positions if p.get("symbol") == "AGG"), None)
-            
-            # Check for pending orders that might be holding shares
-            try:
-                pending_orders = get_pending_orders(api, "AGG")
-                if pending_orders:
-                    print(f"Found {len(pending_orders)} pending AGG orders:")
-                    for order in pending_orders:
-                        print(f"  Order {order.get('id')}: {order.get('side')} {order.get('qty')} shares (status: {order.get('status')})")
-                    print("Note: Shares held for pending orders are not available for new trades")
-            except Exception as e:
-                print(f"Could not check pending orders: {e}")
-            
-            if agg_position:
-                # Get available shares (qty_available field from Alpaca)
-                available_agg_shares = float(agg_position.get("qty_available", 0))
-                qty = float(agg_position.get("qty", 0))
-                print(f"AGG position: {qty} total shares, {available_agg_shares} available")
-            else:
-                available_agg_shares = 0
-                print("No AGG position found")
-            
-            agg_price = float(get_latest_trade(api, "AGG"))
-            available_agg_value = available_agg_shares * agg_price if agg_price > 0 else 0
-            
-            print(f"Available AGG: {available_agg_shares:.6f} shares (value: ${available_agg_value:.2f})")
-            
-            # Use available shares if less than required, but only if we have at least some available
-            if available_agg_value > 0 and available_agg_value < amount_to_buy:
-                print(f"Warning: Only ${available_agg_value:.2f} AGG available (need ${amount_to_buy:.2f})")
-                print(f"Adjusting buy amount to available funds for cold start scenario")
-                amount_to_buy = available_agg_value
-                print(f"Adjusted buy amount: ${amount_to_buy:.2f}")
-            
-            if current_agg_balance >= amount_to_buy and available_agg_value >= amount_to_buy:
-                # Execute buy trade
-                print("Executing BUY trade...")
-                tqqq_price = float(get_latest_trade(api, "TQQQ"))
-                
-                agg_shares_to_sell = amount_to_buy / agg_price
-                tqqq_shares_to_buy = amount_to_buy / tqqq_price
-                
-                # Ensure we don't try to sell more shares than available
-                if agg_shares_to_sell > available_agg_shares:
-                    print(f"Adjusting: Can only sell {available_agg_shares:.6f} shares (requested {agg_shares_to_sell:.6f})")
-                    agg_shares_to_sell = available_agg_shares
-                    amount_to_buy = agg_shares_to_sell * agg_price
-                    tqqq_shares_to_buy = amount_to_buy / tqqq_price
-                    print(f"Adjusted: Selling {agg_shares_to_sell:.6f} AGG shares for ${amount_to_buy:.2f}")
-                
-                print(f"Selling {agg_shares_to_sell:.6f} AGG shares @ ${agg_price:.2f}")
-                print(f"Buying {tqqq_shares_to_buy:.6f} TQQQ shares @ ${tqqq_price:.2f}")
-                
-                # Sell AGG first, then buy TQQQ
-                sell_order = submit_order(api, "AGG", agg_shares_to_sell, "sell")
-                wait_for_order_fill(api, sell_order["id"])
-                
-                buy_order = submit_order(api, "TQQQ", tqqq_shares_to_buy, "buy")
-                wait_for_order_fill(api, buy_order["id"])
-                
-                print("BUY trade executed successfully!")
-                send_telegram_message(f"9-Sig: BUY signal executed - Bought ${amount_to_buy:.2f} TQQQ (sold AGG)")
-            elif available_agg_value > 0:
-                # Partial execution possible - use available shares
-                print(f"Partial execution: Only ${available_agg_value:.2f} AGG available, executing partial buy")
-                amount_to_buy = available_agg_value
-                tqqq_price = float(get_latest_trade(api, "TQQQ"))
-                
-                agg_shares_to_sell = available_agg_shares
-                tqqq_shares_to_buy = amount_to_buy / tqqq_price
-                
-                print(f"Executing partial BUY: Selling {agg_shares_to_sell:.6f} AGG shares for ${amount_to_buy:.2f}")
-                print(f"Buying {tqqq_shares_to_buy:.6f} TQQQ shares @ ${tqqq_price:.2f}")
-                
-                sell_order = submit_order(api, "AGG", agg_shares_to_sell, "sell")
-                wait_for_order_fill(api, sell_order["id"])
-                
-                buy_order = submit_order(api, "TQQQ", tqqq_shares_to_buy, "buy")
-                wait_for_order_fill(api, buy_order["id"])
-                
-                print("Partial BUY trade executed successfully!")
-                send_telegram_message(f"9-Sig: Partial BUY executed - Bought ${amount_to_buy:.2f} TQQQ (sold available AGG)")
-            else:
-                # Insufficient AGG funds
-                print(f"Action: HOLD_INSUFFICIENT_FUNDS - Not enough AGG available to execute buy")
-                print(f"  Required: ${amount_to_buy:.2f}, Available: ${available_agg_value:.2f}")
-                send_telegram_message(f"9-Sig: BUY signal but insufficient AGG (${available_agg_value:.2f} available < ${amount_to_buy:.2f} needed) - HOLDING existing positions")
-                action = "HOLD_INSUFFICIENT_FUNDS"
-                
+                action = "BUY"
+                print(f"Action: BUY — deficit ${deficit:.2f}; throttle cap ${throttle_cap:.2f}; floor cap ${floor_cap:.2f} → buy ${max_buy:.2f}")
+
         else:
-            # SELL Signal: Too much TQQQ
-            amount_to_sell = difference
-            action = "SELL"
-            print(f"Action: SELL - Need to sell ${amount_to_sell:.2f} TQQQ")
-            
-            # Step 5: Check for "30 Down, Stick Around" rule
-            spy_30_down = check_spy_30_down_rule()
-            print(f"SPY 30% down rule check: {spy_30_down}")
-            if spy_30_down:
-                ignored_count = count_ignored_sell_signals(env=env)
-                print(f"Ignored sell signals count: {ignored_count}/4")
-                
-                if ignored_count < 4:
-                    action = "SELL_IGNORED"
-                    print(f"Action: SELL_IGNORED - Ignoring sell signal due to '30 Down, Stick Around' rule")
-                    send_telegram_message(f"9-Sig: SELL signal IGNORED due to '30 Down, Stick Around' rule (SPY down >30%). Ignored {ignored_count + 1}/4 signals.")
-                else:
-                    print("Resuming normal operation after ignoring 4 sell signals")
-                    send_telegram_message("9-Sig: Resuming normal operation after ignoring 4 sell signals")
-            
-            if action == "SELL":
-                # Execute sell trade
-                print("Executing SELL trade...")
-                
-                # Check available TQQQ shares
-                positions = list_positions(api)
-                tqqq_position = next((p for p in positions if p.get("symbol") == "TQQQ"), None)
-                available_tqqq_shares = float(tqqq_position.get("available", 0)) if tqqq_position else 0
-                tqqq_price = float(get_latest_trade(api, "TQQQ"))
-                available_tqqq_value = available_tqqq_shares * tqqq_price if tqqq_price > 0 else 0
-                
-                print(f"Available TQQQ shares: {available_tqqq_shares:.6f} (value: ${available_tqqq_value:.2f})")
-                print(f"Required to sell: ${amount_to_sell:.2f}")
-                
-                # Adjust if we don't have enough available shares
-                if available_tqqq_value > 0 and available_tqqq_value < amount_to_sell:
-                    print(f"Warning: Only ${available_tqqq_value:.2f} TQQQ available (need ${amount_to_sell:.2f})")
-                    print(f"Adjusting sell amount to available shares")
-                    amount_to_sell = available_tqqq_value
-                
-                agg_price = float(get_latest_trade(api, "AGG"))
-                tqqq_shares_to_sell = amount_to_sell / tqqq_price
-                agg_shares_to_buy = amount_to_sell / agg_price
-                
-                # Ensure we don't try to sell more shares than available
-                if tqqq_shares_to_sell > available_tqqq_shares:
-                    print(f"Adjusting: Can only sell {available_tqqq_shares:.6f} shares (requested {tqqq_shares_to_sell:.6f})")
-                    tqqq_shares_to_sell = available_tqqq_shares
-                    amount_to_sell = tqqq_shares_to_sell * tqqq_price
-                    agg_shares_to_buy = amount_to_sell / agg_price
-                    print(f"Adjusted: Selling {tqqq_shares_to_sell:.6f} TQQQ shares for ${amount_to_sell:.2f}")
-                
-                print(f"Selling {tqqq_shares_to_sell:.6f} TQQQ shares @ ${tqqq_price:.2f}")
-                print(f"Buying {agg_shares_to_buy:.6f} AGG shares @ ${agg_price:.2f}")
-                
-                # Sell TQQQ first, then buy AGG
-                sell_order = submit_order(api, "TQQQ", tqqq_shares_to_sell, "sell")
-                wait_for_order_fill(api, sell_order["id"])
-                
-                buy_order = submit_order(api, "AGG", agg_shares_to_buy, "buy")
-                wait_for_order_fill(api, buy_order["id"])
-                
-                print("SELL trade executed successfully!")
-                send_telegram_message(f"9-Sig: SELL signal executed - Sold ${amount_to_sell:.2f} TQQQ (bought AGG)")
-        
-        # Get updated positions after trades (or use current if no trades were executed)
+            # SELL candidate.
+            if thirty_down and ignore_streak < nine_sig_config["max_sell_ignores"]:
+                action = "SELL_IGNORED"
+                print(f"Action: SELL_IGNORED — 30-down active, ignore {ignore_streak + 1}/{nine_sig_config['max_sell_ignores']}")
+            elif thirty_down:
+                # Ignore streak exhausted during an ongoing 30-down → base reset.
+                action = "BASE_RESET_30DOWN"
+                target_tqqq_value = anchor_tqqq_value
+                print("Action: BASE_RESET_30DOWN — ignore streak exhausted → snap to 60/40")
+            else:
+                # Normal sell: bring TQQQ down to the signal line.
+                action = "SELL"
+                target_tqqq_value = signal_line
+                print(f"Action: SELL — sell TQQQ down to signal ${signal_line:.2f}")
+
+        # ── Step 4: execute (single rebalance toward target) ──────────────
+        no_trade_actions = {"HOLD", "HOLD_BOND_FLOOR", "SELL_IGNORED"}
+        note = "no trade"
+        if action not in no_trade_actions:
+            print("Executing rebalance...")
+            executed, note = _nine_sig_rebalance_to_target(
+                api, current_tqqq_balance, current_agg_balance, target_tqqq_value
+            )
+            print(f"Executed: {note}")
+            if executed <= 0 and action == "BUY":
+                action = "HOLD_INSUFFICIENT_FUNDS"
+
+        # ── Step 5: persist post-trade balances (carried state) ───────────
         updated_positions = {p["symbol"]: float(p["market_value"]) for p in list_positions(api)}
         final_tqqq_balance = updated_positions.get("TQQQ", 0)
         final_agg_balance = updated_positions.get("AGG", 0)
-        
-        # Save quarterly data for next calculation - use POST-TRADE balances
-        # This ensures the next quarter's signal line is calculated from the correct ending balance
+        updated_total = final_tqqq_balance + final_agg_balance
+
         current_quarter = f"{datetime.datetime.now().year}-Q{((datetime.datetime.now().month-1)//3+1)}"
         save_nine_sig_quarterly_data(
             current_quarter,
-            final_tqqq_balance,  # Use post-trade balance for next quarter's calculation
-            final_agg_balance,   # Use post-trade balance
+            final_tqqq_balance,  # post-trade balance drives next quarter's signal line
+            final_agg_balance,
             signal_line,
             action,
             quarterly_contributions,
-            env=env
+            env=env,
         )
-        
-        # Report final allocations
-        updated_total = final_tqqq_balance + final_agg_balance
+
         print(f"\n=== Final Results ===")
         print(f"Final TQQQ balance: ${final_tqqq_balance:.2f}")
         print(f"Final AGG balance: ${final_agg_balance:.2f}")
@@ -2281,10 +2231,15 @@ def execute_quarterly_nine_sig_signal(api, force_execute=False, env="live"):
         if updated_total > 0:
             tqqq_pct = final_tqqq_balance / updated_total
             agg_pct = final_agg_balance / updated_total
-            print(f"Final allocation: TQQQ {tqqq_pct:.1%}, AGG {agg_pct:.1%} (Target: 80/20)")
-            send_telegram_message(f"9-Sig allocation: TQQQ {tqqq_pct:.1%}, AGG {agg_pct:.1%} (Target: 80/20)")
+            print(f"Final allocation: TQQQ {tqqq_pct:.1%}, AGG {agg_pct:.1%} (Target: 60/40)")
         print(f"Action taken: {action}")
         print("=" * 40 + "\n")
+
+        send_telegram_message(
+            f"9-Sig {current_quarter}: {action} — {note} | signal ${signal_line:.2f}, "
+            f"NAV ${updated_total:.2f} (TQQQ {final_tqqq_balance/updated_total:.0%}/AGG {final_agg_balance/updated_total:.0%})"
+            if updated_total > 0 else f"9-Sig {current_quarter}: {action} — {note}"
+        )
 
         mark_quarterly_run_complete("nine_sig", action, env=env)
 

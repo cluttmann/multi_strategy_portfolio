@@ -107,14 +107,18 @@ SECTOR_HOLDING_FUND = "SHV"
 SECTOR_LOOKBACKS_DAYS = {"1m": 21, "3m": 63, "6m": 126, "12m": 252}
 SECTOR_WEIGHTS = {"1m": 0.40, "3m": 0.20, "6m": 0.20, "12m": 0.20}
 
-# 9-Sig
-NINE_SIG_TARGET = {"TQQQ": 0.80, "AGG": 0.20}
+# 9-Sig — Jason Kelly canonical (60/40 TQQQ/AGG)
+NINE_SIG_TARGET = {"TQQQ": 0.60, "AGG": 0.40}
 NINE_SIG_QUARTERLY_GROWTH = 0.09
-NINE_SIG_TOLERANCE_PCT = 0.025      # quarterly tolerance band (≈ $25 on a $1000 NAV)
-NINE_SIG_BOND_REBALANCE = 0.30
-# "30 Down, Stick Around": ignore the first 4 SELL signals when SPY is ≥30% below its ATH
-NINE_SIG_DRAWDOWN_THRESHOLD = 0.30
-NINE_SIG_MAX_SELL_IGNORES = 4
+NINE_SIG_TOLERANCE_PCT = 0.025      # hold band = 2.5% of sleeve NAV (micro-trade guard)
+NINE_SIG_DRAWDOWN_THRESHOLD = 0.30  # 30-Down: TQQQ ≤ 70% of its rolling 8-quarter high
+NINE_SIG_LOOKBACK_QUARTERS = 8      # rolling 8-quarter (~504 trading-day) high
+NINE_SIG_MAX_SELL_IGNORES = 2       # Kelly 4→2: ignore at most 2 consecutive sell signals
+NINE_SIG_SPIKE_GAIN = 1.00          # TQQQ +100% in a quarter → reset to 60%
+NINE_SIG_THROTTLE = 0.90            # a BUY may spend at most 90% of the bond holdings
+NINE_SIG_BOND_FLOOR = 0.10          # bonds never drop below 10% of NAV
+# NOTE: a bond-drift base reset was considered but dropped — the legacy 0.30 threshold
+# is the 80/20 number and there is no clear canonical 60/40 value (mirrors main.py).
 
 # KMLM extension: KMLM Alpaca data starts ~Feb-2021. Use DBMF (similar managed-
 # futures trend-following ETF, history back to May-2019) for the pre-KMLM window.
@@ -2099,35 +2103,45 @@ def bt_rssb_wtip(returns: pd.DataFrame) -> pd.Series:
 
 def bt_nine_sig(returns: pd.DataFrame, prices: pd.DataFrame, return_weights: bool = False):
     """
-    9-Sig backtest with full "30 Down, Stick Around" crash protection.
+    9-Sig backtest — Jason Kelly canonical (60/40 TQQQ/AGG).
 
-    Logic:
-      • Drift TQQQ/AGG weights between quarters
-      • At quarter end, compute signal line = previous TQQQ × (1 + 9%)
-        (first quarter: signal = 80% of NAV)
-      • If TQQQ < signal − tolerance: BUY signal (sell AGG, buy TQQQ to signal)
-      • If TQQQ > signal + tolerance: SELL signal (sell TQQQ to signal, buy AGG)
-        BUT if SPY is ≥30% below its all-time high AND we've ignored < 4 prior
-        sell signals, mark as SELL_IGNORED (hold instead). After 4 ignores,
-        normal operation resumes.
-      • Within tolerance: HOLD
+    Each quarter:
+      • signal line = previous post-trade TQQQ value × (1 + 9%)
+        (first quarter: 60% of NAV)
+      • SPIKE RESET: TQQQ +100% over the quarter AND currently >60% of NAV AND not
+        in a 30-down episode → snap TQQQ to 60% of NAV (caps a runaway signal line).
+      • SELL candidate (TQQQ > signal + tol): if TQQQ is ≥30% below its rolling
+        8-quarter high AND we've ignored < 2 sells → SELL_IGNORED (hold). When the
+        2-ignore streak is exhausted during an ongoing 30-down → BASE_RESET to 60/40.
+        Otherwise sell TQQQ down to the signal line.
+      • BUY candidate (TQQQ < signal − tol): buy toward the signal line, clamped by
+        the 90% bond throttle AND the 10% bond floor.
+      • Within tolerance: HOLD.
 
-    Note: monthly AGG contributions are not simulated here — we track unit-NAV
-    growth of the strategy, not cumulative inflows.
+    The 30-down trigger uses the *synthetic TQQQ* series with a rolling 8-quarter
+    high — NOT an expanding SPY all-time-high. The old expanding-ATH-on-SPY logic
+    meant the trigger essentially never fired in a multi-year grind.
+
+    Note: monthly AGG contributions are not simulated — we track unit-NAV growth.
     """
     idx = returns.index
     tqqq = spliced_leveraged_etf(returns, "TQQQ")  # synthetic 3× QQQ pre-2010-02
     agg = returns["AGG"].fillna(0) if "AGG" in returns.columns else pd.Series(0.0, index=idx)
-    spy = prices["SPY"]
     quarterly = _quarterly_rebal_dates(idx)
 
-    w_tqqq, w_agg = 0.80, 0.20
+    # Synthetic TQQQ price level + rolling 8-quarter high for the 30-down trigger.
+    tqqq_price = (1.0 + tqqq).cumprod()
+    lookback_days = NINE_SIG_LOOKBACK_QUARTERS * 63          # 8 quarters ≈ 504 trading days
+    tqqq_roll_high = tqqq_price.rolling(lookback_days, min_periods=1).max()
+
+    w0_tqqq = NINE_SIG_TARGET["TQQQ"]   # 0.60
+    w0_agg = NINE_SIG_TARGET["AGG"]     # 0.40
+    w_tqqq, w_agg = w0_tqqq, w0_agg
     last_q_tqqq_value = None
     nav = 1.0
     sell_ignored_count = 0  # consecutive ignored sell signals
-    spy_ath = spy.iloc[0] if not pd.isna(spy.iloc[0]) else 0.0
     out = []
-    weight_log: list[tuple[pd.Timestamp, float, float]] = [(idx[0], 0.80, 0.20)]
+    weight_log: list[tuple[pd.Timestamp, float, float]] = [(idx[0], w0_tqqq, w0_agg)]
 
     for date, _ in returns.iterrows():
         # Today's portfolio return
@@ -2142,40 +2156,62 @@ def bt_nine_sig(returns: pd.DataFrame, prices: pd.DataFrame, return_weights: boo
         if ssum > 0:
             w_tqqq, w_agg = new_tqqq / ssum, new_agg / ssum
 
-        # Update SPY ATH
-        spy_today = spy.loc[date]
-        if not pd.isna(spy_today):
-            spy_ath = max(spy_ath, spy_today)
-
         if date in quarterly:
             tqqq_value = nav * w_tqqq
+            agg_value = nav * w_agg
             if last_q_tqqq_value is None:
-                signal = nav * 0.80  # First quarter: 80% target
+                signal = nav * w0_tqqq          # first quarter: 60% of NAV
             else:
                 signal = last_q_tqqq_value * (1 + NINE_SIG_QUARTERLY_GROWTH)
 
+            # 30-down state on the synthetic TQQQ series (rolling 8-quarter high)
+            roll_high = tqqq_roll_high.loc[date]
+            price = tqqq_price.loc[date]
+            thirty_down = roll_high > 0 and (roll_high - price) / roll_high >= NINE_SIG_DRAWDOWN_THRESHOLD
+
+            # TQQQ quarterly price gain for the spike-reset check (~one quarter back)
+            prior_price = tqqq_price.asof(date - pd.Timedelta(days=95))
+            spike_gain = (price / prior_price - 1.0) if (prior_price and prior_price > 0) else 0.0
+
             diff = tqqq_value - signal
             tolerance = nav * NINE_SIG_TOLERANCE_PCT
-            action = None
-            if diff < -tolerance:
-                action = "BUY"
-            elif diff > tolerance:
-                # SELL candidate. Check 30-Down rule.
-                drawdown = 0.0
-                if spy_ath > 0 and not pd.isna(spy_today):
-                    drawdown = (spy_ath - spy_today) / spy_ath
-                if drawdown >= NINE_SIG_DRAWDOWN_THRESHOLD and sell_ignored_count < NINE_SIG_MAX_SELL_IGNORES:
-                    action = "SELL_IGNORED"
-                    sell_ignored_count += 1
-                else:
-                    action = "SELL"
-                    sell_ignored_count = 0  # reset on actual sell
+            cur_tqqq_pct = w_tqqq
+            target_tqqq_value = tqqq_value  # default: no change
+            trade = False
 
-            if action in ("BUY", "SELL"):
-                target_tqqq_value = max(0, min(nav, signal))
-                target_agg_value = max(0, nav - target_tqqq_value)
-                w_tqqq = target_tqqq_value / nav if nav > 0 else 0.80
-                w_agg = target_agg_value / nav if nav > 0 else 0.20
+            if (last_q_tqqq_value is not None and spike_gain >= NINE_SIG_SPIKE_GAIN
+                    and cur_tqqq_pct > w0_tqqq and not thirty_down):
+                # SPIKE RESET → 60% of NAV
+                target_tqqq_value = nav * w0_tqqq
+                trade = True
+                sell_ignored_count = 0
+            elif diff < -tolerance:
+                # BUY toward signal, clamped by 90% throttle + 10% bond floor
+                deficit = -diff
+                max_buy = max(0.0, min(deficit,
+                                       NINE_SIG_THROTTLE * agg_value,
+                                       agg_value - NINE_SIG_BOND_FLOOR * nav))
+                if max_buy > 0:
+                    target_tqqq_value = tqqq_value + max_buy
+                    trade = True
+            elif diff > tolerance:
+                # SELL candidate. Check the 30-down rule on TQQQ.
+                if thirty_down and sell_ignored_count < NINE_SIG_MAX_SELL_IGNORES:
+                    sell_ignored_count += 1  # SELL_IGNORED — hold
+                elif thirty_down:
+                    # ignore streak exhausted during an ongoing 30-down → base reset
+                    target_tqqq_value = nav * w0_tqqq
+                    trade = True
+                    sell_ignored_count = 0
+                else:
+                    target_tqqq_value = signal  # normal sell to the signal line
+                    trade = True
+                    sell_ignored_count = 0
+
+            if trade:
+                target_tqqq_value = max(0.0, min(nav, target_tqqq_value))
+                w_tqqq = target_tqqq_value / nav if nav > 0 else w0_tqqq
+                w_agg = 1.0 - w_tqqq
                 weight_log.append((date, w_tqqq, w_agg))
 
             # Always update last_q_tqqq for next quarter's signal calc
