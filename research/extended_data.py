@@ -180,6 +180,7 @@ def fetch_extended_data() -> dict:
       'kmlm_tr'   : Managed futures (KMLMSIM 1988+, real KMLM post-2020-12-02)
       'ntsd_tr'   : WisdomTree US Plus Intl Equity (NTSDSIM 1970+, real NTSD post-2026-03-19)
       'urth_tr'   : MSCI World (URTHSIM 1970+, real URTH post-2012-01-12)
+      'acwi_tr'   : MSCI ACWI gross TR, USD (MSCI EOD index 2001+, real ACWI ETF post-2008-03-28)
       'bnd_tr'    : Total US bond market (BNDSIM 1986+, real BND post-2007-04-03)
       'slv_tr'    : Silver (SLVSIM 1968+, real SLV post-2006-04-21)
     """
@@ -508,6 +509,30 @@ def fetch_extended_data() -> dict:
     else:
         out["urth_tr"] = None
         print(f"  ⚠ URTHSIM CSV not found at {URTHSIM_PATH}")
+
+    # ACWI: authoritative MSCI ACWI gross total-return index levels (USD) pulled
+    # from MSCI's own end-of-day API (index code 892400, GRTR). Daily gross TR is
+    # only served from 2000-12-29 — true ACWI cannot go earlier on any free feed
+    # (the 1987+ Curvo series is monthly EUR-net, frequency/currency-incompatible).
+    # Spliced with the real iShares MSCI ACWI ETF (ACWI.US, 2008-03-28 inception).
+    ACWISIM_PATH = str(SIM_DIR / "ACWI_msci_grtr_daily_2001-2026.csv")
+    if os.path.exists(ACWISIM_PATH):
+        sim = pd.read_csv(ACWISIM_PATH)
+        sim["date"] = pd.to_datetime(sim["date"])
+        sim = sim.set_index("date").sort_index()
+        sim_returns = sim["return_pct"] / 100.0  # CSV is in percent
+        sim_level = (1 + sim_returns).cumprod() * 100.0
+        acwi_real = f("ACWI")
+        if acwi_real is not None and len(acwi_real) > 0:
+            out["acwi_tr"] = splice_series(sim_level, acwi_real,
+                                            splice_date="2008-03-28")
+            print(f"  ✓ ACWI: MSCI gross-TR index spliced with real ACWI ETF at 2008-03-28 ({len(sim_returns)} index days)")
+        else:
+            out["acwi_tr"] = sim_level
+            print(f"  ✓ ACWI: MSCI gross-TR index only — {len(sim_returns)} days")
+    else:
+        out["acwi_tr"] = None
+        print(f"  ⚠ ACWI CSV not found at {ACWISIM_PATH}")
 
     # NTSD: simulated daily returns from Testfolio's WisdomTree model (1970+)
     # spliced with real NTSD at its 2026-03-19 inception.
