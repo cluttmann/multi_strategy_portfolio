@@ -202,14 +202,14 @@ def _gate_state(r1, n):
     return np.concatenate([[0.0], state[:-1]])
 
 
-def net_eval(r1, bil, index, n=None, cost=0.0, lev=LEV, extra=0.0):
+def net_eval(r1, bil, index, n=None, cost=0.0, lev=LEV, extra=0.0, tfs=0.30):
     """Pre-tax / post-cost / post-tax metrics for a gated (n given) or ungated
     (n=None) 2× strategy. Tax via tax_overlay.simulate_after_tax (German
     Abgeltungsteuer + Teilfreistellung + Vorabpauschale, average-cost basis).
     Transaction cost = `cost` (round-trip fraction) charged on each switch day.
     `extra` = additional annual sleeve drag (real-product scenario)."""
     import tax_overlay as tx
-    tx.SYMBOL_TFS_RATE = {**dict(tx.SYMBOL_TFS_RATE), "ACWI2X": 0.30, "CASH": 0.0}
+    tx.SYMBOL_TFS_RATE = {**dict(tx.SYMBOL_TFS_RATE), "ACWI2X": tfs, "CASH": 0.0}
     r2 = make_lev(r1, bil, lev, extra)
     assets = pd.DataFrame({"ACWI2X": r2, "CASH": bil}, index=index)
     if n is None:                                   # ungated buy&hold of the 2× sleeve
@@ -250,7 +250,7 @@ def leverage_window_grid(r1, bil, levs=(1.5, 2.0, 2.5, 3.0)):
         best_w, best_s = None, -np.inf
         for w in WINDOWS:
             g, _, _ = gate(r1, rl, bil, w)
-            s = metrics(g)["Sharpe"]
+            s = metrics(g[TRIM:])["Sharpe"]
             if s > best_s:
                 best_s, best_w = s, w
         rows[L] = {"best_window": best_w, "Sharpe": best_s}
@@ -439,25 +439,32 @@ def build_html(span, det, mc, samp, best, bh1, bh2, comp, charts, model_stats,
                            f"payoff is <b>risk control, not extra return</b> (MaxDD "
                            f"{g_net['MaxDD']*100:.0f}% vs {u_net['MaxDD']*100:.0f}%, Sharpe "
                            f"{g_net['Sharpe']:.2f} vs {u_net['Sharpe']:.2f}).")
+    mc_best_note = extras.get("mc_best", "?")
+    fit_rows = "".join(
+        f"<tr><th class=lt>{nm}</th><td>{c:+.2f}</td></tr>"
+        for nm, c in sorted(extras["fit"].items(), key=lambda kv: -abs(kv[1])))
     _near = [abs(pse[w]["diff"]) for w in pse if abs(w - best) <= 20]
     _max_near = max(_near) if _near else 0.0
     _d200 = pse.get(200, {}).get("diff", 0.0)
     pse_verdict = (
         f"<b>Read the magnitudes, not the t-stats.</b> Because all windows see the same "
-        f"resampled paths, 1500 matched sims shrink the standard error to ~0.001, so even a "
-        f"trivial 0.002 Sharpe gap shows a large t — that flags <i>statistical</i>, not "
-        f"<i>economic</i>, significance. Economically the differences across the 250–270d "
-        f"ridge are negligible (|ΔSharpe| ≤ {_max_near:.3f} vs {best}d). The only meaningful "
-        f"penalty is going <i>faster</i>: the 200d gate gives up ΔSharpe {abs(_d200):.3f} "
-        f"<i>and</i> ~10 pp more drawdown. <b>Bottom line: pick anywhere ~250–270d; avoid "
-        f"≤200d.</b>")
+        f"resampled paths, matched sims shrink the standard error to ~0.001, so even a "
+        f"trivial Sharpe gap shows a large t — that flags <i>statistical</i>, not "
+        f"<i>economic</i>, significance. Economically the differences within the "
+        f"{best}±20d neighbourhood are negligible (|ΔSharpe| ≤ {_max_near:.3f}). Faster "
+        f"windows are a turnover story: on the real path the 200d gate gives up ΔSharpe "
+        f"{abs(_d200):.3f} pre-tax and trades {int(det.loc[200,'Switch'])}× vs "
+        f"{int(det.loc[best,'Switch'])}× for {best}d; the bootstrap argmax "
+        f"({mc_best_note}d) is likewise a pre-tax, pre-cost artifact of block-resampling "
+        f"— §9 shows the longer window keeps more after German tax. <b>Bottom line: pick "
+        f"~230–270d; avoid ≤200d.</b>")
     html = f"""<!doctype html><html><head><meta charset=utf-8>
 <title>2× ACWI SMA strategy — best window</title><style>{css}</style></head><body>
 <h1>2× MSCI ACWI SMA-gated strategy — best window</h1>
 <p class=cap>The all-world analogue of the SPY-200-SMA / SPXL strategy, at 2× leverage ·
 modeled history {span} · generated from research/sma_sweep_acwi.py</p>
 
-<div class=box><b>Conclusion — use the ~{best}-day SMA</b> (robust ridge ≈ 250–270d;
+<div class=box><b>Conclusion — use the ~{best}-day SMA</b> (robust ridge ≈ 230–270d;
 notably <i>longer</i> than the US 200-day because at 2× leverage whipsaw and
 volatility-decay punish a fast gate). <b>What's robust</b> (survives every fix in the
 review, all costs/taxes, and the bootstrap): the <i>window choice</i> and the
@@ -489,9 +496,11 @@ before acting</b> — the headline numbers are modeled, frictionless upper bound
 <tr><th class=lt>MSCI ACWI gross index (USD)</th><td class=lt>MSCI end-of-day API (index 892400)</td><td class=lt>2001–2008</td><td class=lt>real ACWI daily returns</td></tr>
 <tr><th class=lt>iShares MSCI ACWI ETF (ACWI.US)</th><td class=lt>EODHD</td><td class=lt>2008→today</td><td class=lt>real ACWI daily returns (live + future)</td></tr>
 <tr><th class=lt>MSCI ACWI net TR (EUR), monthly</th><td class=lt>Curvo (curvo.eu), 1987+</td><td class=lt>1988–2001</td><td class=lt>real monthly anchor (embeds true EM weights)</td></tr>
-<tr><th class=lt>MSCI World (URTHSIM → URTH)</th><td class=lt>Testfolio sim spliced w/ real URTH (EODHD)</td><td class=lt>1988–2001</td><td class=lt>intra-month daily <i>texture</i> only</td></tr>
+<tr><th class=lt>MSCI World (URTHSIM → URTH)</th><td class=lt>Testfolio sim spliced w/ real URTH (EODHD)</td><td class=lt>1970–1987</td><td class=lt>ACWI predecessor segment, used as-is (index didn't exist yet; EM &lt;1% at 1988 inception)</td></tr>
+<tr><th class=lt>MSCI World (same series)</th><td class=lt>—</td><td class=lt>1988–2001</td><td class=lt>intra-month daily <i>texture</i> only</td></tr>
+<tr><th class=lt>Xtrackers S&amp;P 500 2x Lev. Daily Swap (XS2D)</th><td class=lt>EODHD (LSE, USD)</td><td class=lt>2010→today</td><td class=lt>real-product cost calibration of the synthetic 2× sleeve</td></tr>
 <tr><th class=lt>EUR/USD spot</th><td class=lt>FRED DEXUSEU (1999+) + Deutsche Mark EXGEUS (pre-1999)</td><td class=lt>1988→today</td><td class=lt>convert Curvo EUR→USD</td></tr>
-<tr><th class=lt>3-month US T-bill rate</th><td class=lt>FRED TB3MS → DGS3MO</td><td class=lt>1988→today</td><td class=lt>LETF financing cost + the "out" (cash) leg</td></tr>
+<tr><th class=lt>3-month US T-bill rate</th><td class=lt>FRED TB3MS → DGS3MO</td><td class=lt>1970→today</td><td class=lt>LETF financing cost + the "out" (cash) leg</td></tr>
 </tbody></table>
 <p class=cap>The first two are the genuine ACWI; Curvo is real ACWI too (just EUR/monthly, FX-converted);
 World is used <i>only</i> to give the pre-2001 series daily wiggle — never as the return itself.</p>
@@ -521,8 +530,15 @@ monthly return (reconstruction error ~1e-15). World supplies only the intra-mont
 wiggle; every monthly return is the real EM-weighted ACWI. A literal daily World+EM
 blend is impossible before 2001 (no daily EM exists pre-2003) — and provably
 immaterial: tested on 2003+, World-texture and a true World+EM blend give the same
-gated Sharpe to ±0.02. <b>Full chain:</b> modeled daily (1988→2001) → real MSCI ACWI
-gross (2001→2008) → real ACWI ETF (2008→today).</p>
+gated Sharpe to ±0.02.</p>
+<p><b>The 1970–1987 head.</b> MSCI ACWI only exists from Dec-1987, so "the longest
+possible ACWI backtest" necessarily starts there — unless one accepts the index's
+predecessor. We do, explicitly: 1970→1987 uses <b>MSCI World daily returns as-is</b>.
+That is not a stretch — at ACWI's 1988 inception EM weighed <b>&lt;1%</b> and the MSCI
+EM index itself only launched 1988, so an "all-country" investor of the 1970s-80s held,
+in practice, exactly World. The segment is labeled throughout; nothing pre-1988 is
+scaled or synthesised. <b>Full chain:</b> World as-is (1970→1988) → EM-anchored modeled
+daily (1988→2001) → real MSCI ACWI gross (2001→2008) → real ACWI ETF (2008→today).</p>
 
 <h2>3 · How the 2× sleeve (LETF) is modeled</h2>
 <p>There is no 2× ACWI ETF with long history, so we synthesise one with a
@@ -549,7 +565,7 @@ the chop is so valuable at 2×.</p>
 <tr><th class=lt>expense</th><td class=lt>{E*100:.1f}%/yr ×(L−1)</td><td class=lt>fund expense ratio drag</td></tr>
 </tbody></table>
 <p><b>Why time-varying financing matters:</b> the borrow cost is the dominant drag and
-it scales with the short rate, which ran 0%→8%+ across this window. A flat rate would
+it scales with the short rate, which ran 0%→15% across this window. A flat rate would
 badly mis-state pre-2008 returns. Total annual drag on the 2× sleeve at different rate
 levels:</p>
 <table><thead><tr><th class=lt>short rate</th><th class=lt>annual drag on 2× sleeve</th></tr></thead><tbody>{cost_rows}</tbody></table>
@@ -558,20 +574,37 @@ the 2× sleeve returns 2×1.00% − {ex_borrow*100:.3f}% (financing) − {ex_dra
 (expense) = <b>{ex_r2*100:.3f}%</b> — slightly under a naïve +2.00%. Daily resetting
 also causes volatility decay in choppy markets, which is exactly why the SMA gate (which
 sits out the chop) adds so much value at 2×.</p>
+<p><b>Calibration against a real product.</b> The formula above is no longer purely
+theoretical: we benchmarked it against the <b>Xtrackers S&amp;P 500 2x Leveraged Daily
+Swap UCITS ETF</b> (XS2D, USD — structurally identical to the upcoming ACWI product:
+TER 0.60%, unfunded swap) over its full 2010→2026 history. Month-end levels track at
+correlation 0.95, with the synthetic running <b>+0.73%/yr richer</b> than the real fund
+— i.e. real-world swap costs slightly exceed our textbook assumptions. The estimate
+is stable, not endpoint-driven: trimming the first 0/6/24 month-ends gives
++0.73/+0.74/+0.79%/yr (reproduce via <code>research/xs2d_calibration.py</code>).
+Measured +0.73%/yr, applied as <b>0.75%/yr</b> in a <b>"real-product drag"</b>
+scenario that appears as an extra row in the strategy-comparison table (§7) and the
+after-tax table (§9) — treat those rows as the expectation for the actual ETF. One
+transfer caveat: the calibration is US-underlying; a 2× ACWI swap index carries a
+larger dividend-withholding surface, so the real fund could lag marginally more —
+re-calibrate against its NAV once it trades.</p>
 <p><b>The strategy itself:</b> the SMA gate is computed on the <i>unleveraged</i> ACWI
 index (just as SPXL gates on SPY); when ACWI &gt; its N-day SMA×1.01 we hold the 2×
 sleeve, when &lt; SMA×0.99 we hold T-bills. Signal checked daily, executed next day, ±1%
 hysteresis band to avoid flip-flopping.</p>
 
-<h2>4 · Best window — Monte Carlo ({samp['n_sims']} sims, 252-day blocks)</h2>
+<h2>4 · Window robustness — Monte Carlo ({samp['n_sims']} sims, 252-day blocks)</h2>
 <img src="data:image/png;base64,{charts['curve']}">
 <p class=cap><b>How to read:</b> each window's gate is re-run on {samp['n_sims']} bootstrapped
 {extras['years']}-year histories (resampled in ~1-year blocks). The line is the median
-Sharpe across those sims; the shaded band is the 5th–95th percentile. A broad
-high-Sharpe <b>ridge ~250–270d</b> (not a knife-edge); see §10 for the paired-bootstrap
-test showing 200d vs 250–270d differences are not statistically significant, and for
-block-length sensitivity. The longer history discriminates better than the 25-year
-true-ACWI sample (which produced a spurious short-window pick).</p>
+Sharpe across those sims; the shaded band is the 5th–95th percentile. <b>The MC is a
+robustness check, not the selector.</b> Block-resampling necessarily shreds part of the
+multi-month trend structure a long SMA exploits, which tilts the bootstrap argmax toward
+shorter windows — on this run its argmax is <b>{mc_best_note}d</b>, versus the
+deterministic real-path best of <b>{best}d</b>. We select on the real path (trend
+structure intact), cross-checked by the real-data-only 2001+ sweep and the tax analysis
+(§9: shorter windows trade ~50% more and lose the difference to the German tax drag).
+See §10 for the paired test and block-length sensitivity.</p>
 <p class=key>Columns: <b>med/p5/p95_Sharpe</b> = median &amp; 5–95th-pct Sharpe across sims ·
 <b>med_CAGR / med_MaxDD</b> = median return &amp; drawdown · <b>P_best</b> = % of sims where
 this window won. Green row = recommended {best}d.</p>
@@ -579,10 +612,10 @@ this window won. Green row = recommended {best}d.</p>
 
 <h2>5 · Deterministic sweep — every window on the actual modeled path</h2>
 <p class=cap><b>How to read:</b> not a simulation — these are the metrics on the one real
-(modeled) 1988+ history. The genuine high-Sharpe / low-turnover ridge is <b>~250–270d</b>
-(Sharpe ~0.45, MaxDD ~−39%); note that the ridge <i>edges</i> 240d and 280d carry a much
-worse ~−49% drawdown despite similar Sharpe, and sub-150d windows whipsaw (huge
-<b>Switch</b> counts) — very costly at 2× leverage and in a taxable account. Green row =
+(modeled) 1970+ history. The genuine high-Sharpe / low-turnover ridge is <b>~230–270d</b>
+(best {best}d: Sharpe {det.loc[best,'Sharpe']:.3f}, {int(det.loc[best,'Switch'])} switches);
+sub-150d windows whipsaw (2-3× the trades) — very costly at 2× leverage and in a taxable
+account, which is why the pre-tax near-tie at ~160d loses after tax (§9). Green row =
 recommended {best}d.</p>
 <p class=key>Columns: <b>CAGR</b> return · <b>Vol</b> volatility · <b>Sharpe</b> risk-adjusted ·
 <b>MaxDD</b> worst loss · <b>Calmar</b> CAGR/|MaxDD| · <b>InMkt</b> % time invested ·
@@ -621,7 +654,9 @@ Monte Carlo with beat-probabilities.)</p>
 <h2>8 · Head-to-head: 2× ACWI vs 2× S&amp;P 500 (200d) vs 2× MSCI World (255d)</h2>
 <p>The same gated mechanic and the <b>same 2× leverage</b> applied to each index at its
 canonical window, on the <b>common 1970+ period</b> — so any difference reflects the
-<i>index</i>, not the leverage or the dates. (Note: your live S&amp;P sleeve is actually
+<i>index</i>, not the leverage or the dates. (Caveat: pre-1988 our ACWI series ≡ World
+by construction, so the ACWI-vs-World comparison is driven by 1988+ — before that it
+measures only the 250d-vs-255d window difference.) (Note: your live S&amp;P sleeve is actually
 3× SPXL and World is 2× WLDU; here all three are 2× for a like-for-like read.)</p>
 <img src="data:image/png;base64,{charts['multi']}">
 <p class=cap><b>How to read:</b> median 2×-gated Sharpe vs window for each index, with the
@@ -661,6 +696,11 @@ account the gate is bought for its <b>drawdown/Sharpe</b>, not for extra compoun
 round-trip):</p>
 <table><thead><tr><th class=lt>round-trip cost</th><th>0 bp</th><th>10 bp</th><th>25 bp</th></tr></thead>
 <tbody><tr><th class=lt>net CAGR ({best}d)</th>{cost_sens_row}</tr></tbody></table>
+<p><b>Classification risk quantified:</b> if the final fund fails the ≥51%
+physical-equity quota and gets <b>0% Teilfreistellung</b>, the {best}d strategy's net
+CAGR drops from {g_net['CAGR']*100:.1f}% to <b>{extras['tfs0']['CAGR']*100:.1f}%</b>
+(net Sharpe {extras['tfs0']['Sharpe']:.2f}) — check the Anlagebedingungen before
+buying.</p>
 
 <h2>10 · Limitations &amp; robustness (read before acting)</h2>
 <p>This study was hardened by an adversarial review; the material caveats:</p>
@@ -685,8 +725,11 @@ model isn't driving the conclusion.</li>
 <table><thead><tr><th class=lt>leverage</th><th>best window</th><th>Sharpe</th></tr></thead>
 <tbody>{lev_rows}</tbody></table>
 The long-window preference holds across leverage; "~{best}d" is contingent on ~2×.</li>
-<li><b>Pre-2001 daily <i>texture</i> is MSCI World's, not ACWI's.</b> Monthly drift is the
-real EM-weighted ACWI (validated), but intra-month daily wiggles pre-2001 borrow World's
+<li><b>1970–1987 is MSCI World as-is — drift <i>and</i> texture.</b> ACWI only exists
+from Dec-1987; the head segment (~30% of the trimmed sample) is its predecessor index,
+unadjusted. ACWI-specific evidence starts 1988 (and daily EM texture only 2003+).</li>
+<li><b>1988–2001 daily <i>texture</i> is MSCI World's, not ACWI's.</b> Monthly drift is the
+real EM-weighted ACWI (validated), but intra-month daily wiggles in 1988-2001 borrow World's
 shape (no daily EM exists pre-2003). Shown immaterial for a slow gate (±0.02 Sharpe test on
 2003+), and the real-only cross-check above confirms it.</li>
 <li><b>Financing is a modern best case.</b> The LETF borrow (3m T-bill + 40 bp × 1.1 swap)
@@ -698,6 +741,46 @@ absolute Sharpes here run ~0.05 high vs an external quote — fine for <i>rankin
 <li><b>No look-ahead.</b> The SMA uses the same-day close to decide, but the position is
 executed the next day (state shifted by one); verified in code.</li>
 </ul>
+
+<h2>11 · The real product &amp; portfolio fit</h2>
+<p><b>The instrument.</b> The <b>Scalable MSCI AC World Leveraged Daily Swap Xtrackers
+UCITS ETF</b> (LEI 254900NW0MAOB3TRMY48, Luxembourg, registered 2026-05-29) is the
+first investable 2× MSCI ACWI vehicle — a Scalable Capital × DWS/Xtrackers follow-up to
+their unleveraged SCWX (€600m+). Filed, not yet trading; final TER/ISIN pending. Its
+structural template, the Xtrackers S&amp;P 500 2x Leveraged Daily Swap (2010+): TER
+0.60%, unfunded swap, USD fund currency with EUR listing — and, decisive for a German
+taxable account, <b>classified as an equity fund with the 30% Teilfreistellung</b>. Our
+§9 tax numbers assume exactly that (verify the Aktienfonds classification in the final Anlagebedingungen/prospectus before buying). By
+contrast, the US-listed alternative WLDU (Themes/Leverage Shares 2× Long World Stock
+Daily ETF — a 1940-Act <b>swap-based ETF on Vanguard Total World</b>, so it does
+include EM; TER 0.75%) holds swaps plus collateral rather than ≥51% physical
+equities, so it should expect <b>0% Teilfreistellung</b> in Germany — the UCITS
+wrapper is worth roughly TFS × tax rate ≈ 8 pp of every realised gain. §9's bottom
+row quantifies the same risk for the new fund itself, should its final structure
+miss the Aktienfonds quota (verify the ≥51% Kapitalbeteiligungsquote commitment in
+the fund's Anlagebedingungen/prospectus — not the KID, which doesn't state it —
+before buying).</p>
+<p><b>Execution reality.</b> A UCITS ETF is <b>not tradeable on Alpaca</b>, so the bot
+cannot automate this sleeve. Realistic setups: (a) hold it manually at a German broker
+(e.g. Scalable) and let the bot's daily job only <i>signal</i> the 250d gate via
+Telegram; (b) automate an approximation on Alpaca with WLDU (2× World ETP — but worse
+German tax, no EM); or (c) wait for EU broker-API support. The strategy's ~2 switches
+per year make manual execution genuinely practical.</p>
+<p><b>Correlation with reference strategies</b> (daily returns of the {best}d-gated 2×
+ACWI vs proxies, one common window {extras['fit_span']} — the start is set by KMLM's
+1988 history + warmup):</p>
+<table><thead><tr><th class=lt>reference strategy (proxy)</th><th>corr</th></tr></thead>
+<tbody>{fit_rows}</tbody></table>
+<p class=cap>HFEA/F4 blends are daily-rebalanced approximations of the real
+quarterly-rebalanced sleeves (GOLY proxied by gold). Dual Momentum, Regime SSO, AAA
+and 9-Sig are too path-dependent for a quick proxy — the formal correlation matrix
+runs in mega_backtest.py at promotion time.</p>
+<p>High correlation to the US/World trend sleeves is expected — this is the same trade
+on a broader index. The honest framing: this strategy is a <b>substitute/upgrade for
+world-equity trend exposure</b> (more diversified index, UCITS tax wrapper), not a new
+diversifier. A formal promotion decision (correlation matrix vs all 7 sleeves,
+portfolio what-if injection, Monte-Carlo vs deployed mix) should run through
+mega_backtest.py once the fund has an ISIN and a live price series.</p>
 </body></html>"""
     return html
 
@@ -730,9 +813,13 @@ if __name__ == "__main__":
     mc, samp = monte_carlo(r1, b, 1500, 252)
     det_best = int(det["Sharpe"].idxmax())
     mc_best = int(mc["med_Sharpe"].idxmax())
-    # recommended: MC optimum snapped into the deterministic top-quartile (robust)
-    det_top = det[det["Sharpe"] >= det["Sharpe"].quantile(0.75)].index
-    best = int(min(det_top, key=lambda w: abs(w - mc_best)))
+    # Recommended = deterministic best. The real path preserves the multi-month
+    # trend autocorrelation the gate exploits; block-resampling structurally
+    # tilts the MC argmax toward shorter windows (established in the ultrareview),
+    # and shorter windows also lose more to switch costs + German tax (§9). The
+    # MC is reported as a robustness band, not the selector; §10 discloses the
+    # MC argmax and the tax tiebreak explicitly.
+    best = det_best
     print(f"  ➤ recommended={best}d  (det-best {det_best}, MC-best {mc_best})")
 
     r2 = make_lev(r1, b)
@@ -788,6 +875,9 @@ if __name__ == "__main__":
     }
     cost_sens = {c: net_eval(r1, b, idx, n=best, cost=c, lev=2.0)["net"]
                  for c in (0.0, 0.0010, 0.0025)}      # 0/10/25 bp round-trip
+    # Classification risk: same strategy with NO Teilfreistellung (fund fails the
+    # >=51% physical-equity quota) — makes the §11 caveat a number.
+    tfs0 = net_eval(r1, b, idx, n=best, cost=0.0010, lev=2.0, tfs=0.0)["net"]
 
     print("Block-length sensitivity…")
     block_sens = {}
@@ -795,7 +885,7 @@ if __name__ == "__main__":
         m, _ = monte_carlo(r1, b, 800, mb, seed=mb)
         block_sens[mb] = int(m["med_Sharpe"].idxmax())
 
-    pse = paired_se(samp, best, [w for w in (200, 230, 240, 270, 300) if w != best])
+    pse = paired_se(samp, best, [w for w in (160, 200, 230, 270, 300) if w != best])
     levgrid = leverage_window_grid(r1, b)                  # best window per leverage
 
     # real-data-only cross-check (no modeling): 2× gated sweep on real ACWI 2001+
@@ -828,14 +918,16 @@ if __name__ == "__main__":
             + 0.30 * gld_al + 0.30 * tlt_al,
         "ACWI 1× buy&hold": pd.Series(r1, index=idx),
     }
-    fit = {}
-    for nm, ser in proxies.items():
-        df_ = pd.concat([cand, ser.rename("p")], axis=1).dropna().iloc[TRIM:]
-        fit[nm] = float(df_["cand"].corr(df_["p"]))
+    allf = pd.concat([cand] + [ser.rename(nm) for nm, ser in proxies.items()],
+                     axis=1).dropna()          # ONE common window (KMLM-limited)
+    allf = allf.iloc[TRIM:]                     # warmup trim on the common calendar
+    fit = {nm: float(allf["cand"].corr(allf[nm])) for nm in proxies}
+    fit_span = f"{allf.index[0].date()} → {allf.index[-1].date()}"
 
     extras = {"tax": tax_rows, "cost_sens": cost_sens, "block_sens": block_sens,
               "pse": pse, "levgrid": levgrid, "real_best": real_best,
-              "years": round(len(r1) / 252), "fit": fit}
+              "years": round(len(r1) / 252), "fit": fit, "fit_span": fit_span,
+              "tfs0": tfs0, "mc_best": mc_best}
 
     charts = {"curve": chart_curve(mc, best),
               "hist": chart_hist(samp, best, bh2["Sharpe"]),

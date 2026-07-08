@@ -1,5 +1,5 @@
 """
-Modeled long-history daily MSCI ACWI (USD, gross-equivalent) back to 1988.
+Modeled long-history daily MSCI ACWI (USD, gross-equivalent) back to 1970.
 
 The point: real MSCI ACWI daily only starts 2001, and a MSCI-World-only proxy is
 WRONG before then — World omits emerging markets, whose ACWI weight evolved
@@ -19,8 +19,10 @@ multiplicatively so the month compounds EXACTLY to the real ACWI monthly return.
 World is used only for intra-month texture — every monthly return is the real
 EM-share-weighted ACWI, not a World approximation.
 
-Splice: modeled daily (1988→2001) → real MSCI ACWI gross daily (2001→2008) →
-real ACWI ETF (2008+), the latter two already in extended_data's acwi_tr.
+Chain (four segments): MSCI World as-is (1970-02→1988, ACWI predecessor — see
+PRE_ACWI_START) → EM-anchored modeled daily (1988→2001) → real MSCI ACWI gross
+daily (2001→2008) → real ACWI ETF (2008+), the latter two via extended_data's
+acwi_tr.
 
 FX: USD/EUR = DEXUSEU (1999+); pre-1999 synthesised from the Deutsche Mark
 (FRED EXGEUS, DEM/USD) via the locked 1 EUR = 1.95583 DEM rate.
@@ -77,7 +79,7 @@ def real_acwi_usd_monthly() -> pd.Series:
 
 def build(world_daily: pd.Series, real_acwi_daily: pd.Series,
           save: bool = True) -> pd.Series:
-    """Return modeled daily ACWI total-return series (1988+).
+    """Return modeled daily ACWI total-return series (1970+).
 
     world_daily      : MSCI World daily returns (extended_data urth_tr.pct_change)
     real_acwi_daily  : real ACWI daily returns (extended_data acwi_tr.pct_change),
@@ -105,6 +107,14 @@ def build(world_daily: pd.Series, real_acwi_daily: pd.Series,
         parts.append((1 + day_rets) * scale - 1)
     modeled_pre = pd.concat(parts).sort_index()
     modeled_pre = modeled_pre[modeled_pre.index >= "1988-01-01"]
+    # QA guard: the Curvo anchor must cover every month 1988-01 .. splice-1;
+    # a silently skipped month would delete data without failing the monthly
+    # reconstruction check in __main__.
+    got = pd.PeriodIndex(modeled_pre.index, freq="M").unique()
+    want = pd.period_range("1988-01", pd.Period(splice, "M") - 1, freq="M")
+    missing = want.difference(got)
+    if len(missing):
+        raise ValueError(f"ACWI anchor months missing from Curvo×FX: {list(missing)}")
 
     # 1970→1987: MSCI World as-is (ACWI predecessor — see PRE_ACWI_START note)
     world_head = world_daily.dropna()
@@ -125,10 +135,18 @@ def build(world_daily: pd.Series, real_acwi_daily: pd.Series,
 
 
 def load_or_build(ext) -> pd.Series:
-    """Cached daily modeled ACWI returns; (re)builds from extended_data if absent."""
+    """Cached daily modeled ACWI returns; rebuilds when absent OR stale (cached
+    end older than the live acwi_tr end), so the 2008+ ETF tail stays current
+    and build()-logic changes propagate on the next data refresh."""
+    live_end = ext["acwi_tr"].dropna().index[-1]
     if OUT_CSV.exists():
         df = pd.read_csv(OUT_CSV, parse_dates=["date"]).set_index("date")
-        return df["return_pct"] / 100.0
+        if df.index[-1] >= live_end:
+            print(f"  ✓ modeled ACWI: cache hit ({OUT_CSV.name}, ends {df.index[-1].date()})")
+            return df["return_pct"] / 100.0
+        print(f"  ↻ modeled ACWI: cache stale ({df.index[-1].date()} < {live_end.date()}) — rebuilding")
+    else:
+        print("  ↻ modeled ACWI: no cache — building")
     return build(ext["urth_tr"].pct_change(), ext["acwi_tr"].pct_change())
 
 
