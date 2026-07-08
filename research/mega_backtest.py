@@ -1,19 +1,25 @@
 """
 Mega Backtest — all strategies in the production codebase vs SPY and MSCI World.
 
-Strategies (as configured in main.py):
-  HFEA            UPRO/TMF/KMLM 45/25/30, quarterly rebalance
-  SPXL SMA        SPXL when SPY > 200-SMA × 1.01, SGOV otherwise
-  RSSB/WTIP       70/30, quarterly rebalance, BIL holding fund
-  9-Sig           TQQQ/AGG with 9% quarterly signal-line targeting
-  Dual Momentum   SPUU/EFO/BND via 12m SPY/EFA relative + absolute momentum
-  Sector Momentum Top-3 of 11 sectors by multi-period momentum, SPY 200-SMA gate
-  Regime SSO      6-signal composite (news omitted), SSO ↔ USFR rotation
+The 7 currently DEPLOYED strategies (see DEPLOYED_STRATEGIES below; weights and
+tickers mirror main.py's strategy_allocations + STRATEGY_SYMBOLS):
+  HFEA (15%)              UPRO/TMF/KMLM 45/25/30, quarterly rebalance
+  SPXL SMA (15%)          SPXL when SPY > 200-SMA × 1.01, SGOV otherwise
+  9-Sig (5%)              TQQQ/AGG 60/40 with 9% quarterly signal-line targeting + crash protection
+  DM 2× best-of-3 (20%)   SPUU/QLD/EFO rotation via blended 6m/12m momentum + DD30 + vol25
+  Regime SSO (12%)        7-signal composite regime detector, SSO ↔ USFR rotation
+  7-Asset Rotator (15%)   Adaptive Asset Allocation over NTSD/SAA/EET/UBT/UST/UGL/DBC, top-3 momentum, inverse-vol + DD30 + vol25
+  World 40/30/30 (18%)    40% WLDU + 30% GOLY + 30% TLT, quarterly rebalance (intl diversifier)
+
+Discontinued (kept in the HISTORIC universe only, NOT deployed): RSSB/WTIP
+(retired 2026-05-11), Regime World (retired 2026-05-12), Sector Momentum (never
+promoted). The engine also carries ~80 historic strategies as a re-mining universe.
 
 Plus aggregate portfolio at current weights and pure SPY / pure URTH benchmarks.
 
-Window: ~2020-07 → today (Alpaca free tier IEX feed, ≈5.75 years).
-Synthetics: RSSB pre-Oct-2023, WTIP pre-Jun-2025.
+Data layer (research/extended_data.py): tiered splice of Testfolio SIM CSVs +
+real Alpaca IEX + EODHD feeds, so each strategy is backtested on its longest
+available native window (SPXL SMA reaches back to 1970).
 
 Output: results.csv, equity_curves.png, drawdowns.png, rolling_sharpe.png, report.html
 """
@@ -231,7 +237,7 @@ RETIREMENT_MC_SIMS = 5000
 #                     │
 #                     └──► HISTORIC  (if rejected; reason_demoted noted)
 #
-# Today's state: 7 DEPLOYED, 1 CANDIDATE (Bronze), ~80 HISTORIC.
+# Today's state: 7 DEPLOYED, 0 CANDIDATE (no active candidates), ~80 HISTORIC.
 # Historic strategies are preserved as a "universe to re-mine" when looking
 # for new candidate ideas — nothing is ever deleted.
 

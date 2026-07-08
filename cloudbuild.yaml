@@ -7,8 +7,8 @@ steps:
 # deploy` spawns ITS OWN inner Cloud Build to construct the container image.
 # With 16 functions all set to `waitFor: ['-']`, the inner builds queue up,
 # and the ones at the back of the queue EXPIRE after ~10 min, failing the
-# whole parent build. Splitting deploys into 3 waves caps peak concurrent
-# inner builds at ~6, which fits comfortably under quota. (See Cloud Build
+# whole parent build. Splitting deploys into 4 waves (A, B, C1, C2) caps peak
+# concurrent inner builds at ~6, which fits comfortably under quota. (See Cloud Build
 # failure 2026-05-17T15:35Z that triggered this refactor.)
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -676,7 +676,7 @@ steps:
       - 'deploy-index-alert'
       - 'deploy-audit'
 
-# Overall build timeout 60min: 3 deploy waves × ~3-5min each + scheduler wave = ~10-16min total.
+# Overall build timeout 60min: 4 deploy waves (A, B, C1, C2) × ~3-5min each + scheduler wave = ~25-30min total.
 timeout: '3600s'
 
 options:

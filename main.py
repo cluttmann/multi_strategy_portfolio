@@ -5634,7 +5634,7 @@ def wait_for_order_fill(api, order_id, timeout=300, poll_interval=5):
 
 def monthly_invest_all_strategies(api, force_execute=False, skip_order_wait=False, env="live"):
     """
-    Orchestrator function that runs all six monthly investment strategies.
+    Orchestrator function that runs all seven monthly investment strategies.
     Calculates budgets ONCE and distributes them to ensure exact percentage splits.
     
     This prevents the problem of each function independently calculating and over-spending.
@@ -5644,7 +5644,7 @@ def monthly_invest_all_strategies(api, force_execute=False, skip_order_wait=Fals
         force_execute: Bypass trading day check for testing
     
     Returns:
-        dict with results from all six strategies
+        dict with results from all seven strategies
     """
     if not force_execute and not check_trading_day(mode="monthly"):
         print("Not first trading day of the month")
@@ -5778,7 +5778,7 @@ def monthly_invest_all_strategies(api, force_execute=False, skip_order_wait=Fals
 
 def monthly_invest_all(request):
     """
-    Orchestrator endpoint that runs all three monthly strategies in one coordinated execution.
+    Orchestrator endpoint that runs all seven monthly strategies in one coordinated execution.
     Recommended for production use to ensure exact budget splits and avoid over-spending.
     """
     api = set_alpaca_environment(env=alpaca_environment)
@@ -6047,7 +6047,7 @@ if __name__ == "__main__":
             "backfill_regime_sso_scores",
         ],
         required=True,
-        help="Action to perform: 'monthly_invest_all' runs all five monthly strategies with coordinated budgets (recommended)",
+        help="Action to perform: 'monthly_invest_all' runs all seven monthly strategies with coordinated budgets (recommended)",
     )
     parser.add_argument(
         "--env",
