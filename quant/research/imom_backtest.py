@@ -222,12 +222,22 @@ def report(marks: pd.DataFrame):
         print(f"\nG7 baseline dominance: rule={rule_sh:.2f} vs "
               f"meta-gated={gate_sh:.2f} → "
               f"{'META' if gate_sh - rule_sh >= 0.1 else 'RULE'} deploys")
-        # G6 shuffle-label leakage check
+        # G6 score-shuffle null: break the score↔outcome link and re-gate.
+        # The gated per-trade mean must beat ~all null draws or the model's
+        # selection is noise.
         rng = np.random.default_rng(7)
-        sh_gross = wf.copy()
-        sh_gross["net"] = rng.permutation(sh_gross["net"].values)
-        print(f"G6 shuffle check: shuffled Sharpe="
-              f"{sharpe(daily_pnl(sh_gross, 'net')):.2f} (should be ≈ 0)")
+        nulls = []
+        for _ in range(500):
+            p_shuf = rng.permutation(wf["p"].values)
+            sel = wf.loc[p_shuf >= META_GATE, "net"]
+            if len(sel):
+                nulls.append(sel.mean())
+        nulls = np.array(nulls)
+        actual = gated["net"].mean() if not gated.empty else float("nan")
+        pct = (nulls < actual).mean() * 100
+        print(f"G6 score-shuffle null: actual {actual*1e4:+.2f}bp vs null "
+              f"{nulls.mean()*1e4:+.2f}±{nulls.std()*1e4:.2f}bp "
+              f"→ percentile {pct:.1f}% (need >95%)")
     os.makedirs(STAGING_DIR, exist_ok=True)
     trades.to_parquet(os.path.join(STAGING_DIR, "imom_trades.parquet"))
     if not wf.empty:
