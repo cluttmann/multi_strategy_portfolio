@@ -79,7 +79,12 @@ def symbol_exchange_map() -> dict[str, str]:
     for delisted in (0, 1):
         url = (f"https://eodhd.com/api/exchange-symbol-list/US"
                f"?delisted={delisted}&api_token={EODHD_TOKEN}&fmt=csv")
-        r = SESSION.get(url, timeout=120)
+        while True:
+            r = SESSION.get(url, timeout=120)
+            if r.status_code != 402:  # 402 = daily quota; wait for reset
+                break
+            print("symbol list: quota exhausted, waiting 10 min ...", flush=True)
+            time.sleep(600)
         r.raise_for_status()
         df = pd.read_csv(io.StringIO(r.text))
         df = df[df["Exchange"].isin(LISTED_EXCHANGES)]
@@ -140,12 +145,18 @@ def fetch_symbol_history(symbol: str, exchange: str, start: str,
     """
     url = (f"https://eodhd.com/api/eod/{symbol}.US"
            f"?from={start}&api_token={EODHD_TOKEN}&fmt=csv")
-    for attempt in range(retries):
+    attempt = quota_waits = 0
+    while True:
         try:
             r = SESSION.get(url, timeout=60)
             if r.status_code == 404:
                 return None
-            if r.status_code == 402:  # daily quota — wait for the reset
+            if r.status_code == 402:
+                # Daily quota exhausted. Quota-waits are NOT retries — wait
+                # for the midnight-UTC reset as long as it takes (cap 26h).
+                quota_waits += 1
+                if quota_waits > 156:
+                    raise RuntimeError(f"{symbol}: quota never reset in 26h")
                 time.sleep(600)
                 continue
             if r.status_code != 200:
@@ -155,11 +166,10 @@ def fetch_symbol_history(symbol: str, exchange: str, start: str,
             df = pd.read_csv(io.StringIO(r.text))
             break
         except RuntimeError:
-            if attempt == retries - 1:
+            attempt += 1
+            if attempt >= retries:
                 raise
             time.sleep(2 ** attempt)
-    else:
-        raise RuntimeError(f"{symbol}: quota never reset")
 
     df = df.rename(columns={"Date": "date", "Open": "open", "High": "high",
                             "Low": "low", "Close": "close",
