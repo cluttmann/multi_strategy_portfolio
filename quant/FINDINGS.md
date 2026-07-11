@@ -73,6 +73,25 @@ session, OPT defined-risk vol, event studies). None validated yet; the
 50%/yr verdict below stands **for the space tested so far** and is now
 conditional rather than terminal.
 
+## Second wave (2026-07-11 afternoon): families 11–12, model zoo, v2, deployment
+
+- **XSR v2 (fundamentals features)**: at 50% coverage Sharpe 0.50→0.54,
+  CAGR +9.7%→+10.5%, G3 2x-cost stress 0.20→0.25 (now at the bar). Final
+  full-coverage number pending overnight quota reset. **Data beat models.**
+- **Model zoo** (identical purged folds 2019–2026): GBM Sharpe 0.49 vs
+  Ridge 0.03, torch-MLP −0.38, ensemble 0.11. Model class is NOT the
+  bottleneck; question closed.
+- **PEAD** (family 11, real earnings dates + SUE, 102k liquid events):
+  L/S 20d spread +1.64% (2003–09) → +0.1–0.3% (2016–26). **KILLED**; SUE
+  stays as an XSR feature.
+- **Options premium selling** (family 12, weekly 2%-OTM put spreads
+  SPY/QQQ 2024–26, punitive costs): 83% win rate, −4.3% P&L/risk avg —
+  tail weeks exceed premia. **KILLED** as designed; chain-snapshot archive
+  compounds toward a future quote-accurate study.
+- **Deployment layer complete**: ONX executor (cls/opg), XSR executor (opg,
+  equity-scaled sizing, tranche-band turnover control), ops/daily.sh
+  pipeline. Both executors dry-run tested against the live paper account.
+
 ## The honest path to larger numbers (in order)
 
 1. Deploy the validated stack on paper at G10 burn-in size; measure live
