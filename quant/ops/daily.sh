@@ -29,3 +29,6 @@ python3 -m quant.features.daily_features --build
 python3 -m quant.features.xsr_v2_features --build
 
 echo "=== daily ops complete $(date) ==="
+
+echo "--- 6/6 polymarket macro odds + wallet fills ---"
+python3 -m quant.data.polymarket_ingest --update --trades || echo "WARN: polymarket failed"

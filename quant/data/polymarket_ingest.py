@@ -109,11 +109,88 @@ def update():
           f"{out.market_id.nunique()} Märkte, {out.date.min()} → {out.date.max()}")
 
 
+T_TRADES = f"{GCP_PROJECT}.{BQ_DATASET}.polymarket_trades"
+DATA = "https://data-api.polymarket.com"
+
+TRADES_SCHEMA = [
+    bigquery.SchemaField("ts", "TIMESTAMP", mode="REQUIRED"),
+    bigquery.SchemaField("market_id", "STRING", mode="REQUIRED"),
+    bigquery.SchemaField("condition_id", "STRING"),
+    bigquery.SchemaField("wallet", "STRING"),
+    bigquery.SchemaField("pseudonym", "STRING"),
+    bigquery.SchemaField("side", "STRING"),
+    bigquery.SchemaField("outcome", "STRING"),
+    bigquery.SchemaField("price", "FLOAT64"),
+    bigquery.SchemaField("size", "FLOAT64"),
+    bigquery.SchemaField("tx_hash", "STRING"),
+]
+
+
+def collect_trades():
+    """Tägliche Wallet-Fills des Makro-Korbs (API-Cap 3.000/Markt umgeht
+    nur die Tiefe — inkrementell gesammelt entsteht die volle Historie)."""
+    import time as _t
+
+    ensure_table(T_TRADES, TRADES_SCHEMA, partition_field="ts",
+                 clustering=["market_id", "wallet"])
+    markets = discover()
+    frames = []
+    for m in markets:
+        cid = m.get("conditionId")
+        if not cid or m.get("closed"):
+            continue
+        try:
+            r = requests.get(f"{DATA}/trades",
+                             params={"market": cid, "limit": 500,
+                                     "takerOnly": "false"}, timeout=30)
+            if r.status_code == 429:
+                _t.sleep(5)
+                continue
+            fills = r.json() if r.ok else []
+        except Exception:  # noqa: BLE001
+            continue
+        if not fills:
+            continue
+        df = pd.DataFrame(fills)
+        df["ts"] = pd.to_datetime(df["timestamp"], unit="s", utc=True)
+        df["market_id"] = str(m["id"])
+        df = df.rename(columns={"conditionId": "condition_id",
+                                "proxyWallet": "wallet",
+                                "transactionHash": "tx_hash"})
+        keep = ["ts", "market_id", "condition_id", "wallet", "pseudonym",
+                "side", "outcome", "price", "size", "tx_hash"]
+        frames.append(df[[c for c in keep if c in df.columns]])
+        _t.sleep(0.1)
+    if not frames:
+        print("keine Fills")
+        return
+    out = pd.concat(frames, ignore_index=True)
+    out["price"] = out["price"].astype(float)
+    out["size"] = out["size"].astype(float)
+    # idempotent: nur neue tx_hash+wallet-Kombis anfügen
+    from quant.data.bq import client, query
+    try:
+        existing = query(
+            f"SELECT DISTINCT tx_hash FROM `{T_TRADES}` "
+            f"WHERE ts >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)")
+        out = out[~out["tx_hash"].isin(set(existing["tx_hash"]))]
+    except Exception:  # noqa: BLE001
+        pass
+    if len(out):
+        load_df(T_TRADES, out, schema=TRADES_SCHEMA)
+    print(f"polymarket_trades: +{len(out):,} neue Fills, "
+          f"{out['wallet'].nunique() if len(out) else 0} Wallets")
+
+
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--update", action="store_true")
+    p.add_argument("--trades", action="store_true")
     args = p.parse_args()
-    if not args.update:
+    if args.update:
+        update()
+    if args.trades:
+        collect_trades()
+    if not (args.update or args.trades):
         p.print_help()
         sys.exit(1)
-    update()
