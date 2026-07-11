@@ -70,12 +70,13 @@ PRED_SCHEMA = [
 ]
 
 
-def load_features(v2: bool = False) -> pd.DataFrame:
+def load_features(v2: bool = False, feats: list | None = None) -> pd.DataFrame:
     table = T_FEATURES
     if v2:
         from quant.features.xsr_v2_features import T_V2
         table = T_V2
-    cols = ["date", "symbol"] + FEATURES + [LABEL, "fwd_ret_1d", "vol_63d", "adv63"]
+    use = feats if feats is not None else (V2_FEATURES if v2 else FEATURES)
+    cols = ["date", "symbol"] + use + [LABEL, "fwd_ret_1d", "vol_63d", "adv63"]
     cols = list(dict.fromkeys(cols))
     sql = f"SELECT {', '.join(cols)} FROM `{table}` WHERE {LABEL} IS NOT NULL"
     print("Pulling features from BigQuery ...")
