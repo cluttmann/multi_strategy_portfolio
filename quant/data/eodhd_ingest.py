@@ -159,6 +159,10 @@ def fetch_symbol_history(symbol: str, exchange: str, start: str,
                     raise RuntimeError(f"{symbol}: quota never reset in 26h")
                 time.sleep(600)
                 continue
+            if r.status_code == 429:
+                # Minute-rate throttle: patient waits, never a retry strike.
+                time.sleep(45)
+                continue
             if r.status_code != 200:
                 raise RuntimeError(f"HTTP {r.status_code}: {r.text[:80]}")
             if len(r.text) < 60:
@@ -223,7 +227,8 @@ def backfill_symbols(start: str, workers: int = 12, truncate: bool = False,
         print(f"loaded {total:,} rows | {fetched:,}/{len(todo):,} symbols "
               f"({empty:,} empty) | {rate:.0f} sym/min", flush=True)
 
-    with cf.ThreadPoolExecutor(max_workers=workers) as ex:
+    ex = cf.ThreadPoolExecutor(max_workers=workers)
+    try:
         futs = {ex.submit(fetch_symbol_history, s, exmap[s], start): s
                 for s in todo}
         for fut in cf.as_completed(futs):
@@ -236,6 +241,10 @@ def backfill_symbols(start: str, workers: int = 12, truncate: bool = False,
             buf_rows += len(df)
             if buf_rows >= flush_rows:
                 flush()
+    finally:
+        # On any fatal error, drop the queue instead of draining 30k
+        # discarded fetches through the API (burns quota for nothing).
+        ex.shutdown(wait=False, cancel_futures=True)
     flush()
     print(f"DONE. {total:,} rows from {fetched:,} symbols ({empty:,} empty).")
 

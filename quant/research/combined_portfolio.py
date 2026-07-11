@@ -89,12 +89,23 @@ def stats(r: pd.Series, days=252):
     return cagr, sh, dd, worst
 
 
+def xsr() -> pd.Series:
+    import os
+    from quant.config import STAGING_DIR
+    path = os.path.join(STAGING_DIR, "sim_wf_v1.parquet")
+    df = pd.read_parquet(path)
+    s = df["net_ret"]
+    s.index = pd.to_datetime(s.index)
+    return s.rename("XSR")
+
+
 def run():
     print("building sleeve series ...")
     onx = onx_v2()
     volc = vol_carry()
     ct = crypto_trend()
-    panel = pd.concat([onx, volc, ct], axis=1).loc["2016":]
+    xs = xsr()
+    panel = pd.concat([onx, volc, ct, xs], axis=1).loc["2016":]
     # crypto only exists 2021+; treat pre-2021 as 0 (not deployed)
     panel = panel.fillna(0.0)
 
