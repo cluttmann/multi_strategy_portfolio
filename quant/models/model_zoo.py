@@ -51,35 +51,41 @@ def fit_ridge(Xtr, ytr, Xte):
     return m.predict(te)
 
 
-def fit_mlp(Xtr, ytr, Xte):
+def fit_mlp(Xtr, ytr, Xte, max_rows=3_000_000):
     import torch
     import torch.nn as nn
     dev = "mps" if torch.backends.mps.is_available() else "cpu"
-    tr = torch.tensor(_mat(Xtr))
-    te = torch.tensor(_mat(Xte))
-    y = torch.tensor(ytr.to_numpy(dtype="float32")).unsqueeze(1)
-    # standardize on train stats (many features are already z-scores)
-    mu, sd = tr.mean(0, keepdim=True), tr.std(0, keepdim=True).clamp(min=1e-6)
-    tr, te = (tr - mu) / sd, (te - mu) / sd
+    trn = _mat(Xtr)
+    yn = ytr.to_numpy(dtype="float32")
+    if len(trn) > max_rows:
+        idx = np.random.default_rng(1).choice(len(trn), max_rows, replace=False)
+        trn, yn = trn[idx], yn[idx]
+    mu = trn.mean(0, keepdims=True)
+    sd = trn.std(0, keepdims=True) + 1e-6
+    # single transfer to device; index on-device (per-batch host→device
+    # transfers hang MPS at this scale)
+    tr = torch.tensor((trn - mu) / sd, device=dev)
+    y = torch.tensor(yn, device=dev).unsqueeze(1)
     net = nn.Sequential(nn.Linear(tr.shape[1], 128), nn.ReLU(), nn.Dropout(0.1),
                         nn.Linear(128, 32), nn.ReLU(), nn.Linear(32, 1)).to(dev)
     opt = torch.optim.AdamW(net.parameters(), lr=1e-3, weight_decay=1e-5)
     lossf = nn.MSELoss()
     bs = 65536
     for epoch in range(2):
-        perm = torch.randperm(len(tr))
+        perm = torch.randperm(len(tr), device=dev)
         for i in range(0, len(tr), bs):
             idx = perm[i:i + bs]
-            xb, yb = tr[idx].to(dev), y[idx].to(dev)
             opt.zero_grad()
-            loss = lossf(net(xb), yb)
+            loss = lossf(net(tr[idx]), y[idx])
             loss.backward()
             opt.step()
     net.eval()
+    ten = torch.tensor((_mat(Xte) - mu) / sd, device=dev)
     out = []
     with torch.no_grad():
-        for i in range(0, len(te), bs):
-            out.append(net(te[i:i + bs].to(dev)).cpu().numpy())
+        for i in range(0, len(ten), bs):
+            out.append(net(ten[i:i + bs]).cpu().numpy())
+    del tr, y, ten
     return np.concatenate(out).ravel()
 
 
