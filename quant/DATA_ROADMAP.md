@@ -88,3 +88,36 @@ Direkt aus `trading-436516` per SQL joinbar mit `quant.*`:
 - **Ende Woche / Anfang nächste:** Kalshi-Collector (Klon des Polymarket-Sammlers) + Candlestick-Backfill; danach erster Retrain des Rankers mit den neuen Features (Short-Volume-Ratio, Insider-Netto, Revision-Momentum) und VOLC-Re-Test mit VIX9D/VVIX/SKEW-Block.
 
 **Quota-Regel für alles Weitere:** EODHD-Backfills nur nachts in Tranchen (Fundamentals = 10 Calls, News/Sentiment = 5, Kalender/EOD = 1); bei Bedarf `extraLimit` bei EODHD anfragen. Alles andere in dieser Roadmap läuft an der EODHD-Quota vorbei.
+
+---
+
+## 5. Modell-Evaluationsprotokoll für die neuen Daten (verbindlich)
+
+Erkenntnis aus dem Modell-Zoo (6 Fitter, identische Folds): Fitter-Tausch bei
+gleicher Information ≈ 0; neue Information hebt. Neue MODELLE sind nur
+gerechtfertigt, wenn neue Daten eine Struktur haben, die GBM nicht
+ausdrücken kann. Deshalb zweistufig:
+
+**Stufe 1 — Feature-Block-Ablation (immer zuerst, Modell bleibt LightGBM):**
+Jeder neue Datenblock geht als Feature-Gruppe in XSR v3, mit vorregistrierter
+Ablation auf identischen Folds. Aufnahme-Kriterium: **≥ +0,02 OOS-Sharpe**
+gegenüber dem Panel ohne den Block (sonst raus, dokumentiert).
+Geplante Blöcke: (a) FINRA Short-Ratio-Z, (b) Insider-Netto-Käufe 30/90d
+(SEC Form 4), (c) Earnings-Timing (Tage-bis/seit, BMO/AMC-Fix der SUE),
+(d) Borrow-Status-Transitionen (ab ~3 Monaten Historie), (e) FRED-Regime-Z
+(Interaktions-Features), (f) News-Embedding-Ton 30d, (g) VIX-Termstruktur.
+
+**Stufe 2 — Architektur-Eskalation (nur bei struktureller Rechtfertigung):**
+
+| Datenstruktur | Kandidat-Modell | Trigger |
+|---|---|---|
+| Sequenzen (Funding-Historie, Regime-Pfade) | Temporal (ALSTM/TCN) | Sequenz-Aggregat-Features schlagen in Stufe 1 an, verlieren aber offensichtlich Information durch Aggregation |
+| Graphen (News-Co-Mentions, Peer-Effekte) | Cross-Sectional Attention / GAT | simples Peer-Momentum-Feature (GBM) zeigt ≥ +0,02 Sharpe |
+| Text roh (2M+ News, GDELT) | Embedding-Encoder + Tabular-Head | Embedding-Aggregat-Features (GBM) schlagen an |
+| Chart-Muster | CNN auf OHLC-Bildern (JKX 2023) | unabhängig testbar — publizierte Evidenz als Prior; nach v3 |
+| Krypto-Entries (jetzt 2017+) | ML-Meta-Filter auf CTREND | genug Events erst mit Binance-Historie — jetzt testbar |
+
+Jede Eskalation läuft durch denselben Zoo-Vergleich (identische Folds,
+identische Portfolio-Simulation) wie GBM/Ridge/MLP. Deployment eines neuen
+Modells nur bei **≥ +0,05 Sharpe gegenüber GBM auf denselben Features**
+(Komplexitätskosten eingepreist).
