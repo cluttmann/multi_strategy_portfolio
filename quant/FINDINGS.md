@@ -28,6 +28,7 @@ confirmation sets, split-sample regime checks.
 | GAP overnight-gap drift/fade | IC .17→.03 at 2022 | negative every year | **killed** (arbitraged) |
 | PAIR 3x short-short decay harvest | −3%..−4% | negative | **killed** (borrow prices the edge) |
 | DOW calendar refinement of ONX | vacuous rule | refuted | **killed** |
+| CAT LLM catalyst drift (137k FinBERT-scored overnight events) | gross Sharpe 0.71 (+19.7%); net −30.6%/yr | IC>0 all 8 years | **killed** (real signal, edge 4x smaller than costs; G8 FinBERT floor) |
 
 ## The 50%/yr question — answered
 
