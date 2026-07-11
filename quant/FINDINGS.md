@@ -46,6 +46,33 @@ confirmation sets, split-sample regime checks.
   exists precisely to prevent it. This document is the negative result, and
   it is load-bearing: it prevents deploying fiction.
 
+## CORRECTION (2026-07-11 afternoon): the search space was NOT exhausted
+
+A systematic sweep of current Alpaca docs (prompted by the account owner)
+found capabilities the original program missed — the venue landscape itself
+changed in 2026:
+
+1. **24/5 overnight session (Blue Ocean ATS)** — live since ~Feb 2026,
+   enabled by default, ONX universe is `overnight_tradable`. Free real-time
+   `overnight` feed; BOATS historical bars from 2026-01. A five-month-old
+   venue is the least-arbitraged surface available, and our Benzinga corpus
+   covers the same window → overnight news-reaction strategies (act at 21:00
+   ET) are testable for the first time. Study: `overnight_session_study`.
+2. **Options Level 3 on paper** with free greeks/IV chain snapshots
+   (indicative feed) + bars/trades history since 2024-02 (~2.4y). Defined-
+   risk spreads = non-Reg-T leverage. No historical quotes exist anywhere →
+   the chain-snapshot archiver (started 2026-07-11) becomes proprietary
+   backtest data.
+3. **Historical auctions endpoint** (official MOO/MOC prints) → ONX backtest
+   fidelity upgrade. **Corporate-actions API** (recent years) + own warehouse
+   → reverse-split-drift / spin-off event studies. **Screeners** solve the
+   30-symbol websocket cap. **PDT abolished** — no day-trade throttling.
+
+Status: three genuinely new, honest strategy families queued (OVN overnight
+session, OPT defined-risk vol, event studies). None validated yet; the
+50%/yr verdict below stands **for the space tested so far** and is now
+conditional rather than terminal.
+
 ## The honest path to larger numbers (in order)
 
 1. Deploy the validated stack on paper at G10 burn-in size; measure live
