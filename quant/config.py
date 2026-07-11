@@ -25,9 +25,14 @@ T_PREDICTIONS = f"{GCP_PROJECT}.{BQ_DATASET}.predictions"
 T_TRADES = f"{GCP_PROJECT}.{BQ_DATASET}.trades"
 
 # --- API credentials ---------------------------------------------------------
+# The quant desk trades its own dedicated paper account (PA3IN7QIGPSE,
+# created 2026-07-11 with $100k) via ALPACA_*_QNT keys. Data endpoints work
+# with any keys, so research falls back to the bot's paper keys until the
+# QNT keys are in .env.
 EODHD_TOKEN = os.environ["EODHD_TOKEN"]
-ALPACA_KEY_PAPER = os.environ["ALPACA_API_KEY_PAPER"]
-ALPACA_SECRET_PAPER = os.environ["ALPACA_SECRET_KEY_PAPER"]
+ALPACA_KEY_PAPER = os.environ.get("ALPACA_API_KEY_QNT") or os.environ["ALPACA_API_KEY_PAPER"]
+ALPACA_SECRET_PAPER = os.environ.get("ALPACA_SECRET_KEY_QNT") or os.environ["ALPACA_SECRET_KEY_PAPER"]
+QNT_ACCOUNT_DEDICATED = bool(os.environ.get("ALPACA_API_KEY_QNT"))
 FRED_KEY = os.environ.get("FREDKEY")
 
 ALPACA_PAPER_BASE = "https://paper-api.alpaca.markets"
