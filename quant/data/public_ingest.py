@@ -175,6 +175,8 @@ def finra_backfill(start="2009-08-03"):
                                 "ShortExemptVolume": "short_exempt_volume",
                                 "TotalVolume": "total_volume"})
         df["date"] = pd.to_datetime(df["date"], format="%Y%m%d").dt.date
+        for c in ["short_volume", "short_exempt_volume", "total_volume"]:
+            df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0).astype("int64")
         buf.append(df[["date", "symbol", "short_volume",
                        "short_exempt_volume", "total_volume"]])
         if len(buf) >= 250:
