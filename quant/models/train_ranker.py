@@ -70,10 +70,14 @@ PRED_SCHEMA = [
 ]
 
 
-def load_features() -> pd.DataFrame:
+def load_features(v2: bool = False) -> pd.DataFrame:
+    table = T_FEATURES
+    if v2:
+        from quant.features.xsr_v2_features import T_V2
+        table = T_V2
     cols = ["date", "symbol"] + FEATURES + [LABEL, "fwd_ret_1d", "vol_63d", "adv63"]
     cols = list(dict.fromkeys(cols))
-    sql = f"SELECT {', '.join(cols)} FROM `{T_FEATURES}` WHERE {LABEL} IS NOT NULL"
+    sql = f"SELECT {', '.join(cols)} FROM `{table}` WHERE {LABEL} IS NOT NULL"
     print("Pulling features from BigQuery ...")
     df = client().query(sql).result().to_dataframe(create_bqstorage_client=True)
     df["date"] = pd.to_datetime(df["date"])
@@ -131,18 +135,34 @@ def walk_forward(df: pd.DataFrame, start_year: int, end_year: int) -> pd.DataFra
     return pd.concat(preds, ignore_index=True)
 
 
+V2_FEATURES = FEATURES + [
+    "z_ep_ttm", "z_bp", "z_sp_ttm", "z_fcfp_ttm", "z_roe_ttm",
+    "z_gross_margin_ttm", "z_accruals", "z_issuance_4q", "z_sue",
+    "days_since_report", "sector_id",
+]
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--walk-forward", action="store_true")
     p.add_argument("--start-year", type=int, default=2003)
     p.add_argument("--end-year", type=int, default=dt.date.today().year)
     p.add_argument("--run-tag", default="wf_v1")
+    p.add_argument("--v2", action="store_true",
+                   help="train on features_daily_v2 with fundamentals features")
     args = p.parse_args()
     if not args.walk_forward:
         p.print_help()
         sys.exit(1)
 
-    df = load_features()
+    global FEATURES
+    if args.v2:
+        from quant.features.xsr_v2_features import T_V2
+        import quant.models.train_ranker as _self
+        _self.T_FEATURES_ACTIVE = T_V2
+        FEATURES = V2_FEATURES
+
+    df = load_features(v2=args.v2)
     preds = walk_forward(df, args.start_year, args.end_year)
 
     ensure_table(T_PREDICTIONS, PRED_SCHEMA, partition_field="date",
