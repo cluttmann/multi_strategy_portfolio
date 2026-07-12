@@ -110,3 +110,25 @@ conditional rather than terminal.
   `portfolio_sim`'s |ret|>50% artifact guard is mandatory.
 - Alpaca free tier: explicit `end` inside the recent-SIP window → 403;
   Benzinga corpus is the only timestamp-authoritative news source.
+
+
+## XSR v2 FINAL (75% Fundamentals-Abdeckung, 2026-07-12)
+
+Nach vollständigem Fundamentals-Backfill (4.420 Symbole):
+- **net@5bp: Sharpe 0.69, CAGR +14.4%** (v1 ohne Fundamentals: 0.50/+9.7%; v2@50%: 0.54/+10.5%)
+- net@10bp (2x-Kosten-Stress): Sharpe 0.39, +6.7% — passt G3 jetzt KOMFORTABEL (war grenzwertig)
+- gross Sharpe 0.98; 75% positive Jahre; Alpha faktorrein (FF5+Mom, t=2.19)
+- **Bestätigt die Deep-Research-These empirisch: Daten (Fundamentals) schlugen jeden Modelltausch.**
+  Sharpe 0.50→0.69 durch Daten; 6 Modellklassen brachten 0.
+
+## Horizont-Experiment (Deep-Research #1-Befund)
+
+| h | Sharpe@5bp | Sharpe@10bp | Turnover |
+|---|---|---|---|
+| 5d | 0.61 | 0.32 | 0.55 |
+| 10d | 0.56 | 0.40 | 0.28 |
+| 21d | 0.52 | 0.44 | 0.14 |
+
+Ranking kippt bei der Kostenannahme: 5d gewinnt bei 5bp, 21d bei 10bp
+(4x weniger Turnover). Deploy 5d, 21d als kostenrobuster Fallback — Burn-in
+misst echte Fills als Entscheider.
