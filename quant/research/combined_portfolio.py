@@ -59,21 +59,20 @@ def vol_carry() -> pd.Series:
 
 
 def crypto_trend() -> pd.Series:
-    from quant.research.exotic_sleeves import CRYPTO
-    px = {}
-    for s in CRYPTO:
-        try:
-            px[s] = alpaca_daily(s, "2021-01-01", crypto=True)["c"]
-        except Exception:  # noqa: BLE001
-            pass
-    close = pd.DataFrame(px).ffill()
+    # Binance 2017+ (survivorship-frei BTC+ETH), identische vorregistrierte Regeln
+    from quant.data.bq import query
+    px = query("SELECT date, symbol, close FROM "
+               "`trading-436516.quant.binance_daily` "
+               "WHERE symbol IN ('BTCUSDT','ETHUSDT') ORDER BY date")
+    px["date"] = pd.to_datetime(px["date"])
+    close = px.pivot(index="date", columns="symbol", values="close").ffill(limit=3)
     ret = close.pct_change()
     sig = ((close > close.rolling(20).mean())
            & (close > close.rolling(50).mean())
            & (close.pct_change(20) > 0)).shift(1)
     vol20 = ret.rolling(20).std() * np.sqrt(365)
     w = (sig * (0.40 / vol20.shift(1)).clip(upper=1.0))
-    w = w.div(w.sum(axis=1).clip(lower=1.0), axis=0)
+    w = w.div(w.sum(axis=1).clip(lower=1.0), axis=0).fillna(0)
     strat = (w * ret).sum(axis=1) - w.diff().abs().sum(axis=1).fillna(0) * 25 / 1e4
     return strat.rename("CTREND")
 
@@ -92,7 +91,10 @@ def stats(r: pd.Series, days=252):
 def xsr() -> pd.Series:
     import os
     from quant.config import STAGING_DIR
-    path = os.path.join(STAGING_DIR, "sim_wf_v1.parquet")
+    # XSR v2 final (75% Fundamentals-Abdeckung, Sharpe 0.69 net@5bp)
+    path = os.path.join(STAGING_DIR, "sim_wf_v2_full.parquet")
+    if not os.path.exists(path):
+        path = os.path.join(STAGING_DIR, "sim_wf_v1.parquet")
     df = pd.read_parquet(path)
     s = df["net_ret"]
     s.index = pd.to_datetime(s.index)
@@ -130,6 +132,16 @@ def run():
           f"{'worst yr':>9s}")
     for g in [1.0, 1.25, 1.5, 1.75, 2.0, 2.5]:
         lev = stack * g - max(g - 1, 0) * MARGIN_RATE / 252
+        cagr, sh, dd, worst = stats(lev)
+        flag = "  ← 50%+" if cagr >= 0.50 else ""
+        print(f"{g:6.2f} {cagr:+8.1%} {sh:7.2f} {dd:7.1%} {worst:+9.0%}{flag}")
+
+    print("\n=== NUR aktuelles Regime 2022+ (das für die Zukunft zählt) ===")
+    print(f"{'gross':>6s} {'CAGR':>8s} {'Sharpe':>7s} {'MaxDD':>7s} "
+          f"{'worst yr':>9s}")
+    stack_cur = stack.loc["2022":]
+    for g in [1.0, 1.5, 2.0, 2.5, 3.0]:
+        lev = stack_cur * g - max(g - 1, 0) * MARGIN_RATE / 252
         cagr, sh, dd, worst = stats(lev)
         flag = "  ← 50%+" if cagr >= 0.50 else ""
         print(f"{g:6.2f} {cagr:+8.1%} {sh:7.2f} {dd:7.1%} {worst:+9.0%}{flag}")
