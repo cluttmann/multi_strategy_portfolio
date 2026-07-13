@@ -33,5 +33,8 @@ echo "=== daily ops complete $(date) ==="
 echo "--- 6/6 polymarket macro odds + wallet fills ---"
 python3 -m quant.data.polymarket_ingest --update --trades || echo "WARN: polymarket failed"
 
-echo "--- 7/7 public data: borrow snapshot + FRED refresh + FINRA increment ---"
-python3 -m quant.data.public_ingest --borrow-snap --finra || echo "WARN: public data failed"
+echo "--- 7/8 public data: borrow snapshot + FRED refresh + FINRA increment ---"
+python3 -m quant.data.public_ingest --borrow-snap --finra --fng || echo "WARN: public data failed"
+
+echo "--- 8/8 crypto: Binance daily klines + funding rates ---"
+python3 -m quant.data.binance_ingest --klines --funding || echo "WARN: binance failed"
