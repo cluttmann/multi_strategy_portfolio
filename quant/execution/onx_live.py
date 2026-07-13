@@ -36,6 +36,8 @@ TOP_N = 8             # liquidity cap: EW across the N most-liquid gated names
 
 
 def decide(dry_run: bool):
+    from quant.execution.guard import guard_or_exit
+    burn = guard_or_exit(SLEEVE)
     univ = [s for s in discover_universe() if s not in BOT_TICKERS]
     gated = []
     for s in univ:
@@ -55,10 +57,10 @@ def decide(dry_run: bool):
 
     acct = broker.account()
     equity = float(acct["equity"])
-    scale = risk.drawdown_scale(equity)
+    scale = risk.drawdown_scale(equity) * burn
     budget = equity * SLEEVE_ALLOC * scale
     plan = {"picks": picks, "budget": round(budget, 2), "scale": scale,
-            "n_gated": len(gated)}
+            "n_gated": len(gated), "burn_in": burn}
     print(f"plan: {plan}")
     if not dry_run:
         ledger.set_sleeve(SLEEVE, {**ledger.get_sleeve(SLEEVE), "plan": plan})

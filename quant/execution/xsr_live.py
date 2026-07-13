@@ -52,9 +52,11 @@ def latest_scores() -> pd.DataFrame:
 
 
 def plan(dry_run: bool):
+    from quant.execution.guard import guard_or_exit
+    burn = guard_or_exit(SLEEVE)
     acct = broker.account()
     equity = float(acct["equity"])
-    scale = risk.drawdown_scale(equity)
+    scale = risk.drawdown_scale(equity) * burn
     side_budget = equity * SLEEVE_ALLOC * scale
     n_side = int(np.clip(side_budget / TARGET_POS_USD, 5, 75))
 

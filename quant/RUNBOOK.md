@@ -1,5 +1,12 @@
 # Quant desk runbook — paper go-live
 
+> **STATUS 2026-07-13: SCHEDULED & LIVE (Burn-in).** Alle Jobs laufen via
+> launchd auf Konto PA3IN7QIGPSE ($100k). Installer: `python3 -m
+> quant.ops.install_schedule --install|--uninstall|--list`. Handelstag-Guard
+> (guard.py, NYSE-Kalender) macht Feiertagsläufe zu No-Ops; Burn-in-Sizing
+> 25 % (Firestore qnt-risk/state.burn_in_scale → auf 1.0 nach 20 grünen Tagen).
+
+
 ## Daily schedule (all times Europe/Berlin; ET in parens)
 
 | Time | What | Command |
