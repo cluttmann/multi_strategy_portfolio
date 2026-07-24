@@ -25,6 +25,11 @@ N_SIDE = 75           # names per side (~95th percentile of a 1500 universe)
 BAND_MULT = 6.0       # hold until outside top/bottom 30% (DESIGN.md hysteresis)
 COST_BPS = 5.0
 STRESS_BPS = 10.0
+# DESIGN.md G1 fordert 2%/Jahr Leihkosten auf das Short-Bein. Das fehlte bis
+# 2026-07-25 vollständig — XSRs Sharpe war dadurch um ~0.10 zu hoch
+# ausgewiesen. General Collateral liegt bei ~30-50bp; 2% ist der konservative
+# G1-Wert, der Specials mit abdeckt.
+BORROW_BPS_YR = 200.0
 GROSS_LEVERAGE = 2.0  # 1x long + 1x short
 MAX_ABS_RET = 0.5     # data-artifact guard: |open→open| >50% rows are junk
                       # (LAN/PGS-style corrupted series; 0.06% of rows)
@@ -86,12 +91,15 @@ def simulate(preds: pd.DataFrame, n_side=N_SIDE, band_mult=BAND_MULT,
                           - prev_w.reindex(union).fillna(0.0)).abs().sum())
         cost = turnover * cost_bps / 1e4
         stress_cost = turnover * STRESS_BPS / 1e4
+        short_notional = float(-w[w < 0].sum())
+        borrow = short_notional * BORROW_BPS_YR / 1e4 / 252.0
 
         rows.append({
             "date": d,
             "gross_ret": gross_ret,
-            "net_ret": gross_ret - cost,
-            "net_ret_stress": gross_ret - stress_cost,
+            "net_ret": gross_ret - cost - borrow,
+            "net_ret_stress": gross_ret - stress_cost - 2 * borrow,
+            "borrow_cost": borrow,
             "turnover": turnover,
             "n_long": len(longs),
             "n_short": len(shorts),
@@ -177,9 +185,14 @@ def simulate_tranches(preds: pd.DataFrame, n_side=N_SIDE, cost_bps=COST_BPS,
         union = book.index.union(prev_book.index)
         turnover = float((book.reindex(union).fillna(0)
                           - prev_book.reindex(union).fillna(0)).abs().sum())
+        # Leihkosten (G1): auf das gehaltene Short-Notional, pro Tag
+        short_notional = float(-book[book < 0].sum())
+        borrow = short_notional * BORROW_BPS_YR / 1e4 / 252.0
         rows.append({"date": d, "gross_ret": gross_ret,
-                     "net_ret": gross_ret - turnover * cost_bps / 1e4,
-                     "net_ret_stress": gross_ret - turnover * STRESS_BPS / 1e4,
+                     "net_ret": gross_ret - turnover * cost_bps / 1e4 - borrow,
+                     "net_ret_stress": (gross_ret - turnover * STRESS_BPS / 1e4
+                                        - 2 * borrow),
+                     "borrow_cost": borrow,
                      "turnover": turnover, "n_long": int((book > 0).sum()),
                      "n_short": int((book < 0).sum())})
         prev_book = book

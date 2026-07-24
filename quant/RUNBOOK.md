@@ -10,6 +10,13 @@
 > Deploy-Skript: `quant/cloud/`. Rebuild: `gcloud builds submit
 > --config=quant/cloud/cloudbuild.yaml .`. Handelstag-Guard + Burn-in 25 %
 > wie zuvor. launchd (Mac) ist abgebaut.
+>
+> **4 Sleeves live (2026-07-25):** XSR (Sharpe 0.60 nach Leihkosten),
+> ONX (1.06 full / 0.57 aktuell), VOLC (0.64), EOMT (0.87 / 0.65 Holdout).
+> Krypto/CTREND ausgeschlossen. 10 Cloud-Scheduler, alle ET-Zeiten:
+> xsr-plan 8:30, onx-exit 9:15, xsr-execute 9:00, reconcile 10:15,
+> etf-reconcile 10:20, onx-decide 15:40, onx-enter 15:45,
+> etf-rebalance 15:47, dailyops 21:00, sleeve-health Sa 18:00.
 
 ## Daily schedule (all times Europe/Berlin; ET in parens)
 

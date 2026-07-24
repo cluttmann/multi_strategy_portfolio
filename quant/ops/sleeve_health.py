@@ -32,6 +32,7 @@ BASELINES = {
     "XSR": {"sharpe": 0.69, "regime_2022": 0.60, "monitor_only": False},
     "ONX": {"sharpe": 1.06, "regime_2022": 0.40, "monitor_only": False},
     "VOLC": {"sharpe": 0.64, "regime_2022": 0.45, "monitor_only": False},
+    "EOMT": {"sharpe": 0.87, "regime_2022": 0.65, "monitor_only": False},
     "CTREND": {"sharpe": 1.19, "regime_2022": 0.75, "monitor_only": True},
 }
 
@@ -157,8 +158,25 @@ def ctrend_returns() -> pd.Series:
             - w.diff().abs().sum(axis=1).fillna(0) * 25 / 1e4).dropna()
 
 
+def eomt_returns() -> pd.Series:
+    """EW IEF/TLT/EDV an den letzten 5 Handelstagen des Monats, 4bp."""
+    from quant.research.eomt_study import month_end_returns, COST
+    df = query(f"""
+      SELECT date, symbol, adjusted_close AS ac
+      FROM `{GCP_PROJECT}.{BQ_DATASET}.eod_bars`
+      WHERE symbol IN ('IEF','TLT','EDV') AND adjusted_close > 0
+        AND date >= DATE_SUB(CURRENT_DATE(), INTERVAL 6 YEAR) ORDER BY date""")
+    if df.empty:
+        return pd.Series(dtype=float)
+    df["date"] = pd.to_datetime(df["date"])
+    px = df.pivot(index="date", columns="symbol", values="ac").sort_index()
+    me = month_end_returns(px, 5)
+    cols = [c for c in ("IEF", "TLT", "EDV") if c in me]
+    return (me[cols].mean(axis=1) - COST).dropna()
+
+
 SLEEVES = {"XSR": xsr_returns, "ONX": onx_returns, "VOLC": volc_returns,
-           "CTREND": ctrend_returns}
+           "EOMT": eomt_returns, "CTREND": ctrend_returns}
 
 
 def check(alert=True):
@@ -177,7 +195,7 @@ def check(alert=True):
         if r.empty:
             print(f"{name:8s} keine Daten")
             continue
-        ann = 365 if name == "CTREND" else 252
+        ann = 365 if name == "CTREND" else (12 if name == "EOMT" else 252)
         s60 = _sharpe(r.tail(60), ann)
         s252 = _sharpe(r.tail(252), ann)
         # z-Score der 60d-Schätzung gegen Baseline (SE ≈ sqrt(ann/n))
