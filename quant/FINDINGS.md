@@ -264,3 +264,35 @@ Der Kostenmonitor bleibt aktiv (er misst Trends und findet Ausreißer), aber
 seine Absolutwerte sind eine OBERGRENZE, keine Kostenschätzung. Die belastbare
 Burn-in-Kennzahl ist deshalb der Vergleich realisierter Sleeve-P&L gegen die
 Backtest-Erwartung — nicht Fill-vs-Print.
+
+## Familie 16 (DTRD) VALIDIERT — Cross-Asset-Trendfolge über ETFs
+
+Mechanismus: Risikotransfer-Gebühr an Hedger (Rohstoff-Produzenten,
+Duration-Hedger) + langsame Makro-Diffusion. KEIN Informationsvorsprung →
+verfällt nicht durch Publikation (anders als IMOM/GAP/PEAD).
+Universum: 30 ETFs Anleihen/Rohstoffe/Währungen/Intl-Aktien/Immobilien —
+bewusst OHNE US-Aktien und OHNE Krypto. Long/flat, Vol-Target 10 %, MONATLICH.
+
+| | Sharpe | CAGR | MaxDD |
+|---|---|---|---|
+| Training 2004–2019 (Lookback 126d gewählt) | 0.90 | +5.1% | −10.5% |
+| **HOLDOUT 2020–2026 (nie gefittet)** | **0.43** | **+3.1%** | −15.0% |
+| Gesamt 2004–2026 | 0.73 | +4.5% | −15.0% |
+
+Der Holdout-Wert 0.43 deckt sich exakt mit der vorab genannten Erwartung
+(0.35–0.45) und mit den Live-Zahlen der Industrie (SG CTA Index Sharpe 0.61
+seit 2000, DBMF 2020–24 ≈ 0.35–0.40). Kein Overfit-Verdacht.
+**DSR 0.988 → besteht G5** (enger vorregistrierter Variantensatz, SR* 0.25).
+**Orthogonalität exzellent: ρ(XSR) = −0.001, ρ(ONX) = +0.041, ρ(VOLC) = +0.353.**
+Monatliche Umschichtung → kostenimmun gegen den Wall, der IMOM/GAP/CAT/PEAD
+getötet hat.
+
+PORTFOLIO-WIRKUNG, ehrlich: 4 → 5 Sleeves hebt S_p nur von 0.81 auf 0.85
+(+0.03), weil DTRDs Sharpe (0.43) UNTER dem Stack-Mittel liegt. CAGR@24 % Vol
+19.5 % → 20.3 %. Ein orthogonaler Sleeve mit unterdurchschnittlichem Sharpe
+verbessert die Robustheit, nicht die Rendite.
+
+**Arithmetik nach 16 Familien:** 5 validierte Sleeves, Mittel-Sharpe 0.48
+(aktuelles Regime). Für 50 % CAGR bei tragbarem Risiko braucht es S_p ≈ 1.8 —
+bei diesem Qualitätsmittel wären das ~14 Sleeves. Trefferquote 5/16 = 31 % →
+~29 weitere Familien zu testen. Das ist der ehrliche Weg, und er ist lang.
