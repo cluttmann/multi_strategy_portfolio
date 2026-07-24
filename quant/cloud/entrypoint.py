@@ -5,7 +5,7 @@ eine Job-Execution. Der Handelstag-Guard in den Executors macht Feiertage
 zu No-Ops; Secrets kommen als Env aus Secret Manager.
 
 TASK ∈ {dailyops, xsr-plan, xsr-execute, onx-exit, onx-decide, onx-enter,
-        reconcile}
+        reconcile, sleeve-health}
 """
 
 import os
@@ -35,6 +35,9 @@ def main():
         elif task == "onx-enter":
             from quant.execution import onx_live
             onx_live.enter(dry_run=False)
+        elif task == "sleeve-health":
+            from quant.ops import sleeve_health
+            sleeve_health.check(alert=True)
         elif task == "reconcile":
             from quant.execution import onx_live, xsr_live
             for name, fn in [("xsr", xsr_live.reconcile),

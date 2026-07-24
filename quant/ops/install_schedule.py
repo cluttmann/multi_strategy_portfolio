@@ -38,6 +38,7 @@ JOBS = [
     ("reconcile", 16, 15, ["quant.ops._reconcile"], True),
     ("onx-decide", 21, 45, ["quant.execution.onx_live", "--decide"], True),
     ("onx-enter", 21, 50, ["quant.execution.onx_live", "--enter"], True),
+    ("sleeve-health", 22, 30, ["quant.ops.sleeve_health", "--check"], False),
 ]
 
 

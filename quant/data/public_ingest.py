@@ -107,7 +107,7 @@ def borrow_snapshot():
 FRED_SERIES = [
     "BAMLH0A0HYM2", "BAMLC0A0CM", "NFCI", "STLFSI4", "T10Y2Y", "T10Y3M",
     "DFII10", "T10YIE", "DTWEXBGS", "OVXCLS", "GVZCLS", "EVZCLS",
-    "WALCL", "RRPONTSYD", "VIXCLS", "VIX3MCLS", "DGS2", "DGS10", "DFF",
+    "WALCL", "RRPONTSYD", "VIXCLS", "VIX3MCLS", "VXVCLS", "DGS2", "DGS10", "DFF",
 ]
 FRED_SCHEMA = [
     bigquery.SchemaField("series", "STRING", mode="REQUIRED"),
