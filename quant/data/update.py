@@ -14,16 +14,27 @@ import sys
 from quant.data import eodhd_ingest, minute_ingest, news_ingest
 
 
-def run(eod=True, news=True, minute=True):
+def run(eod=True, news=True, minute=True, max_gap_days=90):
     if eod:
-        # Catch up on any missed days, up to a week back.
-        for i in range(7, 0, -1):
-            d = dt.date.today() - dt.timedelta(days=i)
-            if d.weekday() < 5:
-                try:
-                    eodhd_ingest.update(d.isoformat())
-                except Exception as e:  # noqa: BLE001 — day-level best effort
-                    print(f"eod {d}: {e}")
+        # Selbstheilend: schließt JEDE Lücke seit dem letzten Stand in BQ
+        # (nicht nur 7 Tage — ein ausgefallener Scheduler darf keine
+        # dauerhafte Lücke hinterlassen). Cap gegen Endlos-Backfills.
+        from quant.config import T_EOD
+        from quant.data.bq import scalar
+        last = scalar(f"SELECT MAX(date) FROM `{T_EOD}`")
+        start = (last + dt.timedelta(days=1)) if last else (
+            dt.date.today() - dt.timedelta(days=7))
+        start = max(start, dt.date.today() - dt.timedelta(days=max_gap_days))
+        end = dt.date.today() - dt.timedelta(days=1)
+        days = [start + dt.timedelta(days=i)
+                for i in range((end - start).days + 1)]
+        days = [d for d in days if d.weekday() < 5]
+        print(f"eod: {len(days)} fehlende Handelstage ({start} → {end})")
+        for d in days:
+            try:
+                eodhd_ingest.update(d.isoformat())
+            except Exception as e:  # noqa: BLE001 — day-level best effort
+                print(f"eod {d}: {e}")
     if minute:
         minute_ingest.backfill(minute_ingest.IMOM_ETFS, "2016-01-01")
     if news:
