@@ -174,3 +174,43 @@ Log-HAR (1d/5d/22d Parkinson-RV, expanding-window OLS, 8.9M Zeilen):
   Vol-Schätzung ist ein Messfortschritt, kein gefitteter Alpha-Parameter,
   t=93 ist eindeutig) — aber KEIN Sharpe-Gewinn wird behauptet, solange der
   DSR nicht besteht.
+
+## ONX-Kostensensitivität (2026-07-25) — der Sleeve ist knapper als gedacht
+
+Anlass: Live-Kostenmonitor misst an den ersten echten Fills 10.0bp Slippage
+gegen den offiziellen Schlussprint (YINN 3.6 / DFEN 9.2 / CURE 16.8bp,
+notional-gewichtet 10.0bp). ONX rechnete mit 4bp ROUND-TRIP.
+
+**Break-even-Kosten im aktuellen Regime (2022-2026): 8.3-9.8bp Round-Trip.**
+Das Brutto-Edge beträgt nur 8.3bp/Tag (Top-8) bzw. 9.2bp (Top-28).
+
+Sharpe-Matrix (Universum × Round-Trip-Kosten), Regime 2022-2026:
+| Top-N | 4bp | 10bp | 20bp | 30bp |
+|---|---|---|---|---|
+| 5 | 0.28 | -0.10 | -0.74 | -1.38 |
+| **8 (live)** | **0.30** | **-0.12** | **-0.82** | **-1.52** |
+| 15 | 0.44 | -0.02 | -0.79 | -1.55 |
+| 28 | 0.42 | -0.06 | -0.86 | -1.66 |
+
+DREI HARTE SCHLUSSFOLGERUNGEN:
+1. **Der Liquiditätsfilter rettet ONX NICHT.** Break-even ist bei Top-5
+   (8.4bp) praktisch identisch zu Top-28 (9.2bp) — das Brutto-Edge skaliert
+   nicht mit Liquidität, nur die Kosten. Die naheliegende Rettung existiert
+   nicht.
+2. **Schon bei 10bp Round-Trip ist ONX im aktuellen Regime tot** (-0.12).
+   Die 4bp-Annahme des Backtests war der einzige Grund für Sharpe 1.06.
+3. **Alpacas Paper-Engine füllt MOC-Orders NICHT zum Auktionsprint.** Unsere
+   Kauforders lagen systematisch ÜBER dem offiziellen Schluss. Bei
+   Ordergrößen von ~$900 in Namen mit $10M+ ADV (0.01% des Tagesvolumens)
+   ist echter Market Impact ≈ 0 — die gemessene Slippage ist also mindestens
+   teilweise Simulator-Artefakt, nicht Marktrealität. Das ist gleichzeitig
+   eine gute und eine schlechte Nachricht: der Paper-Burn-in untertreibt ONX
+   möglicherweise systematisch, aber wir können die echten Kosten im
+   Paper-Konto GAR NICHT sauber messen.
+
+KONSEQUENZ: ONX bleibt live (Burn-in-Größe 25%), aber die Allokation wird
+NICHT erhöht, bis die Round-Trip-Kosten über ≥30 Fills belastbar geschätzt
+sind. Der ehrliche Erwartungswert liegt zwischen Sharpe 0.30 (bei 4bp) und
+-0.12 (bei 10bp) im aktuellen Regime — die Bandbreite ist größer als der
+Sleeve selbst. Alle Auktions-Backtests des Programms (ONX, EOMT, VOLC) teilen
+diese Kostenannahme und sind entsprechend zu relativieren.
