@@ -220,12 +220,26 @@ diese Kostenannahme und sind entsprechend zu relativieren.
 Der Burn-in ist Fr 2026-07-24 tatsächlich angelaufen (ONX 7 Fills, XSR 3 Fills,
 Equity 100.015 $). Die Prüfung am geschlossenen Markt fand drei Dinge:
 
-**BUG 1 — Alpaca markiert gefüllte Auktionsorders als "expired".** Verifiziert:
-7 von 10 echten Fills trugen `status=expired` mit `filled_qty>0` (z.B. DRN:
-29 Stück @ 11,83 gefüllt, Status expired). Unsere Reconcile-Funktionen UND der
-Kostenmonitor filterten auf `status == "filled"` → 70 % der Fills unsichtbar,
-Ledger blieb leer, während 10 Positionen offen waren. Gefixt: es wird nur noch
-auf `filled_qty` geprüft (`broker.sleeve_fills_today()`).
+**BEFUND 1 (meine erste Darstellung war falsch, korrigiert) — TEILFÜLLUNGEN.**
+Ich hatte geschrieben, Alpaca markiere gefüllte Orders als "expired". Falsch.
+Die Prüfung der BESTELLTEN Menge zeigt die banale Wahrheit: es sind
+Teilfüllungen, und `expired` bezieht sich auf den nicht ausgeführten REST —
+völlig normales Verhalten, kein Bug:
+    AEM  2 bestellt →  1 gefüllt      DRN  79 bestellt → 29 gefüllt
+    AR  16 bestellt →  2 gefüllt      UDOW 13 bestellt →  6 gefüllt
+    ASST 40 bestellt → 18 gefüllt     DPST  6 bestellt →  0 gefüllt
+`status="filled"` gibt es nur bei 100 % (YINN/DFEN/CURE).
+Unser Code-Bug war trotzdem echt: Reconcile UND Kostenmonitor filterten auf
+`status == "filled"` und übersahen damit alle Teilfüllungen → Ledger blieb
+leer trotz 10 offener Positionen. Gefixt via `broker.sleeve_fills_today()`
+(prüft `filled_qty`, nie `status`).
+
+**DAS EIGENTLICHE PROBLEM — Füllquote.** ONX 61 %, **XSR 36 %** der bestellten
+Stück. Ein Sleeve, der nur ein Drittel seines Zielbuchs aufbaut, handelt eine
+andere Strategie als die getestete. Die Füllquote ist damit die wichtigste
+Burn-in-Kennzahl und ab jetzt die Hauptmetrik des Kostenmonitors (Alarm <50 %).
+Ursache offen: Alpacas Paper-Engine modelliert Auktionsliquidität grob; echte
+MOO/MOC-Orders dieser Größe (1-79 Stück) würden real vollständig füllen.
 
 **BUG 2 (gefährlich, vor dem ersten Montag gefunden) — Verdopplungsrisiko.**
 Weil das Ledger leer blieb, hätte `xsr_live.execute()` am Montag
@@ -236,8 +250,10 @@ Ledgers. Verifiziert: XSR erkennt AEM 1 / AR 2 / ASST −18 und bildet korrekte
 Deltas (ASST −22 statt −40).
 
 **MESSGRENZE — Auktionskosten sind im Paper-Konto nicht messbar.** Slippage
-gegen den offiziellen Print: ONX (cls) 8,3bp, **XSR (opg) 53,6bp** (AEM 31,
-AR 88, ASST 58bp). Beide Datenquellen (EODHD, Alpaca-SIP) stimmen exakt
+gegen den offiziellen Print: ONX (cls) 9,9bp (nur Fills ≥500$), XSR gar nicht
+auswertbar (alle Fills zu klein). Die zuerst berichteten 53,6bp für XSR waren
+Tick-Rauschen auf 1-2-Stück-Teilfüllungen und sind zurückgezogen; der Monitor
+rechnet Slippage jetzt nur über Fills ≥500$. Beide Datenquellen (EODHD, Alpaca-SIP) stimmen exakt
 überein, es ist kein Datenfehler. Aber: die AEM-Order war **1 Aktie** in einem
 Titel mit Millionen Stück Tagesvolumen — echter Market Impact ist exakt null.
 Alpacas Paper-Engine simuliert die Auktion also gar nicht, sondern füllt

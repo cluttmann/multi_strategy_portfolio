@@ -39,6 +39,11 @@ H = {"APCA-API-KEY-ID": ALPACA_KEY_PAPER,
 
 COST_MODEL_BPS = 5.0          # Annahme im Backtest
 G10_MULTIPLE = 1.5            # Alarmschwelle laut DESIGN.md G10
+MIN_NOTIONAL_FOR_SLIPPAGE = 500.0
+# Slippage auf Kleinstfüllungen ist Tick-Rauschen, keine Kostenschätzung:
+# 1 Aktie AEM zu 145,73 vs. Eröffnung 145,28 sind 31bp, aber nur ein Tick.
+# Für die Kostenaussage werden nur Fills >= MIN_NOTIONAL berücksichtigt;
+# die Füllquote wird dagegen über ALLE Orders gerechnet.
 
 SCHEMA = [
     bigquery.SchemaField("fill_date", "DATE", mode="REQUIRED"),
@@ -47,6 +52,8 @@ SCHEMA = [
     bigquery.SchemaField("side", "STRING"),
     bigquery.SchemaField("tif", "STRING"),
     bigquery.SchemaField("qty", "FLOAT64"),
+    bigquery.SchemaField("qty_ordered", "FLOAT64"),
+    bigquery.SchemaField("fill_rate", "FLOAT64"),
     bigquery.SchemaField("fill_price", "FLOAT64"),
     bigquery.SchemaField("benchmark", "FLOAT64"),
     bigquery.SchemaField("benchmark_kind", "STRING"),
@@ -79,10 +86,13 @@ def fetch_fills(days: int) -> pd.DataFrame:
         coid = o.get("client_order_id") or ""
         if not coid.startswith(f"{ORDER_TAG_PREFIX}-"):
             continue          # fremde Orders (ETF-Bot) ignorieren
-        # WICHTIG: Alpaca markiert Auktionsorders (opg/cls) nach der Auktion
-        # als "expired", AUCH WENN SIE GEFÜLLT HABEN (verifiziert 2026-07-25:
-        # 7 von 10 Fills trugen status=expired mit filled_qty>0). Deshalb wird
-        # auf filled_qty/filled_avg_price geprüft, nie auf status.
+        # Alpaca-Semantik (verifiziert 2026-07-25): status="expired" bedeutet,
+        # dass der NICHT ausgeführte REST der Auktionsorder verfallen ist —
+        # Teilfüllungen tragen also status=expired mit filled_qty>0 (z.B. DRN:
+        # 79 bestellt, 29 gefüllt). status="filled" nur bei 100 %. Deshalb wird
+        # auf filled_qty geprüft, nie auf status. Die Füllquote (filled/qty)
+        # ist die eigentlich wichtige Kennzahl — sie war 2026-07-24 nur 20 %
+        # für XSR (opg) und 59 % für ONX (cls).
         if not o.get("filled_avg_price") or float(o.get("filled_qty") or 0) <= 0:
             continue
         parts = coid.split("-")
@@ -92,6 +102,7 @@ def fetch_fills(days: int) -> pd.DataFrame:
             "symbol": o["symbol"], "side": o["side"],
             "tif": o.get("time_in_force"),
             "qty": float(o["filled_qty"]),
+            "qty_ordered": float(o["qty"]),
             "fill_price": float(o["filled_avg_price"]),
             "fill_date": pd.to_datetime(o["filled_at"]).date(),
         })
@@ -124,6 +135,7 @@ def attach_benchmarks(df: pd.DataFrame) -> pd.DataFrame:
     m["slippage_bps"] = sign * (m["fill_price"] - m["benchmark"]) \
         / m["benchmark"] * 1e4
     m["notional"] = m["qty"] * m["fill_price"]
+    m["fill_rate"] = m["qty"] / m["qty_ordered"].clip(lower=1)
     return m[[c.name for c in SCHEMA]]
 
 
@@ -151,31 +163,38 @@ def check(days: int = 5, alert: bool = True):
 
     # Bericht über das gesamte Fenster (auch bereits geladene Fills)
     hist = query(f"""
-      SELECT sleeve, symbol, side, slippage_bps, notional, fill_date
+      SELECT sleeve, symbol, side, slippage_bps, notional, fill_date,
+             qty, qty_ordered, fill_rate
       FROM `{T_COSTS}`
       WHERE fill_date >= DATE_SUB(CURRENT_DATE(), INTERVAL {days * 3} DAY)""")
     if hist.empty:
         print("noch keine Historie")
         return
-    print(f"{'Sleeve':8s} {'Fills':>6s} {'Slippage (notional-gew.)':>26s} "
-          f"{'Median':>8s} {'p90':>8s}")
+    print(f"{'Sleeve':8s} {'Fills':>6s} {'Füllquote':>10s} "
+          f"{'Slippage(>=500$)':>17s} {'n_rel':>6s}")
     alarms = []
     for sl, g in hist.groupby("sleeve"):
-        w = np.average(g["slippage_bps"], weights=g["notional"].clip(lower=1))
-        med, p90 = g["slippage_bps"].median(), g["slippage_bps"].quantile(0.9)
+        fr = g["qty"].sum() / max(g["qty_ordered"].sum(), 1)
+        rel = g[g["notional"] >= MIN_NOTIONAL_FOR_SLIPPAGE]
+        w = (np.average(rel["slippage_bps"], weights=rel["notional"])
+             if len(rel) else float("nan"))
         flag = ""
-        if w > COST_MODEL_BPS * G10_MULTIPLE:
-            flag = " ⚠ G10"
-            alarms.append(f"{sl}: {w:.1f}bp > {COST_MODEL_BPS * G10_MULTIPLE:.1f}bp Limit")
-        print(f"{sl:8s} {len(g):6d} {w:>24.1f}bp {med:7.1f}bp {p90:7.1f}bp{flag}")
-    total = np.average(hist["slippage_bps"],
-                       weights=hist["notional"].clip(lower=1))
-    print(f"\nGESAMT: {total:.1f}bp effektive Slippage vs. "
-          f"{COST_MODEL_BPS:.0f}bp Kostenmodell "
-          f"({total / COST_MODEL_BPS:.1f}× der Annahme)")
-    print("Lesehilfe: Auktionsorders sollten ≈0bp Slippage gegen den "
-          "offiziellen Print zeigen. Deutlich positive Werte heißen, dass wir "
-          "den Print nicht bekommen — dann greift die Kostenwand.")
+        if fr < 0.5:
+            flag = " ⚠ Füllquote"
+            alarms.append(f"{sl}: Füllquote nur {fr:.0%}")
+        if len(rel) >= 5 and w > COST_MODEL_BPS * G10_MULTIPLE:
+            flag += " ⚠ G10"
+            alarms.append(f"{sl}: {w:.1f}bp Slippage")
+        wtxt = f"{w:15.1f}bp" if not np.isnan(w) else f"{'—':>17s}"
+        print(f"{sl:8s} {len(g):6d} {fr:9.0%} {wtxt} {len(rel):6d}{flag}")
+    print("\nLesehilfen:")
+    print("  Füllquote = gefüllte / bestellte Stück. Auktionsorders füllen im")
+    print("  Paper-Konto oft nur teilweise; der Rest läuft als 'expired' aus.")
+    print("  Eine Quote <50% heißt: der Sleeve baut sein Zielbuch nicht auf.")
+    print(f"  Slippage nur über Fills >= {MIN_NOTIONAL_FOR_SLIPPAGE:.0f}$ — "
+          "auf 1-2-Stück-Teilfüllungen ist sie Tick-Rauschen. Alpacas")
+    print("  Paper-Engine füllt Auktionen ohnehin nicht zum offiziellen Print,")
+    print("  daher sind die Absolutwerte OBERGRENZEN, keine Kostenschätzung.")
 
     if alert:
         from quant.execution.telegram import notify
