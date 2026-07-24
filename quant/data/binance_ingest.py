@@ -47,6 +47,19 @@ FUNDING_SCHEMA = [
 ]
 
 
+def _get(url: str, tries: int = 4):
+    """Download mit Retry — Binance resettet Verbindungen bei vielen Requests."""
+    import time
+    for i in range(tries):
+        try:
+            return requests.get(url, timeout=60)
+        except requests.exceptions.RequestException:
+            if i == tries - 1:
+                return None
+            time.sleep(2 ** i)
+    return None
+
+
 def _months(start: str):
     d = dt.date.fromisoformat(start).replace(day=1)
     today = dt.date.today().replace(day=1)
@@ -60,6 +73,17 @@ def _fix_ts(v: float) -> pd.Timestamp:
     return pd.Timestamp(int(v), unit="us" if v > 1e14 else "ms", tz="UTC")
 
 
+def _daily_files(sym: str, kind: str = "klines"):
+    """Tagesdateien des LAUFENDEN Monats — Binance publiziert Monatsdumps erst
+    nach Monatsende, sonst hängt die Tabelle immer am Vormonatsende."""
+    today = dt.date.today()
+    first = today.replace(day=1)
+    d = first
+    while d < today:
+        yield f"{d:%Y-%m-%d}"
+        d += dt.timedelta(days=1)
+
+
 def klines(start="2017-08-01"):
     ensure_table(T_KLINES, KLINE_SCHEMA, partition_field="date",
                  clustering=["symbol"])
@@ -68,8 +92,8 @@ def klines(start="2017-08-01"):
         rows = 0
         for m in _months(start):
             url = f"{BASE}/spot/monthly/klines/{sym}/1d/{sym}-1d-{m}.zip"
-            r = requests.get(url, timeout=60)
-            if r.status_code != 200:
+            r = _get(url)
+            if r is None or r.status_code != 200:
                 misses += 1
                 continue
             with zipfile.ZipFile(io.BytesIO(r.content)) as z:
@@ -84,6 +108,29 @@ def klines(start="2017-08-01"):
             df["symbol"] = sym
             for c in ["open", "high", "low", "close", "volume",
                       "quote_volume"]:
+                df[c] = pd.to_numeric(df[c], errors="coerce")
+            df["trades"] = pd.to_numeric(df["trades"],
+                                         errors="coerce").astype("Int64")
+            frames.append(df[["date", "symbol", "open", "high", "low",
+                              "close", "volume", "quote_volume", "trades"]])
+            rows += len(df)
+        # laufender Monat aus Tagesdateien
+        for day in _daily_files(sym):
+            url = f"{BASE}/spot/daily/klines/{sym}/1d/{sym}-1d-{day}.zip"
+            r = _get(url)
+            if r is None or r.status_code != 200:
+                continue
+            with zipfile.ZipFile(io.BytesIO(r.content)) as z:
+                raw = z.read(z.namelist()[0]).decode()
+            df = pd.read_csv(io.StringIO(raw), header=None)
+            if isinstance(df.iloc[0, 0], str):
+                df = df.iloc[1:].reset_index(drop=True)
+            df = df.iloc[:, :9]
+            df.columns = ["open_time", "open", "high", "low", "close",
+                          "volume", "close_time", "quote_volume", "trades"]
+            df["date"] = [_fix_ts(float(v)).date() for v in df["open_time"]]
+            df["symbol"] = sym
+            for c in ["open", "high", "low", "close", "volume", "quote_volume"]:
                 df[c] = pd.to_numeric(df[c], errors="coerce")
             df["trades"] = pd.to_numeric(df["trades"],
                                          errors="coerce").astype("Int64")
@@ -105,8 +152,8 @@ def funding(start="2020-09-01"):
         for m in _months(start):
             url = (f"{BASE}/futures/um/monthly/fundingRate/{sym}/"
                    f"{sym}-fundingRate-{m}.zip")
-            r = requests.get(url, timeout=60)
-            if r.status_code != 200:
+            r = _get(url)
+            if r is None or r.status_code != 200:
                 continue
             with zipfile.ZipFile(io.BytesIO(r.content)) as z:
                 raw = z.read(z.namelist()[0]).decode()

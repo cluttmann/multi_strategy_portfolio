@@ -37,6 +37,15 @@ def _identity():
     set_identity("Carl Johannes carl.johannes.mail@gmail.com")
 
 
+def exmap_since(sym: str, last: dict[str, str], default="2016-01-01") -> str:
+    """Startdatum je Symbol: ab dem letzten geladenen Filing (minus Puffer)."""
+    import datetime as _dt
+    d = last.get(sym)
+    if not d:
+        return default
+    return (_dt.date.fromisoformat(d) - _dt.timedelta(days=5)).isoformat()
+
+
 def universe() -> list[str]:
     df = query("""
       SELECT symbol, COUNT(*) n FROM `trading-436516.quant.features_daily_v2`
@@ -91,16 +100,22 @@ def backfill(smoke=False, workers=6):
     syms = universe()
     if smoke:
         syms = ["NVDA", "AAPL", "TSLA"]
-    done = set()
+    # Datums-inkrementell: bereits geladene Symbole werden NICHT übersprungen,
+    # sondern ab ihrem letzten Filing nachgeladen (der alte Symbol-Skip ließ
+    # die Tabelle dauerhaft veralten — gefunden 2026-07-25, 12 Tage Lücke).
+    last_by_sym: dict[str, str] = {}
     try:
-        done = set(query(f"SELECT DISTINCT symbol FROM `{T_INSIDER}`")["symbol"])
+        df = query(f"SELECT symbol, MAX(date) AS d FROM `{T_INSIDER}` "
+                   f"GROUP BY symbol")
+        last_by_sym = {r.symbol: str(r.d) for _, r in df.iterrows()}
     except Exception:  # noqa: BLE001
         pass
-    todo = [s for s in syms if s not in done]
-    print(f"{len(todo)} Symbole (von {len(syms)}, {len(done)} schon geladen)")
+    todo = list(syms)
+    print(f"{len(todo)} Symbole ({len(last_by_sym)} davon inkrementell)")
     buf, total, fetched = [], 0, 0
     with cf.ThreadPoolExecutor(max_workers=workers) as ex:
-        futs = {ex.submit(fetch_symbol, s): s for s in todo}
+        futs = {ex.submit(fetch_symbol, s, exmap_since(s, last_by_sym)): s
+                for s in todo}
         for fut in cf.as_completed(futs):
             fetched += 1
             df = fut.result()
