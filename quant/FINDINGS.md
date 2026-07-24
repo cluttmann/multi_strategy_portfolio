@@ -132,3 +132,45 @@ Nach vollständigem Fundamentals-Backfill (4.420 Symbole):
 Ranking kippt bei der Kostenannahme: 5d gewinnt bei 5bp, 21d bei 10bp
 (4x weniger Turnover). Deploy 5d, 21d als kostenrobuster Fallback — Burn-in
 misst echte Fills als Entscheider.
+
+## TimesFM / Foundation-Models — VERWORFEN (2026-07-25)
+
+Zwei unabhängige Recherchen + lokaler Pilot auf unseren Daten. Verdikt: nein.
+- Korpus (Wikipedia-Pageviews, Google Trends) trägt KEINE Marktinformation;
+  was drin ist (M4-Finance, FRED-MD via LOTSA) ist Kontamination, kein Signal.
+- Definitive Studie (Rahimikia et al. 2511.18578, 18.14M Beobachtungen, 10k
+  Titel, OOS 2001-2023): TimesFM-500M zero-shot R²_OOS **-2.80%**, Rendite
+  -1.47%. Chronos -1.37%, Moirai-2 -1.91%, Toto -114%. Dezil-Spreads oft
+  INVERTIERT (Chronos-Bolt-Tiny: bestes Dezil -29%, schlechtestes +52%) →
+  die Modelle sind naive Momentum-Extrapolatoren, Tagesrenditen sind Reversal.
+- Eigener Pilot (kontaminationsfrei 2025-09..2026-07): IC -0.052,
+  rank-corr -0.18 zu 21d-Momentum → schwacher Reversion-Tilt, redundant zu
+  unserem Reversal-Feature.
+- Kovariaten-Schnittstelle ist wörtlich Ridge (`xreg_lib.py`) → wir haben
+  Ridge mit Sharpe 0.03 gemessen. Univariat, kein Querschnitts-Mechanismus.
+  Kein MPS-Support. Alles vor Nov 2023 kontaminiert.
+- WARNUNG aus derselben Studie, die uns betrifft: bei 20bps Kosten gehen ALLE
+  Modelle inkl. Gradient-Boosting-Baseline Sharpe-NEGATIV (CatBoost 6.46 →
+  -3.13). Das ist eine Aussage über tägliches Querschnitts-Trading, nicht über
+  TSFMs. Unsere 5-Tage-Tranchen senken den Turnover 4x — deshalb überleben wir
+  bei 5bps (0.60) und marginal bei 10bps (0.22). Bei 20bps wären wir negativ.
+  Der Burn-in muss die effektiven Kosten messen; XSRs Lebensfähigkeit hängt
+  daran.
+- Einzige verwertbare Erkenntnis: Log-HAR schlägt 8 von 9 TSFMs auf
+  realisierter Vol → daraus folgte der HAR-Test unten.
+- Falls je ein finanz-natives Modell getestet wird: Kronos (MIT, 102M, native
+  MPS) oder FinTexts 360 Apache-2.0-Checkpoints — NICHT TimesFM.
+
+## HAR-RV Volatilitätsprognose (2026-07-25) — H1 stark, H2 marginal
+
+Log-HAR (1d/5d/22d Parkinson-RV, expanding-window OLS, 8.9M Zeilen):
+- **H1 BESTÄTIGT, überwältigend**: Rank-IC der Forward-5d-Vol 0.849 (Log-HAR)
+  vs 0.744 (Trailing-21d), Differenz +0.105, **t = +93.2** über 5.598 Tage.
+  HAR sagt Volatilität deutlich besser vorher — robustes Messergebnis.
+- **H2 grenzwertig**: HAR-Vol statt vol_63d in der Inverse-Vol-Gewichtung
+  hebt Sharpe 0.604 → 0.636 (Δ+0.032), genau auf der vorregistrierten
+  Schwelle. **DSR 0.418 → fällt durch** (12 XSR-Varianten, SR* 0.68).
+- ENTSCHEIDUNG: HAR-Vol wird als RISIKOMODELL übernommen (bessere
+  Vol-Schätzung ist ein Messfortschritt, kein gefitteter Alpha-Parameter,
+  t=93 ist eindeutig) — aber KEIN Sharpe-Gewinn wird behauptet, solange der
+  DSR nicht besteht.
