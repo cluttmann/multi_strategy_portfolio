@@ -32,6 +32,26 @@ TARGET_POS_USD = 400.0    # min sensible whole-share position
 K_TRANCHE = 5             # rotate 1/K of the book per day
 
 
+def _ensure_models() -> str:
+    """Modell-Verzeichnis lokal bereitstellen; in der Cloud aus GCS syncen.
+
+    GCS-Bucket via QNT_MODEL_BUCKET (z.B. gs://trading-436516-quant-models).
+    Lokal (Bucket ungesetzt) wird STAGING_DIR/models genutzt.
+    """
+    model_dir = os.path.join(STAGING_DIR, "models")
+    bucket = os.environ.get("QNT_MODEL_BUCKET")
+    if bucket:
+        from google.cloud import storage
+        os.makedirs(model_dir, exist_ok=True)
+        bkt = bucket.replace("gs://", "").split("/", 1)[0]
+        client = storage.Client()
+        for b in client.list_blobs(bkt, prefix="models/ranker_"):
+            dst = os.path.join(model_dir, os.path.basename(b.name))
+            if not os.path.exists(dst):
+                b.download_to_filename(dst)
+    return model_dir
+
+
 def latest_scores() -> pd.DataFrame:
     """Score the latest complete day with the newest saved fold model."""
     import lightgbm as lgb
@@ -39,7 +59,7 @@ def latest_scores() -> pd.DataFrame:
     from quant.features.xsr_v2_features import T_V2
     from quant.models.train_ranker import V2_FEATURES
 
-    model_dir = os.path.join(STAGING_DIR, "models")
+    model_dir = _ensure_models()
     models = sorted(f for f in os.listdir(model_dir) if f.startswith("ranker_"))
     model = lgb.Booster(model_file=os.path.join(model_dir, models[-1]))
     day = query(f"SELECT MAX(date) d FROM `{T_V2}`").iloc[0].d

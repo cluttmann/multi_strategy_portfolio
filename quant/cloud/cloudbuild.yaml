@@ -1,0 +1,14 @@
+# Baut das Quant-Desk-Container-Image (Dockerfile in quant/cloud/).
+steps:
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '-f'
+      - 'quant/cloud/Dockerfile'
+      - '-t'
+      - 'europe-west3-docker.pkg.dev/trading-436516/quant-desk/quant:latest'
+      - '.'
+images:
+  - 'europe-west3-docker.pkg.dev/trading-436516/quant-desk/quant:latest'
+options:
+  logging: CLOUD_LOGGING_ONLY

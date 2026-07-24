@@ -1,11 +1,15 @@
 # Quant desk runbook — paper go-live
 
-> **STATUS 2026-07-13: SCHEDULED & LIVE (Burn-in).** Alle Jobs laufen via
-> launchd auf Konto PA3IN7QIGPSE ($100k). Installer: `python3 -m
-> quant.ops.install_schedule --install|--uninstall|--list`. Handelstag-Guard
-> (guard.py, NYSE-Kalender) macht Feiertagsläufe zu No-Ops; Burn-in-Sizing
-> 25 % (Firestore qnt-risk/state.burn_in_scale → auf 1.0 nach 20 grünen Tagen).
-
+> **STATUS 2026-07-14: CLOUD-DEPLOYED & LIVE (Burn-in).** Läuft serverseitig
+> (Mac-unabhängig) auf GCP `trading-436516`, region europe-west3, Konto
+> PA3IN7QIGPSE ($100k). Cloud Run Job `quant-desk` (Image in Artifact
+> Registry, Secrets aus Secret Manager, Modelle aus GCS
+> `trading-436516-quant-models`), getriggert von 7 Cloud-Scheduler-Jobs
+> (Zeitzone America/New_York, DST-korrekt) mit TASK-Override.
+> Verwaltung: `gcloud scheduler jobs list --location=europe-west3`;
+> Deploy-Skript: `quant/cloud/`. Rebuild: `gcloud builds submit
+> --config=quant/cloud/cloudbuild.yaml .`. Handelstag-Guard + Burn-in 25 %
+> wie zuvor. launchd (Mac) ist abgebaut.
 
 ## Daily schedule (all times Europe/Berlin; ET in parens)
 
