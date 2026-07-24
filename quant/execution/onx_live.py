@@ -134,12 +134,15 @@ def exit_(dry_run: bool):
 def reconcile():
     """After the close: record fills into the ledger as positions."""
     state = ledger.get_sleeve(SLEEVE)
-    fills = {}
-    for o in broker.orders_today(SLEEVE):
-        if o["side"] == "buy" and o["status"] == "filled":
-            fills[o["symbol"]] = fills.get(o["symbol"], 0) + int(float(o["filled_qty"]))
-    ledger.set_sleeve(SLEEVE, {**state, "positions": fills})
-    notify(f"ONX reconcile: positions {fills}")
+    # Broker-Positionen sind die Wahrheit; Fill-Historie ordnet sie dem Sleeve zu
+    fills = broker.sleeve_fills_today(SLEEVE)
+    actual = broker.positions()
+    pos = {s: int(min(abs(q), abs(actual.get(s, 0)))) for s, q in fills.items()
+           if q > 0 and actual.get(s, 0) > 0}
+    ledger.set_sleeve(SLEEVE, {**state, "positions": pos})
+    drift = {s: q for s, q in fills.items()
+             if q > 0 and s not in pos}
+    notify(f"ONX reconcile: {pos}" + (f" | DRIFT {drift}" if drift else ""))
 
 
 if __name__ == "__main__":

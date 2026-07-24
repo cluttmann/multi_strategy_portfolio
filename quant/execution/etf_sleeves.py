@@ -100,7 +100,13 @@ def rebalance(sleeve: str, dry_run: bool):
     weights, why = target_weights(sleeve)
     weights = {s: w for s, w in weights.items() if s not in BOT_TICKERS}
     state = ledger.get_sleeve(sleeve)
-    held = {k: int(v) for k, v in (state.get("positions") or {}).items()}
+    # Broker-Positionen sind die Wahrheit (Auktions-Fills erscheinen als
+    # "expired" und landen sonst nie im Ledger → Verdopplungsgefahr).
+    actual = broker.positions()
+    known = set(state.get("symbol_universe") or []) | set(weights) | \
+        set((state.get("positions") or {}).keys()) | set(EOMT_SYMBOLS) | \
+        {VOLC_SYMBOL}
+    held = {s: int(q) for s, q in actual.items() if s in known and q > 0}
 
     syms = sorted(set(weights) | set(held))
     prices = broker.latest_prices(syms) if syms else {}
@@ -131,7 +137,8 @@ def rebalance(sleeve: str, dry_run: bool):
         keep = {s: q for s, q in held.items()
                 if s not in {o[0] for o in orders} and q > 0}
         ledger.set_sleeve(sleeve, {**state, "positions": {**keep, **new_pos},
-                                   "last_reason": why})
+                                   "last_reason": why,
+                                   "symbol_universe": sorted(known)})
     notify(f"{sleeve.upper()} rebalance: {why} | {len(orders)} cls-Orders, "
            f"Budget ${budget:,.0f} (scale {scale:.2f})"
            + (" [DRY RUN]" if dry_run else ""))
@@ -141,13 +148,10 @@ def rebalance(sleeve: str, dry_run: bool):
 def reconcile(sleeve: str):
     state = ledger.get_sleeve(sleeve)
     held = dict(state.get("positions") or {})
-    for o in broker.orders_today(sleeve):
-        if o["status"] != "filled":
-            continue
-        q = int(float(o["filled_qty"]))
-        s = o["symbol"]
-        held[s] = held.get(s, 0) + (q if o["side"] == "buy" else -q)
-    held = {s: q for s, q in held.items() if q > 0}
+    for s, q in broker.sleeve_fills_today(sleeve).items():
+        held[s] = held.get(s, 0) + q
+    actual = broker.positions()
+    held = {s: int(actual[s]) for s in held if actual.get(s, 0) > 0}
     ledger.set_sleeve(sleeve, {**state, "positions": held})
     notify(f"{sleeve.upper()} reconcile: {held or 'flat'}")
 

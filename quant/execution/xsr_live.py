@@ -125,7 +125,18 @@ def execute(dry_run: bool):
         return
     acct = broker.account()
     equity = float(acct["equity"])
-    held = state.get("positions") or {}
+    # WICHTIG: Broker-Positionen sind die Wahrheit, nicht das Ledger. Alpaca
+    # markiert gefüllte Auktionsorders als "expired", wodurch das Ledger leer
+    # blieb, während Positionen offen waren — ohne diesen Abgleich hätte XSR
+    # am nächsten Handelstag die Positionen VERDOPPELT (Bug gefunden
+    # 2026-07-25, vor dem ersten Montag).
+    actual = broker.positions()
+    known = set(state.get("symbol_universe") or []) | set(
+        (state.get("positions") or {}).keys()) | set(target)
+    held = {s: int(q) for s, q in actual.items() if s in known and q != 0}
+    if held != (state.get("positions") or {}):
+        print(f"Ledger-Abgleich: {len(held)} echte Positionen "
+              f"(Ledger hatte {len(state.get('positions') or {})})")
     orders = []
     for sym in set(target) | set(held):
         delta = int(target.get(sym, 0)) - int(held.get(sym, 0))
@@ -151,7 +162,11 @@ def execute(dry_run: bool):
         gross += notional
         placed += 1
     if not dry_run:
-        ledger.set_sleeve(SLEEVE, {**state, "pending_target": target})
+        universe = sorted(set(state.get("symbol_universe") or [])
+                          | set(target) | set(held))
+        ledger.set_sleeve(SLEEVE, {**state, "pending_target": target,
+                                   "positions": held,
+                                   "symbol_universe": universe})
     notify(f"XSR execute: {placed} opg orders, delta gross ≈ ${gross:,.0f}"
            + (" [DRY RUN]" if dry_run else ""))
 
@@ -159,15 +174,15 @@ def execute(dry_run: bool):
 def reconcile():
     state = ledger.get_sleeve(SLEEVE)
     held = dict(state.get("positions") or {})
-    for o in broker.orders_today(SLEEVE):
-        if o["status"] != "filled":
-            continue
-        q = int(float(o["filled_qty"]))
-        s = o["symbol"]
-        held[s] = held.get(s, 0) + (q if o["side"] == "buy" else -q)
-    held = {s: q for s, q in held.items() if q != 0}
+    for s, q in broker.sleeve_fills_today(SLEEVE).items():
+        held[s] = held.get(s, 0) + q
+    # Gegen die Broker-Wahrheit abgleichen (verhindert Ledger-Drift)
+    actual = broker.positions()
+    held = {s: int(actual[s]) for s in held if s in actual and actual[s] != 0}
     ledger.set_sleeve(SLEEVE, {**state, "positions": held})
-    notify(f"XSR reconcile: {len(held)} positions")
+    notify(f"XSR reconcile: {len(held)} Positionen, netto "
+           f"{sum(1 for q in held.values() if q > 0)}L/"
+           f"{sum(1 for q in held.values() if q < 0)}S")
 
 
 if __name__ == "__main__":

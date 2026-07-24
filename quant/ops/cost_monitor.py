@@ -79,7 +79,11 @@ def fetch_fills(days: int) -> pd.DataFrame:
         coid = o.get("client_order_id") or ""
         if not coid.startswith(f"{ORDER_TAG_PREFIX}-"):
             continue          # fremde Orders (ETF-Bot) ignorieren
-        if o.get("status") != "filled" or not o.get("filled_avg_price"):
+        # WICHTIG: Alpaca markiert Auktionsorders (opg/cls) nach der Auktion
+        # als "expired", AUCH WENN SIE GEFÜLLT HABEN (verifiziert 2026-07-25:
+        # 7 von 10 Fills trugen status=expired mit filled_qty>0). Deshalb wird
+        # auf filled_qty/filled_avg_price geprüft, nie auf status.
+        if not o.get("filled_avg_price") or float(o.get("filled_qty") or 0) <= 0:
             continue
         parts = coid.split("-")
         out.append({

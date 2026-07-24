@@ -214,3 +214,37 @@ sind. Der ehrliche Erwartungswert liegt zwischen Sharpe 0.30 (bei 4bp) und
 -0.12 (bei 10bp) im aktuellen Regime — die Bandbreite ist größer als der
 Sleeve selbst. Alle Auktions-Backtests des Programms (ONX, EOMT, VOLC) teilen
 diese Kostenannahme und sind entsprechend zu relativieren.
+
+## Paper-Umgebung: zwei Bugs und eine Messgrenze (2026-07-25, Markt geschlossen)
+
+Der Burn-in ist Fr 2026-07-24 tatsächlich angelaufen (ONX 7 Fills, XSR 3 Fills,
+Equity 100.015 $). Die Prüfung am geschlossenen Markt fand drei Dinge:
+
+**BUG 1 — Alpaca markiert gefüllte Auktionsorders als "expired".** Verifiziert:
+7 von 10 echten Fills trugen `status=expired` mit `filled_qty>0` (z.B. DRN:
+29 Stück @ 11,83 gefüllt, Status expired). Unsere Reconcile-Funktionen UND der
+Kostenmonitor filterten auf `status == "filled"` → 70 % der Fills unsichtbar,
+Ledger blieb leer, während 10 Positionen offen waren. Gefixt: es wird nur noch
+auf `filled_qty` geprüft (`broker.sleeve_fills_today()`).
+
+**BUG 2 (gefährlich, vor dem ersten Montag gefunden) — Verdopplungsrisiko.**
+Weil das Ledger leer blieb, hätte `xsr_live.execute()` am Montag
+`delta = target − 0` gerechnet und die bestehenden Positionen VERDOPPELT.
+Gefixt: `execute()`/`rebalance()` lesen jetzt die echten Broker-Positionen
+(gefiltert auf das persistierte `symbol_universe` des Sleeves) statt des
+Ledgers. Verifiziert: XSR erkennt AEM 1 / AR 2 / ASST −18 und bildet korrekte
+Deltas (ASST −22 statt −40).
+
+**MESSGRENZE — Auktionskosten sind im Paper-Konto nicht messbar.** Slippage
+gegen den offiziellen Print: ONX (cls) 8,3bp, **XSR (opg) 53,6bp** (AEM 31,
+AR 88, ASST 58bp). Beide Datenquellen (EODHD, Alpaca-SIP) stimmen exakt
+überein, es ist kein Datenfehler. Aber: die AEM-Order war **1 Aktie** in einem
+Titel mit Millionen Stück Tagesvolumen — echter Market Impact ist exakt null.
+Alpacas Paper-Engine simuliert die Auktion also gar nicht, sondern füllt
+spread-gekreuzt. KONSEQUENZ: Das G10-Gate (Live-Slippage ≤1,5× Modell) ist im
+Paper-Konto für Auktionsorders NICHT auswertbar und wird immer Alarm schlagen —
+nicht weil die Strategie schlecht ist, sondern weil der Simulator grob ist.
+Der Kostenmonitor bleibt aktiv (er misst Trends und findet Ausreißer), aber
+seine Absolutwerte sind eine OBERGRENZE, keine Kostenschätzung. Die belastbare
+Burn-in-Kennzahl ist deshalb der Vergleich realisierter Sleeve-P&L gegen die
+Backtest-Erwartung — nicht Fill-vs-Print.

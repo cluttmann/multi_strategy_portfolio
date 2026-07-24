@@ -64,3 +64,21 @@ def orders_today(sleeve: str) -> list[dict]:
     tag = f"{ORDER_TAG_PREFIX}-{sleeve.upper()}-"
     return [o for o in r.json()
             if (o.get("client_order_id") or "").startswith(tag)]
+
+def sleeve_fills_today(sleeve: str) -> dict[str, int]:
+    """Signierte Fill-Mengen des Sleeves von heute.
+
+    Alpaca markiert gefüllte Auktionsorders (opg/cls) häufig als "expired" —
+    verifiziert 2026-07-25: 7 von 10 echten Fills hatten status=expired mit
+    filled_qty>0. Es wird daher NIE auf status gefiltert, sondern auf
+    filled_qty. Ohne diesen Fix bleibt das Ledger leer, während Positionen
+    offen sind (führte zu Verdopplungs-Risiko beim nächsten Rebalance).
+    """
+    out: dict[str, int] = {}
+    for o in orders_today(sleeve):
+        q = int(float(o.get("filled_qty") or 0))
+        if q <= 0:
+            continue
+        s = o["symbol"]
+        out[s] = out.get(s, 0) + (q if o["side"] == "buy" else -q)
+    return out
