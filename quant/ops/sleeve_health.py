@@ -29,7 +29,15 @@ T_HEALTH = f"{GCP_PROJECT}.{BQ_DATASET}.sleeve_health"
 
 # Vorregistrierte Baselines (Backtest-Sharpe, netto) + Vol-Budget
 BASELINES = {
-    "XSR": {"sharpe": 0.69, "regime_2022": 0.60, "monitor_only": False},
+    # XSR korrigiert 2026-07-25. Die alten 0.69/0.60 waren der Stand VOR zwei
+    # Korrekturen: (a) den Leihkosten im Simulator (G1-Lücke, 200bp/Jahr auf das
+    # Short-Notional) und (b) dem Leih-Gate auf dem Short-Bein. Nachgerechnet
+    # auf preds_wf_v2_full: ohne Gate 0.604/0.424, isolierte Gate-Kosten
+    # -0.032/-0.085 (gemessen auf dem heute-notierten Subpanel, damit der
+    # Delisting-Effekt nicht mitzählt) → 0.57/0.34.
+    # Eine zu hohe Baseline ist gefährlicher als eine zu niedrige: der Monitor
+    # hätte echten Zerfall als "im Rahmen" durchgewinkt, und S_p war überschätzt.
+    "XSR": {"sharpe": 0.57, "regime_2022": 0.34, "monitor_only": False},
     "ONX": {"sharpe": 1.06, "regime_2022": 0.40, "monitor_only": False},
     "VOLC": {"sharpe": 0.64, "regime_2022": 0.45, "monitor_only": False},
     "EOMT": {"sharpe": 0.87, "regime_2022": 0.65, "monitor_only": False},

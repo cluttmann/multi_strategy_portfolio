@@ -139,7 +139,8 @@ def summarize(res: pd.DataFrame) -> str:
 
 
 def simulate_tranches(preds: pd.DataFrame, n_side=N_SIDE, cost_bps=COST_BPS,
-                      k=5) -> pd.DataFrame:
+                      k=5, short_eligible: set[str] | None = None
+                      ) -> pd.DataFrame:
     """Overlapping-portfolio construction for a k-day signal (Jegadeesh–Titman).
 
     1/k of the book re-forms each day from that day's scores and is held k
@@ -164,7 +165,16 @@ def simulate_tranches(preds: pd.DataFrame, n_side=N_SIDE, cost_bps=COST_BPS,
         gsym = g.set_index("symbol")
 
         longs = g.head(n_side)["symbol"]
-        shorts = g.tail(n_side)["symbol"]
+        # Leih-Gate auf dem Short-Bein — muss identisch zum Live-Executor sein
+        # (quant.execution.xsr_live.borrowable), sonst misst der Backtest ein
+        # Buch, das wir nicht handeln können. Gemessen am 2026-07-25: 12 % der
+        # 50 schlechtesten Namen sind hard_to_borrow, und Alpaca lehnt für die
+        # jede opg-Order ab.
+        if short_eligible is None:
+            shorts = g.tail(n_side)["symbol"]
+        else:
+            elig = g[g["symbol"].isin(short_eligible)]
+            shorts = elig.tail(n_side)["symbol"]
         vol = gsym["vol_63d"].clip(lower=0.10)
 
         def side_w(names, sign):
