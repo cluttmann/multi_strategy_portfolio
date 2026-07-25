@@ -296,3 +296,99 @@ verbessert die Robustheit, nicht die Rendite.
 (aktuelles Regime). Für 50 % CAGR bei tragbarem Risiko braucht es S_p ≈ 1.8 —
 bei diesem Qualitätsmittel wären das ~14 Sleeves. Trefferquote 5/16 = 31 % →
 ~29 weitere Familien zu testen. Das ist der ehrliche Weg, und er ist lang.
+
+## Discovery-Pipeline + Familien 17–19 + korrigierte Portfolio-Arithmetik (2026-07-25)
+
+### Was jetzt läuft
+Die Pipeline ist geschlossen: `quant/research/discovery.py` schickt jeden
+Kandidaten aus `hypothesis_queue.yaml` durch **G0–G8** (Abbruch beim ersten
+Fehlschlag, billige Gates zuerst). Neu und entscheidend ist **G8 (Live-Pfad)**:
+ohne importierbare `live_signal`-Funktion, die ein Gewichts-Dict mit Gross ≤ 1.0
+zurückgibt, kann ein Kandidat nicht befördert werden. Beförderung schreibt nach
+`quant/sleeves/promoted.yaml`, das `registry.py` beim Import liest — damit ist
+"validiert" nicht mehr von "handelbar" trennbar (die Lehre aus VOLC/EOMT).
+In der Cloud läuft der Task `discovery` sonntags 19:00 NY im **Melde-Modus**:
+Gates rechnen, Telegram meldet, Beförderung bleibt ein Commit.
+
+### Drei Familien getestet, drei verworfen
+| Familie | Ergebnis | Gescheitert an |
+|---|---|---|
+| **RESID-MR** (17) | Voll −0.30, Holdout −0.14, 2022+ −0.41; alle 3 Horizonte negativ | G3; Vorhersage (c) verletzt (residual schlechter als roh) |
+| **ACT13D** (18) | abnormal vs. SPY −0.83 % (21T) → −15.59 % (252T, t=−25.4) | G2; Vorhersagen (a) und (c) widerlegt |
+| **CARRY** (19) | Voll 0.58, Holdout 0.39, 2022+ 0.52 — aber ρ(DTRD) = **+0.78** | G5 (DSR 0.902) **und** G7 (ΔS_p +0.010) |
+
+ACT13Ds negatives Vorzeichen ist mit hoher Wahrscheinlichkeit
+**Benchmark-Fehlspezifikation**, nicht Wertvernichtung durch Aktivisten:
+13D-Ziele sind Small-Cap-Value (Median-ADV im untersten Tier $0.0M), und
+"abnormal vs. SPY" misst über 2007–2026 vor allem den Small-minus-Large-Spread.
+Daraus die neue Regel **R9**: Event-Studien gegen ein größen-/stilbereinigtes
+Benchmark, nie gegen SPY allein.
+
+Nebenprodukt: `sec_13d_filings` in BigQuery, 12.483 initiale 13D + 41.000
+Änderungsmeldungen, 2007-01 bis heute, mit täglichem Refresh.
+
+### Vier eigene Rechenfehler, die die Basis verzerrt hatten
+1. **`portfolio_delta` benutzte die Durchschnittsformel** S̄·√(N/(1+(N−1)ρ̄)),
+   die Gleichgewichtung *und* einen einheitlichen ρ voraussetzt. Dadurch bekam
+   ACT13D (ρ≈0, Sharpe 0.50) ein **negatives** ΔS_p — mathematisch unmöglich,
+   die quadratische Form ist monoton. Jetzt S_p = √(sᵀC⁻¹s), long-only, 30 %
+   geschrumpft.
+2. **EOMT ist eine Monatsreihe**, wurde aber mit √252 annualisiert: Sharpe
+   **2.36 statt 0.52** (Faktor 4.6) — und dominierte damit jede
+   Portfolio-Rechnung.
+3. **Korrelationen standen teils auf 22 gemeinsamen Beobachtungen.** Jetzt auf
+   Monatsrenditen, erst ab 36 gemeinsamen Monaten, sonst Prior 0.20; negative ρ
+   auf 0 gekappt.
+4. **Der DSR deflationierte mit dem globalen Versuchszähler** (54 Versuche über
+   18 unabhängige Familien) statt mit den familieninternen. Korrigiert:
+   XSR 0.458 → **0.804**, DTRD 0.790 → **0.861**, EOMT 0.963 → **0.976**,
+   ONX 0.374 → 0.650, VOLC 0.141 → 0.724. Das **löst das offene XSR-Rätsel**
+   (DSR 0.561) aus ROAD_TO_50 §0.3. Der Programm-Selektionseffekt wird separat
+   als Trefferquote ausgewiesen (5 von 18 Familien).
+
+### Die Zahl, die die Suchstrategie ändert
+`quant/research/portfolio_math.py`: S_p konvergiert für N→∞ gegen **S̄/√ρ̄**.
+Bei heute Ø-Sharpe 0.51 und ρ̄ = 0.16 ist das **1.25** — eine Rendite-Obergrenze
+von **≈27 %/Jahr unter Reg-T, unabhängig von der Zahl der Sleeves.**
+
+| zusätzliche Sleeves heutiger Qualität | N | S_p | Rendite |
+|---:|---:|---:|---:|
+| +5 | 10 | 1.02 | +21.8 % |
+| +50 | 55 | 1.20 | +25.6 % |
+
+50 % brauchen S_p ≥ 2.34, also Ø-Sharpe ≥ 0.94 (Verdoppelung der Qualität)
+ODER ρ̄ ≤ 0.047 (ein Drittel des heutigen) ODER Hebel 4.3× (2.3× über Reg-T).
+Daraus Regel **R8**: nach Qualität und Orthogonalität suchen, nicht nach Anzahl.
+**Ehrliche Erwartung unverändert-präziser: 15–25 %/Jahr, Mittelfall 22 %.**
+
+### Zwei stille Datenfehler
+- **`daily.sh` behauptete im Kommentar "FRED refresh", das `--fred`-Flag fehlte
+  aber** — `fred_series` stand 15 Tage still. Aufgefallen, weil CARRY den
+  Geldmarktsatz braucht. Zusätzlich 13D-Refresh und Insider in den Tagesloop.
+- **Die SEC hat mit der XML-Pflicht (Dez. 2024) "SC 13D" zu "SCHEDULE 13D"
+  umbenannt.** Ein Filter auf das alte Label sieht ab 2025 null Events und läuft
+  grün weiter. `FRED_RE` in `sec_13d_ingest.py` kennt beide Labels.
+- Randnotiz: FRED hat `EVZCLS` (EuroCurrency-Vol) im März 2025 eingestellt —
+  Upstream-Abkündigung, kein Fehler bei uns.
+
+### Deployment-Lehre
+Der erste Deploy der Pipeline scheiterte am fehlenden PyYAML im Cloud-Image.
+Der eigentliche Befund war schwerer: `registry.py` importiert yaml auf
+Modulebene, also hätte derselbe Fehler den Lauf `quant-etf-rebalance` am selben
+Tag um 15:47 NY **komplett abgebrochen** — VOLC/EOMT/DTRD hätten nicht
+gehandelt. Behoben, und der yaml-Import ist jetzt gekapselt: fehlt das Paket,
+entfällt nur das befördertes Register. **Neue Cloud-Tasks vor dem
+Handelsfenster smoke-testen, nicht danach.**
+
+### Weiter offen
+- **ONX-Round-Trip-Kosten**: 14 Tage Burn-in ergaben nur 7 ONX-Fills (4 über
+  der 500-$-Messschwelle, 9.9bp Entry-Slippage) und 3 XSR-Fills. Für eine
+  getrennte `opg`-Exit-Messung reicht das nicht — braucht mehr Burn-in-Zeit,
+  ist nicht durch Rechnen lösbar.
+- **MERGARB** (Merger-Arbitrage) ist der einzige eingereihte Kandidat, der R8
+  strukturell erfüllen kann: die Auszahlung hängt am Deal-Ausgang, nicht an
+  Markt-/Zins-/Vol-Faktoren, also ρ nahe null zu allen fünf bestehenden
+  Sleeves. Braucht einen Deal-Ingester (SEC 425 / DEFM14A / SC 14D9 mit
+  LLM-Extraktion der Deal-Terms) nach dem Muster von `sec_13d_ingest.py`.
+- **BAB** nach R8 ohne Test zurückgestellt (erwartetes ΔS_p ≈ +0.01, dieselbe
+  Größenordnung wie das bereits gescheiterte CARRY).
