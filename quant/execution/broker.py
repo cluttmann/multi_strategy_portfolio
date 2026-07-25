@@ -43,8 +43,14 @@ def latest_prices(symbols: list[str]) -> dict[str, float]:
 
 def submit_order(symbol: str, qty: int, side: str, tif: str, sleeve: str,
                  seq: int, order_type: str = "market") -> dict:
+    # Laufkennung (HHMMSS) im client_order_id: ohne sie kollidiert jeder
+    # Wiederholungslauf mit HTTP 422 / 40010001 "client_order_id must be
+    # unique", weil `seq` nur der Schleifenindex ist. Genau das passierte am
+    # 2026-07-24, nachdem der erste Lauf an einem HTB-Titel abgebrochen war.
+    # Das Präfix QNT-<SLEEVE>- bleibt unverändert — orders_today() filtert
+    # darauf.
     coid = (f"{ORDER_TAG_PREFIX}-{sleeve.upper()}-"
-            f"{dt.date.today():%Y%m%d}-{seq:03d}")
+            f"{dt.date.today():%Y%m%d}-{dt.datetime.now():%H%M%S}-{seq:03d}")
     r = requests.post(f"{ALPACA_PAPER_BASE}/v2/orders", headers=H, json={
         "symbol": symbol, "qty": str(int(qty)), "side": side,
         "type": order_type, "time_in_force": tif, "client_order_id": coid,

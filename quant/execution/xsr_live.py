@@ -71,6 +71,40 @@ def latest_scores() -> pd.DataFrame:
         subset=["score"])
 
 
+def borrowable() -> set[str] | None:
+    """Leihbares Universum aus dem jüngsten Leih-Snapshot.
+
+    WARUM ALS GATE UND NICHT ALS NACHBEHANDLUNG: Alpaca lehnt `opg`-Orders für
+    hard-to-borrow Titel mit HTTP 422 / 42210000 ab ("only day orders are
+    allowed"). Am 2026-07-24 hat genau das (ASTC) den XSR-Lauf abgebrochen —
+    und weil `execute()` keine Fehlerisolierung hatte, wurde damit das GANZE
+    Buch nicht platziert. Das ist der Grund für die 3 Fills.
+
+    Wichtiger noch als der Ausführungsfehler ist die KOSTENSEITE: der Backtest
+    unterstellt 200bp/Jahr Leihkosten (portfolio_sim.BORROW_BPS_YR). Für
+    hard-to-borrow Titel sind 20-100 %/Jahr üblich. Ein Short-Bein mit
+    HTB-Namen ist also nicht nur unhandelbar, es macht die validierte
+    Sharpe-Zahl unehrlich. Von 14.216 Symbolen im Snapshot sind 8.846
+    hard_to_borrow — das Gate ist keine Randkorrektur.
+
+    Fail-closed: ohne Snapshot gibt es None, und der Aufrufer verzichtet dann
+    auf das Short-Bein statt blind zu shorten.
+    """
+    from quant.data.bq import query
+    try:
+        df = query("""
+          SELECT DISTINCT symbol FROM `trading-436516.quant.borrow_snapshots`
+          WHERE DATE(snap_ts) >= DATE_SUB(CURRENT_DATE(), INTERVAL 4 DAY)
+            AND shortable AND borrow_status = 'easy_to_borrow'""")
+    except Exception as e:  # noqa: BLE001
+        print(f"Leih-Snapshot nicht lesbar ({e}) — Short-Bein entfällt")
+        return None
+    if len(df) < 500:
+        print(f"Leih-Snapshot zu dünn ({len(df)} Symbole) — Short-Bein entfällt")
+        return None
+    return set(df["symbol"])
+
+
 def plan(dry_run: bool):
     from quant.execution.guard import guard_or_exit
     burn = guard_or_exit(SLEEVE)
@@ -84,7 +118,20 @@ def plan(dry_run: bool):
     df = df[~df["symbol"].isin(BOT_TICKERS)]
     df = df.sort_values("score", ascending=False)
     longs = df.head(n_side)
-    shorts = df.tail(n_side)
+    # Short-Bein nur aus leihbaren Namen (siehe borrowable()). Die Longs bleiben
+    # unberührt — Leihbarkeit ist nur für die Short-Seite relevant.
+    lend = borrowable()
+    if lend is None:
+        shorts = df.iloc[0:0]
+        notify("XSR: kein Leih-Snapshot → nur Long-Bein (fail-closed)")
+    else:
+        elig = df[df["symbol"].isin(lend)]
+        shorts = elig.tail(n_side)
+        drop = len(df.tail(n_side)) - len(
+            df.tail(n_side)[df.tail(n_side)["symbol"].isin(lend)])
+        if drop:
+            print(f"Short-Bein: {drop} von {n_side} schlechtesten Namen nicht "
+                  f"leihbar → durch die nächstschlechteren ersetzt")
 
     def sized(sub: pd.DataFrame, sign: int) -> dict[str, int]:
         w = (1.0 / sub["vol_63d"].clip(lower=0.10))
@@ -101,7 +148,11 @@ def plan(dry_run: bool):
     # tranche-style turnover control: keep any incumbent still in the top/
     # bottom 30% band; rotate the rest
     band_syms = set(df.head(n_side * 6)["symbol"])
-    band_syms_s = set(df.tail(n_side * 6)["symbol"])
+    # Das Short-Band muss dasselbe Leih-Gate durchlaufen wie die Neuaufnahmen,
+    # sonst hält der Bestandsschutz einen hard-to-borrow Short unbegrenzt weiter
+    # und die Ablehnungen wiederholen sich jeden Tag.
+    band_syms_s = set((elig if lend is not None else df.iloc[0:0])
+                      .tail(n_side * 6)["symbol"])
     kept = {s: q for s, q in prev.items()
             if (q > 0 and s in band_syms) or (q < 0 and s in band_syms_s)}
     merged = {**target, **kept}  # incumbents keep their size
@@ -150,6 +201,7 @@ def execute(dry_run: bool):
     gross = 0.0
     prices = broker.latest_prices([s for s, _, _ in orders])
     placed = 0
+    rejected: list[tuple[str, str]] = []
     for i, (sym, delta, reduces) in enumerate(sorted(orders)):
         px = prices.get(sym) or 0
         notional = abs(delta) * px
@@ -163,7 +215,16 @@ def execute(dry_run: bool):
         if dry_run:
             print(f"[dry] opg {side} {abs(delta)} {sym}")
         else:
-            broker.submit_order(sym, abs(delta), side, "opg", SLEEVE, i)
+            # FEHLERISOLIERUNG JE ORDER. Vorher brach eine einzige Ablehnung
+            # (ASTC, hard-to-borrow, 2026-07-24) den ganzen Lauf ab, und das
+            # gesamte restliche Buch wurde nie platziert. Ein Broker-Nein zu
+            # einem Namen ist ein normaler Betriebszustand, kein Grund, die
+            # Strategie stillzulegen.
+            try:
+                broker.submit_order(sym, abs(delta), side, "opg", SLEEVE, i)
+            except Exception as e:  # noqa: BLE001
+                rejected.append((sym, str(e)[:110]))
+                continue
         gross += notional
         placed += 1
     if not dry_run:
@@ -172,8 +233,18 @@ def execute(dry_run: bool):
         ledger.set_sleeve(SLEEVE, {**state, "pending_target": target,
                                    "positions": held,
                                    "symbol_universe": universe})
-    notify(f"XSR execute: {placed} opg orders, delta gross ≈ ${gross:,.0f}"
+    msg = (f"XSR execute: {placed} opg orders, delta gross ≈ ${gross:,.0f}"
            + (" [DRY RUN]" if dry_run else ""))
+    if rejected:
+        # Ablehnungen sind sichtbar zu machen, nicht zu verschweigen: ein
+        # dauerhaft abgelehnter Name verzerrt das Buch gegenüber dem Backtest.
+        msg += (f" | {len(rejected)} abgelehnt: "
+                + ", ".join(f"{s} ({e.split('message')[-1][:40]})"
+                            for s, e in rejected[:5]))
+        print("Abgelehnte Orders:")
+        for s, e in rejected:
+            print(f"  {s}: {e}")
+    notify(msg)
 
 
 def reconcile():
