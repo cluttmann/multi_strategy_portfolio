@@ -37,19 +37,23 @@ def main():
             from quant.execution import onx_live
             onx_live.enter(dry_run=False)
         elif task == "etf-rebalance":
-            from quant.execution import etf_sleeves
-            for sl in ("volc", "eomt"):
+            # Generischer Executor über das Sleeve-Register: jeder validierte
+            # Sleeve ist automatisch live, ohne neuen Code.
+            from quant.execution import generic_sleeve
+            from quant.sleeves.registry import REGISTRY
+            for sl in REGISTRY:
                 try:
-                    etf_sleeves.rebalance(sl, dry_run=False)
+                    generic_sleeve.rebalance(sl, dry_run=False)
                 except SystemExit:
                     raise
                 except Exception as e:  # noqa: BLE001
                     print(f"{sl} rebalance: {e}")
         elif task == "etf-reconcile":
-            from quant.execution import etf_sleeves
-            for sl in ("volc", "eomt"):
+            from quant.execution import generic_sleeve
+            from quant.sleeves.registry import REGISTRY
+            for sl in REGISTRY:
                 try:
-                    etf_sleeves.reconcile(sl)
+                    generic_sleeve.reconcile(sl)
                 except Exception as e:  # noqa: BLE001
                     print(f"{sl} reconcile: {e}")
         elif task == "cost-monitor":

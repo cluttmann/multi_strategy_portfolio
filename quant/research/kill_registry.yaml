@@ -1,0 +1,135 @@
+# Kill-Registry — Pflichtinput für jeden Hypothesen-Generator.
+#
+# WARUM: Ein Generator, der diese Datei nicht liest, erfindet IMOM neu. Das ist
+# der wertvollste Datensatz des Programms: 11 Familien, die an einer KONKRETEN
+# Ursache gestorben sind. Die Todesursache ist wichtiger als das Verdikt —
+# sie definiert die Suchregeln unten.
+
+todesursachen:
+  KOSTENWALL: >
+    Signal war echt, aber kleiner als Spread+Slippage. Trifft alles mit
+    Haltedauer < 5 Tagen im liquiden Universum. Wir sind strukturell
+    Liquiditätsnehmer (IEX ~2% Volumenanteil, Sekunden-Latenz, keine Rebates,
+    keine Queue-Priorität).
+  REGIME_ZERFALL: >
+    Funktionierte vor 2021, danach nicht. Identische Signatur bei drei
+    unabhängigen Familien (IMOM, GAP, ONX) — vermutlich dieselbe Ursache
+    (Retail-Flow-Regime 2020/21, danach arbitriert).
+  UNHANDELBAR: >
+    Edge existiert nur dort, wo wir nicht handeln können — unleihbare
+    Microcaps, Titel unter 5 M$ ADV, Limit-up-Namen.
+  REDUNDANT: >
+    Information steckt bereits in einem bestehenden Feature/Sleeve.
+  MECHANISMUS_WIDERLEGT: >
+    Der behauptete Wirkmechanismus hielt dem Test nicht stand.
+
+familien:
+  - name: IMOM
+    beschreibung: ETF-Intraday-Momentum (Gao/Han/Li/Zhou JFE 2018)
+    todesursache: [KOSTENWALL, REGIME_ZERFALL]
+    zahlen: "Regel +0.02bp brutto über 50k Trades; Meta-Filter Sharpe 0.14 netto"
+    lehre: Publizierte Intraday-Anomalien sind nach Publikation tot.
+  - name: GAP
+    beschreibung: Overnight-Gap Drift-vs-Fade, ML-klassifiziert
+    todesursache: [REGIME_ZERFALL]
+    zahlen: "IC +0.17 (2019-21) → +0.03 (2022+); netto negativ jedes Jahr ab 2022"
+    lehre: IC-Zerfall an einer Regime-Grenze ist tödlich, nicht heilbar.
+  - name: CAT
+    beschreibung: LLM/FinBERT-Katalysator-Drift, 137k Übernacht-Events
+    todesursache: [KOSTENWALL]
+    zahlen: "brutto Sharpe 0.71 (+19.7%); netto -30.6%/Jahr — Edge 4x kleiner als Kosten"
+    lehre: >
+      Der wichtigste Kill. Ein echtes Signal mit Sharpe 0.71 brutto stirbt an
+      20bp Kosten. Jede News-/Event-Idee muss VOR dem Bau eine
+      Kostenrechnung in bp pro Trade bestehen.
+  - name: PEAD
+    beschreibung: Post-Earnings-Drift mit echten Terminen + SUE (102k Events)
+    todesursache: [REGIME_ZERFALL, KOSTENWALL]
+    zahlen: "L/S 20d-Spread +1.64% (2003-09) → +0.1-0.3% (2016-26)"
+    lehre: Lehrbuch-Anomalien sind im liquiden Segment abgeerntet.
+  - name: OPT
+    beschreibung: Wöchentliche 2%-OTM-Put-Spreads SPY/QQQ
+    todesursache: [MECHANISMUS_WIDERLEGT]
+    zahlen: "83% Trefferquote, aber -4.3% P&L/Risiko — Tail-Wochen fressen alles"
+    lehre: Hohe Trefferquote ≠ positiver Erwartungswert bei Short-Optionalität.
+  - name: PAIR
+    beschreibung: 3x-Bull/Bear-Doppel-Short (Vol-Decay-Ernte)
+    todesursache: [KOSTENWALL]
+    zahlen: "-3% bis -4%/Jahr; Leihkosten bepreisen den Decay exakt"
+    lehre: Wo ein Effekt allgemein bekannt ist, bepreist ihn der Leihmarkt.
+  - name: RSPLIT
+    beschreibung: Reverse-Split-Drift (short)
+    todesursache: [UNHANDELBAR]
+    zahlen: "-1.5%/Trade nach Leihkosten im handelbaren Segment"
+    lehre: Effekt lebt nur in unleihbaren Microcaps.
+  - name: OVN_FADE
+    beschreibung: Extremmove-Fade in der 24/5-Übernachtbörse
+    todesursache: [UNHANDELBAR]
+    zahlen: "Junk-Tier +181bp/Trade (t=6.1), liquides Tier nur -13bp"
+    lehre: >
+      Das ganze Edge saß in Pump-and-Dump-Namen ohne Leihe. Immer nach
+      Liquiditätstier trennen, bevor man jubelt.
+  - name: DOW_KALENDER
+    beschreibung: Wochentags-Verfeinerung von ONX
+    todesursache: [MECHANISMUS_WIDERLEGT]
+    zahlen: "OOS widerlegt"
+    lehre: Kalender-Feinschnitt ohne Mechanismus ist Data-Snooping.
+  - name: LETF_REBAL
+    beschreibung: LETF-Zwangsrebalancierung als Signal
+    todesursache: [MECHANISMUS_WIDERLEGT]
+    zahlen: "Effekt skaliert NICHT mit L²−L (2x stärker als 3x) → nicht LETF-Mechanik"
+    lehre: >
+      Hypothese mit quantitativer Vorhersage testen (hier: Skalierung mit
+      L²−L). Wenn die Vorhersage bricht, ist der Mechanismus falsch, auch
+      wenn das Signal existiert.
+  - name: TIMESFM
+    beschreibung: Time-Series-Foundation-Model als Return-Prädiktor
+    todesursache: [REDUNDANT, MECHANISMUS_WIDERLEGT]
+    zahlen: "R²_OOS -2.80%; eigener Pilot IC -0.052, corr -0.18 zu Momentum"
+    lehre: >
+      Ein Modell ohne marktspezifisches Pretraining bringt keine neue
+      Information. Modelltausch bei gleicher Information ≈ 0 (6 Klassen getestet).
+
+verworfene_feature_bloecke:
+  - name: FINRA_SHORT_VOLUME
+    zahlen: "Δ Sharpe -0.059 gegen die 36-Feature-Baseline"
+    ursache: REDUNDANT
+  - name: FRED_REGIME_INTERAKTIONEN
+    zahlen: "Δ Sharpe +0.011 (unter dem +0.02-Kriterium)"
+    ursache: REDUNDANT
+
+# ── SUCHREGELN, die aus den Kills folgen (bindend für den Generator) ──────────
+suchregeln:
+  - id: R1_KOSTEN
+    regel: >
+      Verwirf jede Hypothese, deren Zahler "der Ungeduldige" ist — AUSSER der
+      Fill kommt aus einer Auktion oder die Haltedauer beträgt Wochen.
+      Begründung: CAT/IMOM/GAP/PEAD starben genau hier; ONX (Auktion) und
+      XSR-5d (mehrtägig) überlebten.
+  - id: R2_MECHANISMUS
+    regel: >
+      Jede Hypothese braucht einen ökonomischen Mechanismus MIT quantitativer
+      Vorhersage (wer zahlt, warum, und wie skaliert der Effekt?). Ohne
+      testbare Skalierungsvorhersage ist es Data-Mining (siehe LETF_REBAL).
+  - id: R3_LIQUIDITAETSTIER
+    regel: >
+      Ergebnisse IMMER nach Liquiditätstier getrennt ausweisen. Ein Edge, der
+      nur im untersten Tier lebt, ist unhandelbar (siehe OVN_FADE, RSPLIT).
+  - id: R4_REGIME
+    regel: >
+      Jede Zahl doppelt ausweisen: Voll-Sample UND 2022+. Nur das aktuelle
+      Regime prognostiziert die Zukunft.
+  - id: R5_ORTHOGONALITAET
+    regel: >
+      ρ gegen XSR/ONX/VOLC/EOMT/DTRD messen. Ein Sleeve mit Sharpe 1.0 und
+      ρ=0.7 zu ONX bringt fast nichts; ein Sleeve mit 0.4 und ρ=0.0 bringt
+      mehr. Erwarteten Portfolio-Beitrag ausrechnen, nicht nur den Sharpe.
+  - id: R6_VARIANTEN_VORREGISTRIEREN
+    regel: >
+      Variantensatz VOR dem ersten Lauf festlegen und eng halten (3-5). Der
+      DSR deflationiert mit der Varianz der Varianten; ein breiter Sweep macht
+      das G5-Gate unpassierbar (bei 1 Variante braucht es Sharpe 1.74).
+  - id: R7_HOLDOUT
+    regel: >
+      Ein Zeitfenster (mind. die letzten 5 Jahre) wird NIE für Parameterwahl
+      benutzt. EOMT und DTRD wurden so validiert; beide bestanden.

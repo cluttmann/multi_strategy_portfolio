@@ -33,6 +33,7 @@ BASELINES = {
     "ONX": {"sharpe": 1.06, "regime_2022": 0.40, "monitor_only": False},
     "VOLC": {"sharpe": 0.64, "regime_2022": 0.45, "monitor_only": False},
     "EOMT": {"sharpe": 0.87, "regime_2022": 0.65, "monitor_only": False},
+    "DTRD": {"sharpe": 0.73, "regime_2022": 0.43, "monitor_only": False},
     "CTREND": {"sharpe": 1.19, "regime_2022": 0.75, "monitor_only": True},
 }
 
@@ -175,8 +176,20 @@ def eomt_returns() -> pd.Series:
     return (me[cols].mean(axis=1) - COST).dropna()
 
 
+def dtrd_returns() -> pd.Series:
+    """Cross-Asset-TSMOM, identische Regeln wie die validierte Studie."""
+    from quant.research.dtrd_study import load, sleeve
+    try:
+        px = load()
+    except Exception:  # noqa: BLE001
+        return pd.Series(dtype=float)
+    r = sleeve(px, 126)
+    return r.loc[str(dt.date.today() - dt.timedelta(days=3 * 365)):]
+
+
 SLEEVES = {"XSR": xsr_returns, "ONX": onx_returns, "VOLC": volc_returns,
-           "EOMT": eomt_returns, "CTREND": ctrend_returns}
+           "EOMT": eomt_returns, "DTRD": dtrd_returns,
+           "CTREND": ctrend_returns}
 
 
 def check(alert=True):
