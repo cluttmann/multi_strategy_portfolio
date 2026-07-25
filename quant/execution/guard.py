@@ -29,10 +29,35 @@ def burn_in_scale() -> float:
         return 0.25
 
 
+def sleeve_paused(sleeve: str) -> str | None:
+    """Grund, falls dieser Sleeve pausiert ist — sonst None.
+
+    Firestore: qnt-risk/state.paused_sleeves = {"onx": "Grund", ...}. Ein
+    einzelner Sleeve muss ohne Deploy und ohne Scheduler-Eingriff stillgelegt
+    werden können: wenn der Live-Kostenmonitor zeigt, dass ein Sleeve unter
+    seinen Break-even gerutscht ist, darf die Reaktion nicht an einem
+    Container-Build hängen. Fail-OPEN (bei Lesefehler wird gehandelt), weil das
+    Gegenteil — ein Firestore-Ausfall legt alles still — schlechter ist als ein
+    Tag zu viel Handel; die Risikogrenzen in risk.py greifen unabhängig davon.
+    """
+    try:
+        from quant.execution import ledger
+        p = ledger.risk_state().get("paused_sleeves") or {}
+        v = p.get(sleeve.lower())
+        return str(v) if v else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def guard_or_exit(sleeve: str) -> float:
-    """Bricht ab, wenn kein Handelstag; sonst gibt den Burn-in-Faktor zurück."""
+    """Bricht ab, wenn kein Handelstag oder der Sleeve pausiert ist; sonst
+    gibt den Burn-in-Faktor zurück."""
     import sys
     if not is_trading_day():
         print(f"{sleeve}: kein NYSE-Handelstag — übersprungen")
+        sys.exit(0)
+    why = sleeve_paused(sleeve)
+    if why:
+        print(f"{sleeve}: PAUSIERT — {why}")
         sys.exit(0)
     return burn_in_scale()

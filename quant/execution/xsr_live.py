@@ -10,9 +10,18 @@ fill at the opening auction via `opg` orders; labels in the backtest were
 open(t+1)→open(t+1+h), so live and backtest see the same prices.
 
 Sizing: n_side scales with equity (whole shares only for auction orders);
-long-short dollar-balanced; 5-day tranche rotation is approximated live by
-only trading the DELTA between yesterday's book and today's target (the
-hysteresis/tranche turnover control from the sim).
+long-short dollar-balanced.
+
+Turnover-Kontrolle: ECHTE ueberlappende Tranchen (Jegadeesh-Titman), identisch
+zu portfolio_sim.simulate_tranches. Jeden Tag wird eine Tranche in Vollgroesse
+aus den heutigen Scores gebildet; gehandelt wird der Mittelwert der letzten
+K_TRANCHE Tranchen. Vorher stand hier eine Hysterese ("Bestandsschutz im
+6x-Band"), die mit keinem k des Simulators korrespondierte — Backtest und Live
+massen verschiedene Buecher.
+
+Short-Bein: nur easy_to_borrow (siehe borrowable()). Alpaca lehnt opg-Orders
+fuer hard-to-borrow Titel ab, und der Simulator unterstellt 200bp/Jahr Leihe,
+was fuer HTB-Namen unrealistisch ist.
 """
 
 import argparse
@@ -29,7 +38,18 @@ from quant.execution.telegram import notify
 SLEEVE = "xsr"
 SLEEVE_ALLOC = 0.40       # of equity, per side (gross 2x alloc)
 TARGET_POS_USD = 400.0    # min sensible whole-share position
-K_TRANCHE = 5             # rotate 1/K of the book per day
+
+# HALTEDAUER = 21 Tage, geändert 2026-07-25 nach der vorregistrierten Regel aus
+# FINDINGS ("Deploy 5d, 21d als kostenrobuster Fallback — Burn-in misst echte
+# Fills als Entscheider"). Der Burn-in hat 9.9-10.0bp Slippage gemessen, doppelt
+# so viel wie angenommen. Bei 10bp gemessen, mit Leih-Gate, Regime 2022+:
+#     k=5  Sharpe -0.048   Turnover 0.545
+#     k=10 Sharpe +0.076   Turnover 0.302
+#     k=21 Sharpe +0.199   Turnover 0.158
+# Wichtig: es braucht KEINE 21d-Modelle. Dasselbe 5d-Signal 21 Tage gehalten
+# liefert 0.199 gegen 0.190 des eigens trainierten 21d-Modells — der Gewinn kommt
+# aus dem Turnover, nicht aus dem Label.
+K_TRANCHE = 21
 
 
 def _ensure_models() -> str:
@@ -143,29 +163,38 @@ def plan(dry_run: bool):
                 out[sym] = sign * qty
         return out
 
-    target = {**sized(longs, +1), **sized(shorts, -1)}
-    prev = (ledger.get_sleeve(SLEEVE).get("target") or {})
-    # tranche-style turnover control: keep any incumbent still in the top/
-    # bottom 30% band; rotate the rest
-    band_syms = set(df.head(n_side * 6)["symbol"])
-    # Das Short-Band muss dasselbe Leih-Gate durchlaufen wie die Neuaufnahmen,
-    # sonst hält der Bestandsschutz einen hard-to-borrow Short unbegrenzt weiter
-    # und die Ablehnungen wiederholen sich jeden Tag.
-    band_syms_s = set((elig if lend is not None else df.iloc[0:0])
-                      .tail(n_side * 6)["symbol"])
-    kept = {s: q for s, q in prev.items()
-            if (q > 0 and s in band_syms) or (q < 0 and s in band_syms_s)}
-    merged = {**target, **kept}  # incumbents keep their size
+    # ── ECHTE ÜBERLAPPENDE TRANCHEN (Jegadeesh–Titman), wie im Simulator ──────
+    # Vorher stand hier eine Hysterese ("Bestandsschutz im 6x-Band"), die den
+    # Turnover nur ungefähr dämpfte und mit keinem k des Simulators
+    # korrespondierte. Der Simulator bildet jeden Tag 1/k des Buches neu und
+    # handelt den MITTELWERT der letzten k Tranchen; genau das wird hier jetzt
+    # abgebildet. Ohne diesen Gleichlauf misst der Backtest ein Buch, das live
+    # nie existiert — der wiederkehrende Fehler in diesem Projekt.
+    heute = {**sized(longs, +1), **sized(shorts, -1)}
+    st = ledger.get_sleeve(SLEEVE)
+    tranches = list(st.get("tranches") or [])
+    tranches.append({"stand": str(pd.Timestamp.today().date()), "ziel": heute})
+    tranches = tranches[-K_TRANCHE:]          # nur die letzten k behalten
+    agg: dict[str, float] = {}
+    for tr in tranches:
+        for s, q in (tr.get("ziel") or {}).items():
+            agg[s] = agg.get(s, 0.0) + float(q)
+    # Mittelwert über k Tranchen — nicht über die vorhandenen: solange weniger
+    # als k Tranchen gesammelt sind, läuft das Buch bewusst kleiner an, statt
+    # am ersten Tag volle Größe mit einem einzigen Signal aufzubauen.
+    merged = {s: int(v / K_TRANCHE) for s, v in agg.items()
+              if abs(v / K_TRANCHE) >= 1}
     plan_doc = {"target": merged, "n_side": n_side, "scale": scale,
-                "equity": equity}
+                "equity": equity, "k": K_TRANCHE, "tranchen": len(tranches)}
     print(f"plan: {len([q for q in merged.values() if q > 0])} long / "
           f"{len([q for q in merged.values() if q < 0])} short, "
-          f"~${side_budget:,.0f}/side")
+          f"~${side_budget:,.0f}/side, {len(tranches)}/{K_TRANCHE} Tranchen")
     if not dry_run:
-        ledger.set_sleeve(SLEEVE, {**ledger.get_sleeve(SLEEVE),
-                                   "plan": plan_doc})
-    notify(f"XSR plan: {len(merged)} names, ${side_budget:,.0f}/side, "
-           f"scale {scale}" + (" [DRY RUN]" if dry_run else ""))
+        ledger.set_sleeve(SLEEVE, {**st, "plan": plan_doc,
+                                   "tranches": tranches})
+    notify(f"XSR plan: {len(merged)} Namen, ${side_budget:,.0f}/Seite, "
+           f"Tranchen {len(tranches)}/{K_TRANCHE}, scale {scale}"
+           + (" [DRY RUN]" if dry_run else ""))
 
 
 def execute(dry_run: bool):
