@@ -474,3 +474,68 @@ Irrtumsrisiko also klein, und (b) **Pausieren die Messung beendet**, die die
 Entscheidung erst tragfähig macht (bisher nur 4 Fills über der 500-$-Schwelle).
 Der Schalter dafür ist gebaut: `guard.sleeve_paused()`, Firestore-gesteuert,
 ohne Deploy.
+
+## Der Wertbeitrag ist Orthogonalität, nicht Standalone-Rendite (2026-07-25)
+
+Anlass: „Das ist ja schlechter als ein SPY-1×-Halten." Richtig — und die Antwort
+verlangte, die echte Bot-Rendite zu messen statt sie zu schätzen.
+
+### Standalone verliert das Programm. Klar.
+| | CAGR | Vol | Sharpe | MaxDD |
+|---|---:|---:|---:|---:|
+| SPY 1×, 2003–2026 | **+11,5 %** | 18,6 % | 0,68 | −55 % |
+| Quant-Programm @1,6× | +6,5 % | 12,3 % | 0,71 | ~−20 % |
+
+Sharpe-Gleichstand, aber SPY liefert fast das Doppelte, weil es bei 18,6 % Vol
+läuft. Für SPYs Vol bräuchte das Programm Gross 2,4× — über Reg-T. **Es gewinnt
+nicht einmal risikobereinigt.**
+
+### Die echte Live-Rendite des ETF-Bots
+Konto 981050118, gemessen per **Modified Dietz** auf Monatsbasis. Tagesrenditen
+sind hier unbrauchbar: das Konto ist klein ($11,2k) und wird monatlich bespart
+($9,5k kumuliert = 85 % des Kontos), ein um einen Tag verschobener
+Einzahlungstag erzeugt zweistellige Scheinrenditen. Der erste Versuch ergab so
+Vol 83 % und MaxDD −69 % für ein 3×-ETF-Portfolio — unmöglich.
+
+**Ergebnis (22 Monate, 2024-09 bis 2026-07): CAGR +14,5 %, Vol 27,0 %,
+Sharpe 0,63, MaxDD −19,8 %.** Mein vorheriger Proxy (0,70 / 25 %) war nah, aber
+zu günstig.
+
+### ρ je Sleeve gegen den ECHTEN Bot — die entscheidende Tabelle
+| Sleeve | ρ(Bot) | Beta |
+|---|---:|---:|
+| **VOLC** | **+0,654** | +0,54 |
+| ONX | +0,565 | +0,57 |
+| DTRD | +0,439 | +0,08 |
+| EOMT | −0,004 | −0,00 |
+| **XSR** | **−0,533** | −0,39 |
+
+XSR ist bei ρ −0,53 ein echter Hedge gegen den Bot — das wertvollste Stück des
+Programms, und ausgerechnet das, dessen Executor abgestürzt war.
+
+### Konfigurationsvergleich
+| | S_p | CAGR | ρ(Bot) | Gesamt-Sharpe | Zugewinn über Bot |
+|---|---:|---:|---:|---:|---:|
+| mit VOLC | 0,71 | +6,4 % | +0,316 | 0,83 | +32 % |
+| **ohne VOLC** | 0,67 | **+4,5 %** | **−0,248** | **1,06** | **+68 %** |
+
+**Weniger Standalone-Rendite, mehr als doppelter Portfolio-Nutzen.** Das ist der
+Kern: das Programm soll SPY nicht schlagen, es soll etwas sein, das SPY und der
+Bot nicht sein können.
+
+### Entschieden
+- **ONX pausiert**: negativer Erwartungswert bei gemessenen Kosten
+  (Break-even 8,3–9,8bp, gemessen 10,0bp → Sharpe −0,12) **und** ρ(Bot) +0,57.
+- **VOLC pausiert**: kein Kill wegen Sharpe (0,36 ist positiv), sondern wegen
+  Redundanz. Short-Vol ist eine Short-Put-Position auf den Index — dieselbe
+  Wette, die der Bot siebenfach hält.
+- Aktiver Kern: **XSR + EOMT + DTRD**, ρ(Bot) −0,248.
+- Beide Pausen über `guard.sleeve_paused()` (Firestore), Reaktivierungs-
+  bedingungen im Ledger hinterlegt.
+
+### Grenzen dieser Messung, ausdrücklich
+- **22 gemeinsame Monate, alle im Bullenmarkt.** ρ ist die unsicherste Zahl hier.
+- Alpaca liefert Portfolio-Historie erst ab 2024-09-25, obwohl das Konto seit
+  2023-02-05 existiert — ~19 Monate fehlen.
+- Das Bot-Konto ist klein; Stückzahl-Granularität (nicht-fraktionierbare Ticker,
+  Mindestgrößen) verzerrt die Strategien gegenüber ihrer Backtest-Absicht.
