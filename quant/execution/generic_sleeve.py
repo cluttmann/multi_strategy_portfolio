@@ -31,7 +31,23 @@ def rebalance(name: str, dry_run: bool = False):
     budget = equity * spec.alloc * scale
 
     weights, why = spec.signal()
+    # Gesperrte Ticker (Eigentum des ETF-Bots) entfernen — aber das Risikobudget
+    # des Sleeves NICHT dabei schrumpfen. EOMT signalisiert IEF/TLT/EDV zu je
+    # 1/3; TLT ist gesperrt, und ohne Renormierung lief der Sleeve dauerhaft bei
+    # Gross 0.67 statt 1.0, ohne dass es irgendwo auffiel (gefunden 2026-07-25).
+    # Skaliert wird auf das URSPRÜNGLICHE Gross, nicht auf 1.0 — sonst würde ein
+    # Sleeve mit absichtlich niedrigem Gross (DTRD: Vol-Target) übergewichtet.
+    gross_soll = sum(abs(w) for w in weights.values())
+    blocked = {s: w for s, w in weights.items() if s in BOT_TICKERS}
     weights = {s: w for s, w in weights.items() if s not in BOT_TICKERS}
+    gross_rest = sum(abs(w) for w in weights.values())
+    if blocked and gross_rest > 0:
+        k = gross_soll / gross_rest
+        weights = {s: w * k for s, w in weights.items()}
+        msg = (f"{name.upper()}: {sorted(blocked)} gesperrt (ETF-Bot) → "
+               f"Gewichte um {k:.2f}x renormiert, Gross {gross_soll:.0%} bleibt")
+        print(msg)
+        notify(msg)
 
     state = ledger.get_sleeve(name)
     # Broker-Positionen sind die Wahrheit (Auktions-Teilfüllungen erscheinen
