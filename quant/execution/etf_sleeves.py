@@ -118,7 +118,9 @@ def rebalance(sleeve: str, dry_run: bool):
         if delta == 0:
             continue
         notional = abs(delta) * px
-        ok, msg = risk.check_order(s, notional, sleeve, equity, gross + notional)
+        reduces = abs(tgt_qty) < abs(held.get(s, 0))
+        ok, msg = risk.check_order(s, notional, sleeve, equity, gross + notional,
+                                   reduces_exposure=reduces)
         if not ok:
             notify(f"{sleeve.upper()}: {s} blockiert — {msg}")
             continue

@@ -142,15 +142,20 @@ def execute(dry_run: bool):
         delta = int(target.get(sym, 0)) - int(held.get(sym, 0))
         if delta == 0:
             continue
-        orders.append((sym, delta))
+        # |Ziel| < |Bestand| heisst: die Order baut ab. Solche Orders duerfen
+        # nicht am Konto-Gross-Deckel scheitern, sonst blockiert der Schutz
+        # genau die risikosenkenden Trades.
+        reduces = abs(int(target.get(sym, 0))) < abs(int(held.get(sym, 0)))
+        orders.append((sym, delta, reduces))
     gross = 0.0
-    prices = broker.latest_prices([s for s, _ in orders])
+    prices = broker.latest_prices([s for s, _, _ in orders])
     placed = 0
-    for i, (sym, delta) in enumerate(sorted(orders)):
+    for i, (sym, delta, reduces) in enumerate(sorted(orders)):
         px = prices.get(sym) or 0
         notional = abs(delta) * px
         ok, why = risk.check_order(sym, notional, SLEEVE, equity,
-                                   gross + notional)
+                                   gross + notional,
+                                   reduces_exposure=reduces)
         if not ok:
             notify(f"XSR: {sym} blocked — {why}")
             continue

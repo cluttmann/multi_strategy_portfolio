@@ -39,8 +39,11 @@ def main():
         elif task == "etf-rebalance":
             # Generischer Executor über das Sleeve-Register: jeder validierte
             # Sleeve ist automatisch live, ohne neuen Code.
-            from quant.execution import generic_sleeve
+            from quant.execution import generic_sleeve, risk
             from quant.sleeves.registry import REGISTRY
+            # Der Konto-Gross-Deckel wird über ALLE Sleeves dieses Laufs
+            # kumuliert — deshalb einmal am Anfang zurücksetzen, nicht je Sleeve.
+            risk.reset_run_state()
             for sl in REGISTRY:
                 try:
                     generic_sleeve.rebalance(sl, dry_run=False)

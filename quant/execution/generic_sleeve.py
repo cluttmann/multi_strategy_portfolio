@@ -53,7 +53,11 @@ def rebalance(name: str, dry_run: bool = False):
         if delta == 0:
             continue
         notional = abs(delta) * px
-        ok, msg = risk.check_order(s, notional, name, equity, gross + notional)
+        # Verkleinert die Order die Position (auch Vorzeichenwechsel gegen 0)?
+        # Dann darf sie nicht am Konto-Gross-Deckel scheitern.
+        reduces = abs(tgt) < abs(held.get(s, 0))
+        ok, msg = risk.check_order(s, notional, name, equity, gross + notional,
+                                   reduces_exposure=reduces)
         if not ok:
             notify(f"{name.upper()}: {s} blockiert — {msg}")
             continue
