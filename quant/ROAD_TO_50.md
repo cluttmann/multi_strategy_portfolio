@@ -1,7 +1,80 @@
-I have the grounding I need. Writing the document now.
-
 # ROAD_TO_50 — Entscheidungsdokument des Head of Quant Research
 **Datum 2026-07-24 · Konto PA3IN7QIGPSE (Alpaca Paper, $100k) · Burn-in Tag ~8**
+
+---
+
+# NACHTRAG 2026-07-25 — die Obergrenze ist strukturell, nicht eine Frage der Sleeve-Anzahl
+
+Alles unterhalb dieser Linie bleibt gültig, mit **einer** Ausnahme: die Annahme,
+50 % seien über *mehr* Sleeves erreichbar. Nachgerechnet in
+[portfolio_math.py](research/portfolio_math.py) — das ersetzt die Faustformel
+S̄·√(N/(1+(N−1)ρ̄)) durch die volle, geschrumpfte Korrelationsmatrix auf
+Monatsbasis und die optimale Long-only-Kombination S_p = √(sᵀC⁻¹s).
+
+## Drei eigene Fehler, die die Basis verzerrt haben
+
+1. **EOMT wurde mit √252 annualisiert, ist aber eine MONATSreihe** (73
+   Beobachtungen). Das ergab Sharpe 2.36 statt 0.52 — Faktor √(252/12) = 4.6 —
+   und EOMT dominierte damit jede Portfolio-Rechnung. Jetzt je Sleeve mit
+   seiner eigenen Frequenz (`ANN` in [discovery.py](research/discovery.py)).
+2. **Korrelationen standen teils auf 22 gemeinsamen Beobachtungen.** ρ wird
+   jetzt auf Monatsrenditen geschätzt, nur ab 36 gemeinsamen Monaten; darunter
+   gilt ein Prior von 0.20, und negative ρ werden auf 0 gekappt.
+3. **Der Deflated Sharpe benutzte den GLOBALEN Versuchszähler** (54 Versuche
+   über 18 unabhängige Familien). Bailey/López de Prado deflationieren mit den
+   Versuchen, aus denen *diese* Strategie ausgewählt wurde. Mit dem
+   familieninternen Zähler löst sich auch das offene Rätsel aus §0.3: XSR
+   0.458 → **0.804**, DTRD 0.790 → **0.861**, EOMT 0.963 → **0.976**. Der
+   Programm-Selektionseffekt verschwindet dadurch nicht — er wird separat als
+   Trefferquote ausgewiesen (5 von 18 Familien), statt in eine
+   Einzelfamilien-Statistik gefaltet zu werden.
+
+## Die korrigierte Erwartung
+
+| | Voll-Sample | **aktuelles Regime 2022+** |
+|---|---:|---:|
+| S_p (optimale Kombination, 30 % Schrumpfung) | 1.55 | **1.03** |
+| Beitrag je Sleeve | EOMT +0.19, ONX +0.19, XSR +0.16, VOLC +0.03, DTRD +0.02 | XSR +0.19, EOMT +0.19, VOLC +0.04, DTRD +0.02, ONX +0.01 |
+
+Renditeerwartung im aktuellen Regime, nach 25 % Live-Haircut:
+
+| Vol-Target | 1.0× | 1.5× | 1.9× (Reg-T) |
+|---|---:|---:|---:|
+| 10 % | +7.7 % | +11.6 % | +14.7 % |
+| **15 %** | +11.6 % | +17.4 % | **+22.0 %** |
+| 20 % | +15.4 % | +23.1 % | +29.3 % |
+
+**Ehrliche Erwartung: 15–25 %/Jahr**, mit +22 % als Mittelfall bei 15 % Vol und
+vollem Reg-T-Hebel. Das ist etwas besser als die vorher genannten 12–20 %, und
+zwar aus einem sachlichen Grund: die echte Korrelationsmatrix ist besser als der
+Durchschnitts-ρ-Ansatz sie darstellte (XSR ist zu allem ρ ≈ 0).
+
+## Warum 50 % nicht am Sleeve-Zähler hängt
+
+Für N→∞ konvergiert S_p → **S̄/√ρ̄**. Bei den heutigen Werten (Ø-Sharpe 0.51,
+ρ̄ = 0.16) ist das **1.25** — eine Rendite-Obergrenze von **≈27 %/Jahr** unter
+Reg-T, *unabhängig von der Zahl der Sleeves*. Gerechnet:
+
+| zusätzliche gleichwertige Sleeves | N | S_p | Rendite |
+|---:|---:|---:|---:|
+| +5 | 10 | 1.02 | +21.8 % |
+| +10 | 15 | 1.08 | +23.1 % |
+| +20 | 25 | 1.14 | +24.4 % |
+| +50 | 55 | 1.20 | +25.6 % |
+
+Fünfzig weitere Sleeves der heutigen Qualität bringen 22.0 % → 25.6 %. Das ist
+die Antwort auf „wir suchen einfach weiter": **Suchen allein reicht nicht.**
+
+50 % brauchen S_p ≥ 2.34. Erreichbar nur über
+- **Ø-Sharpe ≥ 0.94** bei heutigem ρ̄ (nahezu Verdoppelung der Qualität), oder
+- **ρ̄ ≤ 0.047** bei heutigem Ø-Sharpe (ein Drittel des heutigen ρ̄), oder
+- Hebel 4.3× — das ist 2.3× über dem Reg-T-Limit und damit nicht verfügbar.
+
+Daraus folgt Suchregel **R8** in [kill_registry.yaml](research/kill_registry.yaml):
+ein Kandidat ist nur interessant, wenn er Sharpe deutlich über 0.51 liefert
+ODER ρ < 0.05 zu **allen** bestehenden Sleeves hat. Ein weiterer Sleeve mit
+Sharpe 0.45 und ρ = 0.3 ist Arbeit ohne Wirkung — genau das war CARRY
+(ΔS_p = +0.010).
 
 ---
 

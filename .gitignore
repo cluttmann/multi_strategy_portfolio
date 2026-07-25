@@ -70,3 +70,6 @@ research/retirement_projection.png
 research/__pycache__/
 CLAUDE.md
 quant/_staging/
+
+# Zwischenartefakt des 13D-Piloten (Wahrheit liegt in BigQuery)
+quant/research/_13d_pilot.parquet

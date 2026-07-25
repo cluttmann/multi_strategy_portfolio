@@ -46,7 +46,9 @@ def rebalance(name: str, dry_run: bool = False):
     orders, gross = [], 0.0
     for s in syms:
         px = prices.get(s) or 0.0
-        tgt = int((budget * weights.get(s, 0.0)) // px) if px > 0 else 0
+        # int() schneidet zur Null hin ab — für Shorts richtig (// würde
+        # abwärts runden und damit die Short-Seite systematisch übergewichten)
+        tgt = int(budget * weights.get(s, 0.0) / px) if px > 0 else 0
         delta = tgt - held.get(s, 0)
         if delta == 0:
             continue
@@ -66,9 +68,12 @@ def rebalance(name: str, dry_run: bool = False):
             broker.submit_order(s, abs(delta), side, spec.tif, name, i)
 
     if not dry_run:
-        new_pos = {s: t for s, _, t in orders if t > 0}
+        # != 0, nicht > 0: Short-Ziele sind negativ und müssen ins Ledger,
+        # sonst gilt die Position beim nächsten Lauf als nicht gehalten und
+        # wird ein zweites Mal aufgebaut.
+        new_pos = {s: t for s, _, t in orders if t != 0}
         keep = {s: q for s, q in held.items()
-                if s not in {o[0] for o in orders} and q > 0}
+                if s not in {o[0] for o in orders} and q != 0}
         ledger.set_sleeve(name, {**state, "positions": {**keep, **new_pos},
                                  "last_reason": why,
                                  "symbol_universe": sorted(known)})

@@ -12,11 +12,13 @@ eintragen genügt, der Scheduler greift sie automatisch auf.
 """
 
 import datetime as dt
+import os
 from dataclasses import dataclass, field
 from typing import Callable
 
 import numpy as np
 import pandas as pd
+import yaml
 
 
 @dataclass
@@ -104,6 +106,47 @@ REGISTRY: dict[str, SleeveSpec] = {
         sharpe_full=0.73, sharpe_now=0.43, tags=["trend", "crossasset"],
         notes="ρ(XSR)=-0.001; monatlich → kostenimmun"),
 }
+
+PROMOTED_PATH = os.path.join(os.path.dirname(__file__), "promoted.yaml")
+
+
+def _load_promoted() -> dict[str, SleeveSpec]:
+    """Von der Discovery-Pipeline beförderte Sleeves nachladen.
+
+    Beförderung ist damit eine Daten-Änderung: wer die Gates passiert, landet
+    in `promoted.yaml` und wird beim nächsten Scheduler-Lauf gehandelt — ohne
+    dass jemand einen Executor schreiben muss.
+    """
+    import importlib
+    if not os.path.exists(PROMOTED_PATH):
+        return {}
+    with open(PROMOTED_PATH) as f:
+        doc = yaml.safe_load(f) or {}
+    out: dict[str, SleeveSpec] = {}
+    for e in doc.get("befoerdert") or []:
+        try:
+            mod_name, fn_name = e["live_signal"].rsplit(".", 1)
+            fn = getattr(importlib.import_module(mod_name), fn_name)
+        except Exception as ex:  # noqa: BLE001
+            # Fail-closed: eine unimportierbare Signalfunktion darf den
+            # gesamten Handelslauf nicht mitreißen, aber sie muss auffallen.
+            print(f"[registry] Sleeve '{e.get('name')}' übersprungen — "
+                  f"live_signal nicht ladbar: {ex}")
+            continue
+        m = e.get("metriken") or {}
+        out[e["name"]] = SleeveSpec(
+            name=e["name"], beschreibung=e.get("beschreibung", ""),
+            signal=fn, alloc=float(e["alloc"]), freq=e.get("freq", "daily"),
+            tif=e.get("tif", "cls"),
+            sharpe_full=float(m.get("sharpe_full", 0.0)),
+            sharpe_now=float(m.get("sharpe_now", 0.0)),
+            ann=int(e.get("ann", 252)),
+            long_only=bool(e.get("long_only", True)),
+            notes=e.get("notes", ""), tags=list(e.get("tags") or []))
+    return out
+
+
+REGISTRY.update(_load_promoted())
 
 
 def rebalance_today(spec: SleeveSpec, today: dt.date | None = None) -> bool:

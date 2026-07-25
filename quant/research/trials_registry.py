@@ -105,6 +105,44 @@ def family_sharpe_var(family: str) -> float | None:
     return glob
 
 
+def family_trials(family: str) -> int:
+    """Zahl der Versuche INNERHALB dieser Familie.
+
+    Das ist der richtige Nenner für den Deflated Sharpe. Bailey/López de Prado
+    (2014, §3) deflationieren mit der Zahl der Versuche, aus denen die Strategie
+    AUSGEWÄHLT wurde — nicht mit der Lebenszahl aller Versuche des Programms.
+    Ich habe zunächst den globalen Zähler benutzt; dadurch bekam JEDE Familie
+    ein SR* von ~1.2, also einen Grenzwert, den keine dokumentierte
+    ETF-Faktorprämie erreicht — und auch das bereits validierte XSR fiel mit
+    DSR 0.561 durch, obwohl es an einer engen, vorregistrierten Variantenmenge
+    gewählt wurde. Der Programm-Selektionseffekt verschwindet damit nicht: er
+    wird separat als Trefferquote (validierte/getestete Familien) berichtet,
+    statt als Korrektur in eine Einzelfamilien-Statistik gefaltet zu werden.
+    """
+    try:
+        df = query(f"SELECT COUNT(*) n FROM `{T_TRIALS}` "
+                   f"WHERE family = '{family}'")
+        return int(df["n"].iloc[0]) if not df.empty else 0
+    except Exception:  # noqa: BLE001
+        return 0
+
+
+def program_hit_rate() -> tuple[int, int]:
+    """(validierte Familien, getestete Familien) — der Programm-Selektionseffekt,
+    ehrlich ausgewiesen statt in den DSR gefaltet."""
+    try:
+        df = query(f"SELECT DISTINCT family FROM `{T_TRIALS}`")
+    except Exception:  # noqa: BLE001
+        return 0, 0
+    # Als validiert gilt, was live handelt — die Verdikt-Spalte führt nur
+    # "KANDIDAT"/"Variante" und taugt dafür nicht (sie zählte immer 0).
+    from quant.ops.sleeve_health import BASELINES
+    live = {k.upper() for k, v in BASELINES.items()
+            if not v.get("monitor_only")}
+    fams = {str(f).upper() for f in df["family"]}
+    return len(fams & live), len(fams)
+
+
 def trial_stats() -> tuple[int, float | None]:
     """Zahl aller protokollierten Versuche + Varianz ihrer Sharpes."""
     try:
@@ -131,7 +169,10 @@ def log_trial(family: str, returns: pd.Series, variant: str = "",
     kurt = float(r.kurtosis() + 3.0)  # pandas liefert Exzess
     n_prev, _ = trial_stats()
     var_trials = family_sharpe_var(family)
-    d = deflated_sharpe(sharpe, len(r), skew, kurt, n_prev + 1, var_trials, ann)
+    # Familien-Versuchszahl als Nenner (siehe family_trials): der DSR misst,
+    # ob DIESE Hypothese ihren eigenen Suchraum schlägt.
+    d = deflated_sharpe(sharpe, len(r), skew, kurt,
+                        family_trials(family) + 1, var_trials, ann)
     row = {
         "ts": dt.datetime.now(dt.timezone.utc), "family": family,
         "variant": variant,

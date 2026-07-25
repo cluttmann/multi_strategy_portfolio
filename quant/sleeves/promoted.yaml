@@ -1,0 +1,22 @@
+# Von der Discovery-Pipeline BEFÖRDERTE Sleeves.
+#
+# Diese Datei ist die Brücke zwischen Forschung und Live-Handel: Wer alle Gates
+# in `quant/research/discovery.py` passiert, wird hier eingetragen — und ist
+# damit automatisch live, weil `quant/sleeves/registry.py` diese Datei beim
+# Import einliest und der generische Executor jede registrierte Spec handelt.
+#
+# WARUM als YAML und nicht als Python: Beförderung ist eine DATEN-Änderung.
+# VOLC und EOMT waren wochenlang validiert und verdienten trotzdem nichts, weil
+# niemand ihren Executor gebaut hat. Mit dieser Datei ist "validiert" nicht mehr
+# von "handelbar" trennbar — ohne importierbare `live_signal` besteht ein
+# Kandidat Gate G8 nicht und wird nie eingetragen.
+#
+# Feldbedeutung:
+#   live_signal  Import-Pfad einer Funktion () -> (dict[str,float], str)
+#                → (Zielgewichte als Anteil der Sleeve-Allokation, Begründung)
+#   freq         "daily" | "monthly_first"
+#   tif          "cls" (Schlussauktion) | "opg" (Eröffnungsauktion) | "day"
+#   alloc        Anteil der Gesamt-Equity
+#   metriken     Validierungszahlen, die der Health-Monitor als Baseline nimmt
+
+befoerdert: []

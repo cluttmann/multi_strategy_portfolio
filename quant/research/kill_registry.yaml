@@ -82,6 +82,59 @@ familien:
       Hypothese mit quantitativer Vorhersage testen (hier: Skalierung mit
       L²−L). Wenn die Vorhersage bricht, ist der Mechanismus falsch, auch
       wenn das Signal existiert.
+  - name: RESID-MR
+    beschreibung: Residuale Mean-Reversion (Blitz/Huij/Lansdorp 2013), Sektor/Beta/Größe-Residuum
+    todesursache: [MECHANISMUS_WIDERLEGT, REGIME_ZERFALL]
+    zahlen: >
+      Alle 3 vorregistrierten Horizonte NEGATIV: Sharpe -0.93/-0.50/-0.54
+      (H=10/21/63) im Training; Holdout 2020-2026 -0.14, Voll-Sample -0.30,
+      2022+ -0.41. Jahresreihe 2024:-22 % 2025:-16 %. Vorhersage (c)
+      verletzt — residual war SCHLECHTER als roh (-0.93 vs -0.49 bei H=10).
+    lehre: >
+      Kurzfrist-Umkehr im liquiden US-Universum ist nicht nur abgeerntet,
+      sondern im Momentum-Regime 2024/25 aktiv verlustbringend. Das
+      vorzeichenverdrehte Ergebnis (Momentum statt Umkehr) NICHT einsammeln:
+      das wäre die klassische Data-Snooping-Falle, weil die Hypothese
+      vorregistriert das andere Vorzeichen behauptet hat.
+
+  - name: ACT13D
+    beschreibung: Drift nach Aktivisten-Einstieg, SEC Schedule 13D (12.483 Events 2007-2026)
+    todesursache: [MECHANISMUS_WIDERLEGT]
+    zahlen: >
+      Abnormale Rendite vs. SPY NEGATIV und mit dem Horizont wachsend:
+      -0.83 % (21T) → -2.58 % (63T) → -15.59 % (252T, t=-25.4). Vorhersage (a)
+      widerlegt (13D/A -1.43 % ist WENIGER negativ als initiale 13D -2.58 %),
+      Vorhersage (c) widerlegt (Drift wächst, aber mit falschem Vorzeichen).
+      Bester Sleeve H=21 Sharpe 0.50 bei MaxDD -65 %.
+    lehre: >
+      Das negative Vorzeichen ist mit hoher Wahrscheinlichkeit
+      BENCHMARK-FEHLSPEZIFIKATION, nicht Aktivisten-Wertvernichtung:
+      13D-Ziele sind Small-Cap-Value (Median-ADV im untersten Tier $0.0M), und
+      "abnormal vs. SPY" misst über 2007-2026 vor allem den
+      Small-minus-Large-Spread. Ein Event-Sleeve braucht ein
+      GRÖSSEN-/STIL-BEREINIGTES Benchmark, sonst testet man den Faktor statt
+      des Events. Zusätzlich: SECs company_tickers.json enthält nur aktuell
+      notierte Firmen → übernommene Ziele fehlen im Sample.
+
+  - name: CARRY
+    beschreibung: Cross-Asset-Carry über 35 ETFs, Ausschüttungsrendite minus Geldmarkt
+    todesursache: [MECHANISMUS_WIDERLEGT, REDUNDANT]
+    zahlen: >
+      Voll-Sample Sharpe 0.58, Holdout 0.39, 2022+ 0.52 — für sich brauchbar.
+      Aber: Vorhersage (a) WIDERLEGT, Quintilsordnung invertiert (höchster
+      Carry +0.03 % p.a., niedrigster +0.33 % p.a., Q1−Q5 = -0.30 %).
+      Und ρ(CARRY, DTRD) = +0.78 → dieselbe Wette wie der Trend-Sleeve.
+      Nach Anlageklasse: Kredit 0.55, Treasuries 0.41, aber Rohstoffe -0.14
+      und Währungen -0.25.
+    lehre: >
+      Zwei Lehren. (1) Ein Sleeve mit brauchbarem Sharpe kann trotzdem wertlos
+      sein: ρ=0.78 zum bestehenden DTRD heißt, wir kaufen dieselbe Prämie zum
+      zweiten Mal. (2) Die 12M-Trailing-Ausschüttungsrendite ist als
+      Carry-Maß für Anleihen-ETFs zu träge — im Zinsschock 2022 misst sie den
+      Carry von vor einem Jahr. Ein neuer Anlauf müsste die Zinskurve direkt
+      nutzen (DGS2/DGS10/T10Y3M) und wäre eine NEUE Hypothese mit eigenem
+      Versuchszähler, kein Parameter-Sweep dieser hier.
+
   - name: TIMESFM
     beschreibung: Time-Series-Foundation-Model als Return-Prädiktor
     todesursache: [REDUNDANT, MECHANISMUS_WIDERLEGT]
@@ -133,3 +186,23 @@ suchregeln:
     regel: >
       Ein Zeitfenster (mind. die letzten 5 Jahre) wird NIE für Parameterwahl
       benutzt. EOMT und DTRD wurden so validiert; beide bestanden.
+
+  - id: R8_QUALITAET_STATT_ANZAHL
+    regel: >
+      Suche nach QUALITÄT und ORTHOGONALITÄT, nicht nach ANZAHL. Für N→∞ gilt
+      S_p → S̄/√ρ̄; bei den heutigen Werten (Ø-Sharpe 0.51, ρ̄ = 0.16) ist die
+      Obergrenze S_p = 1.25, also ≈ 27 %/Jahr unter Reg-T — UNABHÄNGIG von der
+      Zahl der Sleeves. Gerechnet: +50 gleichwertige Sleeves heben die Rendite
+      von 22.0 % auf 25.6 %. Ein Kandidat ist deshalb nur interessant, wenn er
+      (a) Sharpe deutlich über 0.51 liefert ODER (b) ρ̄ senkt, also ρ < 0.05 zu
+      ALLEN bestehenden Sleeves hat. Ein weiterer Sleeve mit Sharpe 0.45 und
+      ρ = 0.3 ist Arbeit ohne Wirkung — genau das war CARRY.
+      Nachgerechnet in `quant/research/portfolio_math.py`.
+
+  - id: R9_BENCHMARK
+    regel: >
+      Event-Studien gegen ein GRÖSSEN- UND STILBEREINIGTES Benchmark rechnen,
+      nie gegen SPY allein. ACT13D erzeugte so ein scheinbares -15.6 %-Alpha
+      über 12 Monate (t=-25), das fast vollständig der
+      Small-minus-Large-Spread 2007-2026 war. Konkret: Gegenposition aus
+      Namen gleicher Größen-/Liquiditätsdezile, nicht der Index.
