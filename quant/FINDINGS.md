@@ -392,3 +392,85 @@ Handelsfenster smoke-testen, nicht danach.**
   LLM-Extraktion der Deal-Terms) nach dem Muster von `sec_13d_ingest.py`.
 - **BAB** nach R8 ohne Test zurückgestellt (erwartetes ΔS_p ≈ +0.01, dieselbe
   Größenordnung wie das bereits gescheiterte CARRY).
+
+## Die ML-Frage, beantwortet mit Messwerten (2026-07-25)
+
+Anlass: „Die großen Quants machen doch auch Geld mit ML." Richtig — und die
+Antwort auf das Warum steht in unseren eigenen Zahlen.
+
+### Unser ML ist gut. Es ist nicht der Engpass.
+Out-of-sample über 8,84 Mio. Walk-forward-Predictions, 2003–2026:
+
+| Fenster | Horizont | IC | IR(IC) | t | Tage mit IC>0 |
+|---|---|---:|---:|---:|---:|
+| Voll | 1d | +0,0238 | 0,122 | 9,5 | 56,7 % |
+| Voll | 5d | +0,0321 | 0,165 | 12,9 | 60,4 % |
+| 2022+ | 5d | +0,0339 | 0,170 | 5,8 | 57,6 % |
+| **2024+** | 5d | **+0,0367** | 0,207 | 5,3 | 58,2 % |
+
+IC 0,03 mit t=12,9 out-of-sample ist ein institutionell brauchbares
+Querschnittssignal — und es **zerfällt nicht**, es steigt leicht (0,0321 →
+0,0339 → 0,0367). Der Modell-Zoo hatte die Frage schon geschlossen: GBM 0,49
+vs. Ridge 0,03, torch-MLP −0,38, Ensemble 0,11. Modellklasse ist nicht das
+Problem, und ein besseres Modell auf denselben Features ändert nichts.
+
+### Die Kostenmauer ist der Engpass — in Sharpe-Punkten
+| | Sharpe | 2022+ | CAGR |
+|---|---:|---:|---:|
+| **brutto** | **0,98** | 0,72 | **+22,6 %** |
+| netto @5bp | 0,60 | 0,42 | +12,1 % |
+| netto @20bp (Stress) | 0,22 | 0,13 | +2,6 % |
+
+Turnover 0,55/Tag = 139 %/Jahr. Daraus: **1bp Kosten = 1,4 %/Jahr,
+10bp = 13,9 %/Jahr.** Wir zahlen gemessen 9,9–10,0bp.
+
+### Das ist der ganze Unterschied zu den großen Häusern
+1. **Kosten.** Sie zahlen ~1bp all-in oder verdienen an Rebates. Auf unserem
+   Turnover ist das ein Unterschied von 12,5 %/Jahr — mehr als unsere gesamte
+   erwartete Rendite.
+2. **Seite des Spreads.** Sie *stellen* Liquidität und bekommen den Spread
+   bezahlt. Wir *nehmen* Liquidität: IEX mit ~2 % Volumenanteil,
+   Sekunden-Latenz, keine Queue-Priorität. Deshalb starben IMOM/GAP/CAT/PEAD —
+   nicht am Signal (CAT hatte brutto Sharpe 0,71), sondern an dieser Seite.
+3. **Hebel.** Medallion fuhr effektiv 10–20× über Basket-Options-Strukturen.
+   Wir haben Reg-T 2×.
+
+Zusammengerechnet: **unser vorhandenes Modell würde bei 1bp Kosten und 5×
+Hebel ungefähr das liefern, was die großen Fonds liefern.** Das Alpha ist da;
+die Monetarisierungsstruktur nicht.
+
+### Was daraus folgt — und heute schon umgesetzt wurde
+Nicht bessere Modelle, sondern **weniger Turnover bei gleichem Signal.** Das
+Horizont-Experiment hatte dafür eine vorregistrierte Regel; der Burn-in hat den
+Trigger erfüllt (9,9–10,0bp statt 5bp). Nachgemessen bei 10bp mit Leih-Gate,
+Regime 2022+:
+
+| k | Sharpe 2022+ | Turnover |
+|---:|---:|---:|
+| 5 (deployt) | **−0,048** | 0,545 |
+| 10 | +0,076 | 0,302 |
+| **21 (neu)** | **+0,199** | 0,158 |
+
+Dasselbe Modell, dreifach längere Haltedauer — aus einem negativen Sleeve wird
+ein positiver. Und es braucht **keine 21d-Modelle**: das 5d-Signal 21 Tage
+gehalten liefert 0,199 gegen 0,190 des eigens trainierten 21d-Modells.
+
+### Ehrliche Erwartung nach allen Korrekturen dieses Tages
+| Szenario | S_p | CAGR @1,6× |
+|---|---:|---:|
+| wie heute Morgen genannt | 1,03 | +12,2 % |
+| XSR-Baseline korrigiert | 0,79 | +8,7 % |
+| + XSR k=21, ONX bei 10bp | 0,71 | +6,6 % |
+| + XSR bias-korrigiert | 0,77 | +7,5 % |
+
+**6,5–7,5 %/Jahr bei voller Reg-T-Ausnutzung.** Die Zahl ist heute dreimal
+gefallen, jedes Mal durch eine Messung, nicht durch eine Meinung — die
+verbleibende Unsicherheit zeigt vermutlich weiter nach unten.
+
+### ONX: läuft weiter, aber unter Beobachtung
+Break-even 8,3–9,8bp Round-Trip, gemessen 10,0bp → Sharpe −0,12 im aktuellen
+Regime. ONX bleibt vorerst im Handel, weil (a) sein S_p-Beitrag ~0 ist, das
+Irrtumsrisiko also klein, und (b) **Pausieren die Messung beendet**, die die
+Entscheidung erst tragfähig macht (bisher nur 4 Fills über der 500-$-Schwelle).
+Der Schalter dafür ist gebaut: `guard.sleeve_paused()`, Firestore-gesteuert,
+ohne Deploy.
