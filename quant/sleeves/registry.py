@@ -18,7 +18,15 @@ from typing import Callable
 
 import numpy as np
 import pandas as pd
-import yaml
+
+try:
+    import yaml
+except ImportError:      # pragma: no cover
+    # Der HANDELSPFAD darf nicht an der Beförderungs-Mechanik hängen. Beim
+    # ersten Deployment der Discovery-Pipeline fehlte PyYAML im Cloud-Image;
+    # ein Import auf Modulebene hätte etf-rebalance komplett abgebrochen,
+    # statt nur die befördertern Sleeves auszulassen.
+    yaml = None
 
 
 @dataclass
@@ -118,6 +126,10 @@ def _load_promoted() -> dict[str, SleeveSpec]:
     dass jemand einen Executor schreiben muss.
     """
     import importlib
+    if yaml is None:
+        print("[registry] PyYAML fehlt — befördertes Register übersprungen, "
+              "die fest eingetragenen Sleeves handeln normal weiter")
+        return {}
     if not os.path.exists(PROMOTED_PATH):
         return {}
     with open(PROMOTED_PATH) as f:
