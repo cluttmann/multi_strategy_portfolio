@@ -47,8 +47,15 @@ def main():
             for sl in REGISTRY:
                 try:
                     generic_sleeve.rebalance(sl, dry_run=False)
-                except SystemExit:
-                    raise
+                except SystemExit as e:
+                    # guard_or_exit() exits(0) to skip a single paused/non-
+                    # trading-day sleeve — that must not abort the sleeves
+                    # after it in the loop. Found 2026-07-29: since VOLC was
+                    # paused, every etf-rebalance run re-raised this and
+                    # never reached eomt/dtrd — both sat at zero positions
+                    # since their first scheduled live day (2026-07-27).
+                    if e.code not in (0, None):
+                        raise
                 except Exception as e:  # noqa: BLE001
                     print(f"{sl} rebalance: {e}")
         elif task == "etf-reconcile":

@@ -126,7 +126,10 @@ if __name__ == "__main__":
     for n in names:
         try:
             reconcile(n) if a.reconcile else rebalance(n, a.dry_run)
-        except SystemExit:
-            raise
+        except SystemExit as e:
+            # sys.exit(0) from guard_or_exit() means "skip this one sleeve",
+            # not "abort the whole --all run" — see entrypoint.py fix note.
+            if e.code not in (0, None):
+                raise
         except Exception as e:  # noqa: BLE001
             print(f"{n}: FEHLER {e}")
