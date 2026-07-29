@@ -539,3 +539,38 @@ Bot nicht sein können.
   2023-02-05 existiert — ~19 Monate fehlen.
 - Das Bot-Konto ist klein; Stückzahl-Granularität (nicht-fraktionierbare Ticker,
   Mindestgrößen) verzerrt die Strategien gegenüber ihrer Backtest-Absicht.
+
+## NACHTRAG 2026-07-29: EOMT und DTRD haben seit ihrem Live-Start nie gehandelt
+
+Nutzer-Nachfrage ("scheint fleißig getradet zu werden, kannst du checken ob es
+weitergeht?") deckte einen Control-Flow-Bug auf, der still lief statt laut zu
+scheitern — genau das Muster, vor dem `daily.sh`s FRED-Flag und der PyYAML-
+Import schon gewarnt hatten.
+
+**Fund:** `entrypoint.py`s `etf-rebalance`-Schleife hatte `except SystemExit:
+raise`. `guard.guard_or_exit()` ruft `sys.exit(0)`, um genau EINEN pausierten
+Sleeve zu überspringen — das `raise` ließ diesen Exit aber aus der gesamten
+`for sl in REGISTRY`-Schleife herausfallen. REGISTRY iteriert `volc → eomt →
+dtrd`; VOLC ist seit 2026-07-25 pausiert. Ergebnis: **jeder einzelne
+etf-rebalance-Lauf seit dem 2026-07-27 (EOMTs und DTRDs allererster
+Live-Tag) druckte nur "volc: PAUSIERT" und beendete sich** — eomt und dtrd
+wurden nie aufgerufen. Firestore bestätigte es: beide Sleeves standen bei
+`positions: {}`, `last_reason: None`. Derselbe Bug steckte in
+`generic_sleeve.py`s `--all`-CLI-Schleife.
+
+XSR war nicht betroffen (eigener Executor, nicht Teil des REGISTRY-Loops) —
+deshalb lief "fleißiges Trading" sichtbar weiter, während zwei Drittel des
+aktiven Kerns komplett stillstanden, ohne dass ein einziger Cloud-Run-Log
+ein Fehler-Flag zeigte (jede Execution: `Completed / True`).
+
+**Fix:** Schleife re-raised `SystemExit` nur noch, wenn `e.code not in (0,
+None)` — ein absichtlicher Skip eines Sleeves darf die übrigen nicht
+mitreißen. Lokal mit `--all --dry-run` verifiziert (EOMT erzeugt jetzt
+Orders, DTRD meldet korrekt "kein Rebalance-Tag" außerhalb des Monatsersten),
+Image neu gebaut und deployed (`quant-desk`), vor dem 15:47-NY-Lauf desselben
+Tages. Commit `8ad3a37`.
+
+**Lektion:** "Completed: True" in Cloud Run heißt nur, dass der Container mit
+Exit-Code 0 endete — nicht, dass die beabsichtigte Arbeit stattfand. Bei
+Multi-Sleeve-Loops künftig immer die tatsächlichen Log-Zeilen pro Sleeve
+prüfen, nicht nur den Execution-Status.
