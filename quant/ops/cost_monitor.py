@@ -166,8 +166,8 @@ def attach_adv(m: pd.DataFrame, bars: pd.DataFrame) -> pd.DataFrame:
 
 def bucket_slippage_by_participation(m: pd.DataFrame) -> pd.DataFrame:
     """Bucket-Tabelle (bucket, n, avg_slippage_bps, avg_participation_pct).
-    Buckets mit n<2 (nur eine Füllung) werden verworfen — sonst dominiert
-    ein einzelner Fill den Bucket-Mittelwert."""
+    Buckets mit n<3 werden verworfen — sonst dominiert ein einzelner Fill
+    den Bucket-Mittelwert."""
     bins = [0, 1, 5, 10, np.inf]
     labels = ["<1%", "1-5%", "5-10%", ">10%"]
     m = m.copy()
@@ -175,7 +175,7 @@ def bucket_slippage_by_participation(m: pd.DataFrame) -> pd.DataFrame:
     rows = []
     for b in labels:
         g = m[m["adv_bucket"] == b]
-        if len(g) < 2:
+        if len(g) < 3:
             continue
         rows.append({"bucket": b, "n": len(g),
                      "avg_slippage_bps": float(g["slippage_bps"].mean()),
