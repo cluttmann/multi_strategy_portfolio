@@ -139,6 +139,102 @@ def attach_benchmarks(df: pd.DataFrame) -> pd.DataFrame:
     return m[[c.name for c in SCHEMA]]
 
 
+def attach_adv(m: pd.DataFrame, bars: pd.DataFrame) -> pd.DataFrame:
+    """Fügt adv20 (20-Tage-Volumenschnitt VOR dem Fill-Tag, `shift(1)` damit
+    der Fill-Tag selbst nie in seine eigene ADV einfließt) und
+    participation_pct (Ordergröße als % davon) hinzu. `bars` sind rohe
+    eod_bars-Zeilen (date, symbol, volume) — getrennt von der BQ-Abfrage,
+    damit diese Funktion mit synthetischen Daten testbar ist."""
+    m = m.copy()
+    if m.empty or bars.empty:
+        m["adv20"] = np.nan
+        m["participation_pct"] = np.nan
+        return m
+    b = bars.copy()
+    b["date"] = pd.to_datetime(b["date"])
+    b = b.sort_values(["symbol", "date"])
+    b["adv20"] = b.groupby("symbol")["volume"].transform(
+        lambda s: s.rolling(20, min_periods=1).mean().shift(1))
+    adv_map = b.set_index(["symbol", "date"])["adv20"]
+    fill_dates = pd.to_datetime(m["fill_date"])
+    m["adv20"] = [adv_map.get((s, d), np.nan)
+                 for s, d in zip(m["symbol"], fill_dates)]
+    m["participation_pct"] = (m["qty"] / m["adv20"] * 100).replace(
+        [np.inf, -np.inf], np.nan)
+    return m
+
+
+def bucket_slippage_by_participation(m: pd.DataFrame) -> pd.DataFrame:
+    """Bucket-Tabelle (bucket, n, avg_slippage_bps, avg_participation_pct).
+    Buckets mit n<2 (nur eine Füllung) werden verworfen — sonst dominiert
+    ein einzelner Fill den Bucket-Mittelwert."""
+    bins = [0, 1, 5, 10, np.inf]
+    labels = ["<1%", "1-5%", "5-10%", ">10%"]
+    m = m.copy()
+    m["adv_bucket"] = pd.cut(m["participation_pct"], bins=bins, labels=labels)
+    rows = []
+    for b in labels:
+        g = m[m["adv_bucket"] == b]
+        if len(g) < 2:
+            continue
+        rows.append({"bucket": b, "n": len(g),
+                     "avg_slippage_bps": float(g["slippage_bps"].mean()),
+                     "avg_participation_pct": float(g["participation_pct"].mean())})
+    return pd.DataFrame(rows)
+
+
+def diagnose_verdict(m: pd.DataFrame) -> tuple[float, str]:
+    """Unterscheidet die drei Hypothesen aus dem Design-Spec
+    (docs/superpowers/specs/2026-07-30-weg-zu-50-cagr-design.md, Hebel 1):
+    GROESSENABHAENGIG (|r|>0.3 zwischen %ADV und Slippage) → Order-Cap;
+    KEIN_HANDLUNGSBEDARF (Slippage klein und flach, std<2bp) → nichts tun;
+    ROUTING_ODER_MESSFEHLER (Slippage groß, aber unkorreliert mit Größe) →
+    Alpacas opg/cls-Routing bzw. den Benchmark-Zeitpunkt prüfen."""
+    corr = float(m["participation_pct"].corr(m["slippage_bps"]))
+    if abs(corr) > 0.3:
+        return corr, "GROESSENABHAENGIG"
+    if float(m["slippage_bps"].std()) < 2.0:
+        return corr, "KEIN_HANDLUNGSBEDARF"
+    return corr, "ROUTING_ODER_MESSFEHLER"
+
+
+def diagnose(days: int = 30) -> pd.DataFrame:
+    hist = query(f"""
+      SELECT sleeve, symbol, side, tif, slippage_bps, notional, fill_date, qty
+      FROM `{T_COSTS}`
+      WHERE fill_date >= DATE_SUB(CURRENT_DATE(), INTERVAL {days} DAY)
+        AND notional >= {MIN_NOTIONAL_FOR_SLIPPAGE}""")
+    if hist.empty:
+        print(f"keine Fills >= ${MIN_NOTIONAL_FOR_SLIPPAGE:.0f} in {days} Tagen "
+              "— --check zuerst laufen lassen, um fill_costs zu füllen")
+        return hist
+    syms = ", ".join(repr(s) for s in hist["symbol"].unique())
+    lo = (pd.to_datetime(hist["fill_date"]).min() - pd.Timedelta(days=45)).date()
+    hi = pd.to_datetime(hist["fill_date"]).max().date()
+    bars = query(f"""
+      SELECT date, symbol, volume FROM `{GCP_PROJECT}.{BQ_DATASET}.eod_bars`
+      WHERE symbol IN ({syms}) AND date BETWEEN '{lo}' AND '{hi}'""")
+    m = attach_adv(hist, bars).dropna(subset=["participation_pct"])
+    if len(m) < 10:
+        print(f"nur {len(m)} Fills mit ADV-Zuordnung — zu wenig für eine "
+              "belastbare Diagnose")
+        return m
+    b = bucket_slippage_by_participation(m)
+    print(f"{'Bucket':8s} {'n':>5s} {'Ø Slippage':>12s} {'Ø %ADV':>8s}")
+    for _, r in b.iterrows():
+        print(f"{r['bucket']:8s} {int(r['n']):5d} "
+              f"{r['avg_slippage_bps']:10.1f}bp {r['avg_participation_pct']:7.1f}%")
+    corr, verdict = diagnose_verdict(m)
+    print(f"\nKorrelation %ADV ↔ Slippage: r={corr:+.2f} → {verdict}")
+    if verdict == "GROESSENABHAENGIG":
+        print("  Order-Cap als %ADV empfehlen (Hebel 1a).")
+    elif verdict == "ROUTING_ODER_MESSFEHLER":
+        print("  Slippage groß, aber unabhängig von der Größe — prüfe Alpacas "
+              "opg/cls-Routing gegen die primäre Börse, oder den "
+              "Benchmark-Zeitpunkt in attach_benchmarks() (Hebel 1b/1c).")
+    return m
+
+
 def check(days: int = 5, alert: bool = True):
     ensure_table(T_COSTS, SCHEMA, partition_field="fill_date",
                  clustering=["sleeve", "symbol"])
@@ -208,10 +304,14 @@ def check(days: int = 5, alert: bool = True):
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--check", action="store_true")
+    p.add_argument("--diagnose", action="store_true")
     p.add_argument("--days", type=int, default=5)
     p.add_argument("--no-alert", action="store_true")
     a = p.parse_args()
-    if not a.check:
+    if a.diagnose:
+        diagnose(days=max(a.days, 30))
+    elif a.check:
+        check(days=a.days, alert=not a.no_alert)
+    else:
         p.print_help()
         sys.exit(1)
-    check(days=a.days, alert=not a.no_alert)
