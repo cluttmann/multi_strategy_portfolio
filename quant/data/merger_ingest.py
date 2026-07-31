@@ -59,6 +59,38 @@ DEALS_SCHEMA = [
     bigquery.SchemaField("deal_price_cash", "FLOAT64"),
 ]
 
+# --- Point-in-time Ticker-Aufloesung (Fix-Runde 2026-07-30) ----------------
+# cik_to_ticker() joint gegen SECs AKTUELLES company_tickers.json und kennt
+# daher nur noch gelistete Ticker. Bei einer abgeschlossenen Cash-Uebernahme
+# wird der Ziel-Ticker delistet und faellt aus dieser Datei komplett heraus
+# (bestaetigt leer fuer Splunk/Nuance/Activision/Twitter, s. Task-2-Report,
+# Finding B) — die SEC-Submissions-API liefert fuer dieselben CIKs ebenfalls
+# ein leeres `tickers`-Array (auch nur aktuell), und die XBRL-Company-Concept-
+# API (dei:TradingSymbol) gibt fuer alle vier 404 zurueck. Einzige Quelle, die
+# tatsaechlich funktioniert: der Ticker steht im Filing-Cover selbst — entweder
+# als SEC-Cover-Tabellenzelle ("Trading Symbol" | <TICKER> | Boerse) in 425/
+# SC TO-T/SC TO-I, oder als Fliesstext ("...under the symbol \"XXXX.\"") in
+# DEFM14A/Proxys. build_deals() holt den Volltext ohnehin schon — kein
+# Zusatz-Fetch noetig.
+COVER_TABLE_TICKER_RE = re.compile(
+    r"(?i:Trading\s+Symbol).{0,600}?<B>\s*([A-Z]{1,6})\s*</B>", re.DOTALL)
+COVER_NARRATIVE_TICKER_RE = re.compile(
+    r"under\s+the\s+symbol\s+.{0,20}?([A-Z]{2,6})\b(?=[.\"'&])", re.IGNORECASE)
+
+
+def extract_cover_symbol(text: str) -> str | None:
+    """Ticker aus dem Filing-Cover/Fliesstext — Fallback wenn cik_to_ticker()
+    nichts liefert (delisteter Ziel-Ticker). Erst die Cover-Tabelle (425/SC
+    TO-T/SC TO-I), dann die Narrativ-Formulierung (DEFM14A/Proxy) probieren."""
+    m = COVER_TABLE_TICKER_RE.search(text)
+    if m:
+        return m.group(1).upper()
+    m = COVER_NARRATIVE_TICKER_RE.search(text)
+    if m:
+        return m.group(1).upper()
+    return None
+
+
 CASH_RE = re.compile(
     r"\$\s?(\d{1,4}(?:\.\d{2})?)\s+per\s+share\s+in\s+cash", re.IGNORECASE)
 STOCK_HINT_RE = re.compile(
@@ -156,11 +188,30 @@ def collect(start_year=2007, end_year=None, end_qtr=None) -> pd.DataFrame:
             if df.empty:
                 continue
             df["symbol"] = df["cik"].map(tmap)
-            hit = df.dropna(subset=["symbol"]).drop_duplicates(
-                ["accession", "symbol"])
+            # ANNOUNCE_FORMS-Zeilen ohne aktuellen Ticker NICHT wegwerfen —
+            # das sind genau die spaeter delisteten Cash-Deal-Ziele
+            # (Splunk/Nuance/Activision/Twitter-Fall). build_deals() loest
+            # den Ticker fuer diese ueber extract_cover_symbol() aus dem
+            # ohnehin geholten Volltext auf. Alle anderen Formulare (die
+            # grosse Masse, kein Volltext-Fetch vorgesehen) bleiben wie
+            # zuvor auf den guenstigen Ticker-Map-Join beschraenkt.
+            is_announce = df["form"].isin(ANNOUNCE_FORMS)
+            # Dedup nach (accession, cik) — NICHT nach accession allein.
+            # EDGAR listet gemeinsame 425/DEFM14A-Filings unter BEIDEN
+            # Parteien (Acquirer- UND Target-CIK) mit identischer Accession
+            # (bestaetigt: Cisco/Splunk-425 2023-09-21, Accession
+            # 0001104659-23-102595 unter CIK 858877 UND CIK 1353283). Ein
+            # reiner Accession-Dedup behaelt nur die zuerst im Index
+            # auftauchende Partei (meist den Acquirer, der noch einen
+            # aktuellen Ticker hat) und wirft die Zielfirmen-Zeile still
+            # weg — womit genau der delistete Cash-Ziel-Ticker verloren
+            # ginge, den extract_cover_symbol() eigentlich retten soll.
+            hit = df[df["symbol"].notna() | is_announce].drop_duplicates(
+                ["accession", "cik"])
             out.append(hit)
-            print(f"  {y}Q{q}: {len(df):5,} Merger-Zeilen → {len(hit):4,} mit "
-                  f"Ticker", flush=True)
+            n_resolved = hit["symbol"].notna().sum()
+            print(f"  {y}Q{q}: {len(df):5,} Merger-Zeilen → {len(hit):4,} "
+                  f"Kandidaten ({n_resolved:,} mit Ticker)", flush=True)
             time.sleep(0.15)
     if not out:
         return pd.DataFrame()
@@ -185,22 +236,32 @@ def fetch_filing_text(cik: int, path: str) -> str:
 
 
 def build_deals(filings: pd.DataFrame) -> pd.DataFrame:
-    """Für jede (CIK, Symbol)-Gruppe die früheste ANNOUNCE_FORMS-Zeile nehmen,
-    den Volltext holen, Konsideration + Cash-Preis extrahieren. Ein Fetch pro
-    Deal, nicht pro Filing — SEC-Fair-Use, siehe UA-Kommentar oben."""
+    """Für jede CIK die früheste ANNOUNCE_FORMS-Zeile nehmen, den Volltext
+    holen, Konsideration + Cash-Preis extrahieren. Ein Fetch pro Deal, nicht
+    pro Filing — SEC-Fair-Use, siehe UA-Kommentar oben.
+
+    Dedup nach CIK allein (nicht mehr (CIK, Symbol)) — collect() liefert für
+    ANNOUNCE_FORMS-Zeilen jetzt auch Kandidaten mit symbol=NaN (delisteter
+    Ticker, s. Kommentar bei extract_cover_symbol). Für die wird der Ticker
+    hier aus dem bereits geholten Volltext nachgetragen; bleibt er
+    unauflösbar, wird die Zeile verworfen (kein Zusatz-Fetch, kein Rätselraten)."""
     cand = filings[filings["form"].isin(ANNOUNCE_FORMS)].copy()
     if cand.empty:
         return pd.DataFrame(columns=[c.name for c in DEALS_SCHEMA])
-    cand = cand.sort_values("date").drop_duplicates(["cik", "symbol"],
-                                                     keep="first")
+    cand = cand.sort_values("date").drop_duplicates(["cik"], keep="first")
     rows = []
     for _, r in cand.iterrows():
         text = fetch_filing_text(int(r["cik"]), r["path"])
         if not text:
             continue
+        symbol = r["symbol"]
+        if pd.isna(symbol):
+            symbol = extract_cover_symbol(text)
+            if not symbol:
+                continue  # nicht identifizierbar — verwerfen, nicht raten
         cons = classify_consideration(text)
         price = extract_cash_price(text) if cons in ("cash", "mixed") else None
-        rows.append({"announce_date": r["date"], "symbol": r["symbol"],
+        rows.append({"announce_date": r["date"], "symbol": symbol,
                      "cik": int(r["cik"]), "source_form": r["form"],
                      "source_accession": r["accession"],
                      "company": r["company"], "consideration_type": cons,
@@ -209,8 +270,27 @@ def build_deals(filings: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def _resolve_from_deals(filings: pd.DataFrame, deals: pd.DataFrame) -> pd.DataFrame:
+    """Trägt aus build_deals() aufgelöste Ticker (delistete Cash-Ziele, s.
+    extract_cover_symbol) zurück in die filings-Tabelle ein und verwirft
+    Zeilen, die auch danach keinen Ticker haben — z.B. ANNOUNCE_FORMS-
+    Zeilen, deren Cover-Ticker sich nicht extrahieren ließ. Notwendig, weil
+    collect()/refresh() ANNOUNCE_FORMS-Zeilen jetzt mit symbol=NaN
+    durchreichen (statt sie sofort zu verwerfen) und T_FILINGS.symbol
+    REQUIRED ist."""
+    if len(deals):
+        resolved = deals.dropna(subset=["symbol"]).drop_duplicates(
+            "cik").set_index("cik")["symbol"]
+        filings = filings.copy()
+        filings["symbol"] = filings["symbol"].fillna(
+            filings["cik"].map(resolved))
+    return filings.dropna(subset=["symbol"])
+
+
 def backfill(start_year=2007):
     filings = collect(start_year)
+    deals = build_deals(filings)
+    filings = _resolve_from_deals(filings, deals)
     print(f"\n{len(filings):,} Merger-Filings, "
           f"{filings['symbol'].nunique():,} Symbole")
     ensure_table(T_FILINGS, FILINGS_SCHEMA, partition_field="date",
@@ -219,7 +299,6 @@ def backfill(start_year=2007):
                                 "company"]],
            schema=FILINGS_SCHEMA, write="WRITE_TRUNCATE")
     print(f"→ {T_FILINGS}")
-    deals = build_deals(filings)
     print(f"{len(deals):,} Deals extrahiert "
           f"({(deals['consideration_type'] == 'cash').sum() if len(deals) else 0} "
           "Cash-Deals)")
@@ -244,8 +323,10 @@ def refresh():
         if df.empty:
             continue
         df["symbol"] = df["cik"].map(tmap)
-        frames.append(df.dropna(subset=["symbol"]).drop_duplicates(
-            ["accession", "symbol"]))
+        is_announce = df["form"].isin(ANNOUNCE_FORMS)
+        # Dedup (accession, cik) — s. ausführlicher Kommentar in collect().
+        frames.append(df[df["symbol"].notna() | is_announce].drop_duplicates(
+            ["accession", "cik"]))
     if not frames:
         print("Merger-Refresh: keine Zeilen")
         return
@@ -254,19 +335,22 @@ def refresh():
     ensure_table(T_FILINGS, FILINGS_SCHEMA, partition_field="date",
                 clustering=["symbol"])
     try:
-        have = query(f"SELECT DISTINCT accession, symbol FROM `{T_FILINGS}` "
+        have = query(f"SELECT DISTINCT accession FROM `{T_FILINGS}` "
                      f"WHERE date >= DATE_SUB(CURRENT_DATE(), INTERVAL 200 DAY)")
-        seen = set(zip(have["accession"], have["symbol"]))
-        new = new[~new.apply(lambda r: (r["accession"], r["symbol"]) in seen,
-                             axis=1)]
+        seen = set(have["accession"])
+        new = new[~new["accession"].isin(seen)]
     except Exception:  # noqa: BLE001
         pass
     if new.empty:
         print("Merger-Refresh: nichts Neues")
         return
+    deals = build_deals(new)
+    new = _resolve_from_deals(new, deals)
+    if new.empty:
+        print("Merger-Refresh: nichts Neues (Ticker nicht auflösbar)")
+        return
     load_df(T_FILINGS, new[["date", "symbol", "cik", "form", "accession",
                            "company"]], schema=FILINGS_SCHEMA)
-    deals = build_deals(new)
     if len(deals):
         ensure_table(T_DEALS, DEALS_SCHEMA, partition_field="announce_date",
                     clustering=["symbol"])
