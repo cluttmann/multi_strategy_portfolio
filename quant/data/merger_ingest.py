@@ -21,6 +21,7 @@ import re
 import sys
 import time
 import zipfile
+from collections import Counter
 
 import pandas as pd
 import requests
@@ -131,8 +132,20 @@ def classify_consideration(text: str) -> str:
 
 
 def extract_cash_price(text: str) -> float | None:
-    m = CASH_RE.search(text)
-    return float(m.group(1)) if m else None
+    """Modalwert aller "$X per share in cash"-Treffer, nicht der erste.
+
+    Gefunden bei Nuance (Fix-Runde 3, Task-2-Report): der erste Treffer im
+    Dokument war eine überholte/kontextuelle Zwischensumme ($55.50, einmalig
+    im Hintergrundabschnitt), während die tatsächliche, als "Merger
+    Consideration" definierte Summe ($56.00) dreimal im Dokument auftaucht.
+    Die final vereinbarte Summe wird in Titel/Zusammenfassung/Beschluss-
+    sprache typischerweise mehrfach wiederholt; überholte oder beiläufig
+    erwähnte Beträge meist nur einmal."""
+    matches = CASH_RE.findall(text)
+    if not matches:
+        return None
+    prices = [float(m) for m in matches]
+    return Counter(prices).most_common(1)[0][0]
 
 
 def cik_to_ticker() -> dict[int, str]:
