@@ -1,12 +1,15 @@
 """SEC-Merger-Filings (425/DEFM14A/SC TO-T/SC TO-I/SC 14D9) → BigQuery.
 
-    python3 -m quant.data.merger_ingest --pilot     # 2019-2024, ohne BQ-Write
+    python3 -m quant.data.merger_ingest --pilot     # 2019-heute, ohne BQ-Write
     python3 -m quant.data.merger_ingest --backfill  # 2007-heute → BQ
 
 Zwei Tabellen: `quant.merger_filings` (roher Index, ein Eintrag pro Filing —
 genau das Muster von quant/data/sec_13d_ingest.py) und `quant.merger_deals`
-(extrahierte Deal-Terms, nur für die früheste 425/SC-TO-Filing je CIK — die
-kündigt den Deal typischerweise mit dem Angebotspreis im Fließtext an).
+(extrahierte Deal-Terms, nur für die früheste 425/SC-TO-/DEFM14A-Filing je
+CIK — 425/SC-TO-* kündigen den Deal typischerweise mit dem Angebotspreis im
+Fließtext an; DEFM14A ist bei reinen Cash-Deals ohne Aktienkomponente oft
+das EINZIGE Filing, sein announce_date kommt aber aus dem nächstgelegenen
+Item-1.01-8-K, nicht aus der DEFM14A-Zeile selbst — s. find_8k_announce_date).
 
 ACHTUNG (Lektion aus sec_13d_ingest.py): die SEC hat Formularlabels schon
 einmal umgestellt (SC 13D → SCHEDULE 13D, Dez. 2024) und ein reiner
@@ -409,10 +412,20 @@ def refresh():
     ensure_table(T_FILINGS, FILINGS_SCHEMA, partition_field="date",
                 clustering=["symbol"])
     try:
-        have = query(f"SELECT DISTINCT accession FROM `{T_FILINGS}` "
+        # (accession, cik) — nicht accession allein. EDGAR listet
+        # gemeinsame Filings (425/DEFM14A etc.) unter BEIDEN Parteien mit
+        # identischer Accession (Cisco/Splunk-Fall, s. collect()-Kommentar
+        # und Task-2-Report Fix-Runde 2). Ein accession-only Abgleich
+        # würde, sobald EINE Partei einmal in BQ steht, die Zeile der
+        # ANDEREN Partei bei jedem künftigen Refresh-Lauf verwerfen —
+        # exakt der Bug, den Fix-Runde 2 im In-Memory-Dedup schon einmal
+        # behoben hat, hier aber im BQ-Abgleich erneut. Mirrors
+        # sec_13d_ingest.refresh()'s (accession, symbol)-Tupel-Ansatz.
+        have = query(f"SELECT DISTINCT accession, cik FROM `{T_FILINGS}` "
                      f"WHERE date >= DATE_SUB(CURRENT_DATE(), INTERVAL 200 DAY)")
-        seen = set(have["accession"])
-        new = new[~new["accession"].isin(seen)]
+        seen = set(zip(have["accession"], have["cik"]))
+        new = new[~new.apply(lambda r: (r["accession"], r["cik"]) in seen,
+                             axis=1)]
     except Exception:  # noqa: BLE001
         pass
     if new.empty:
