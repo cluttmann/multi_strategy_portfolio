@@ -35,9 +35,19 @@ UA = {"User-Agent": "Carl Johannes carl.johannes.mail@gmail.com"}
 
 FORM_RE = re.compile(
     r"^(425|DEFM14A|SC 14D9(?:/A)?|SC TO-T(?:/A)?|SC TO-I(?:/A)?)\s")
-# Diese vier Formulare zeigen den frühesten, deal-spezifischen Preis im
-# Fließtext an — DEFM14A kommt meist Wochen später mit demselben Preis.
+# Diese drei Formulare zeigen den frühesten, deal-spezifischen Preis im
+# Fließtext an UND ihr Filing-Datum IST der Ankündigungstermin (425/SC TO-*
+# werden binnen Tagen nach Vertragsunterzeichnung fällig).
 ANNOUNCE_FORMS = {"425", "SC TO-T", "SC TO-I"}
+# DEFM14A ist bei reinen Cash-Deals ohne Aktienkomponente das EINZIGE
+# SEC-Filing (kein Registrierungspflicht -> kein 425) — bestätigt an
+# Nuance/Activision/Twitter, s. Task-2-Report Fix-Runde 2. Sein Filing-
+# Datum ist aber KEIN Ankündigungsdatum: DEFM14A folgt dem tatsächlichen
+# Announce um 35-92 Tage (empirisch an denselben drei Fällen). Für DEFM14A-
+# Kandidaten wird der Preis/Ticker trotzdem aus dem DEFM14A-Volltext
+# extrahiert, aber announce_date kommt aus dem frühesten Item-1.01-8-K
+# davor (find_8k_announce_date) — s. dort.
+KEEP_WITHOUT_TICKER_FORMS = ANNOUNCE_FORMS | {"DEFM14A"}
 
 FILINGS_SCHEMA = [
     bigquery.SchemaField("date", "DATE", mode="REQUIRED"),
@@ -188,14 +198,14 @@ def collect(start_year=2007, end_year=None, end_qtr=None) -> pd.DataFrame:
             if df.empty:
                 continue
             df["symbol"] = df["cik"].map(tmap)
-            # ANNOUNCE_FORMS-Zeilen ohne aktuellen Ticker NICHT wegwerfen —
-            # das sind genau die spaeter delisteten Cash-Deal-Ziele
-            # (Splunk/Nuance/Activision/Twitter-Fall). build_deals() loest
-            # den Ticker fuer diese ueber extract_cover_symbol() aus dem
-            # ohnehin geholten Volltext auf. Alle anderen Formulare (die
+            # KEEP_WITHOUT_TICKER_FORMS-Zeilen ohne aktuellen Ticker NICHT
+            # wegwerfen — das sind genau die spaeter delisteten Cash-Deal-
+            # Ziele (Splunk/Nuance/Activision/Twitter-Fall). build_deals()
+            # loest den Ticker fuer diese ueber extract_cover_symbol() aus
+            # dem ohnehin geholten Volltext auf. Alle anderen Formulare (die
             # grosse Masse, kein Volltext-Fetch vorgesehen) bleiben wie
             # zuvor auf den guenstigen Ticker-Map-Join beschraenkt.
-            is_announce = df["form"].isin(ANNOUNCE_FORMS)
+            is_announce = df["form"].isin(KEEP_WITHOUT_TICKER_FORMS)
             # Dedup nach (accession, cik) — NICHT nach accession allein.
             # EDGAR listet gemeinsame 425/DEFM14A-Filings unter BEIDEN
             # Parteien (Acquirer- UND Target-CIK) mit identischer Accession
@@ -235,17 +245,61 @@ def fetch_filing_text(cik: int, path: str) -> str:
     return ""
 
 
+def find_8k_announce_date(cik: int, before, window_days: int = 250):
+    """Ankündigungsdatum für reine DEFM14A-Deals (kein 425 vorhanden) aus
+    dem frühesten/nächstgelegenen 8-K mit Item 1.01 ("Entry into a Material
+    Definitive Agreement") vor `before` (i.d.R. das DEFM14A-Filingdatum).
+
+    DEFM14As eigenes Filingdatum liegt 35-92 Tage NACH der wahren
+    Ankündigung (empirisch an Nuance/Activision/Twitter) — als
+    announce_date für ein Merger-Arb-Backtest unbrauchbar. Die SEC-
+    Submissions-API (`data.sec.gov/submissions/CIK....json`) taggt jedes
+    Filing mit Item-Codes; "1.01" ist der Standard-Code für Vertrags-
+    unterzeichnung. Mehrere unabhängige Item-1.01-8-Ks pro CIK sind normal
+    (Kreditverträge, Beschäftigungsvereinbarungen etc.) — deshalb NICHT das
+    global früheste nehmen, sondern das NÄCHSTGELEGENE vor `before`
+    innerhalb `window_days`. Verifiziert an allen drei Fällen: korrektes
+    8-K getroffen trotz vorhandener älterer, unabhängiger Item-1.01-8-Ks
+    (z.B. Twitter hatte 4 weitere in den 165 Tagen davor), 1 Tag Lag zum
+    echten Ankündigungsdatum in allen drei Fällen."""
+    import datetime as dt
+    try:
+        r = requests.get(f"https://data.sec.gov/submissions/CIK{cik:010d}.json",
+                         headers=UA, timeout=30)
+        r.raise_for_status()
+    except Exception:  # noqa: BLE001
+        return None
+    recent = r.json().get("filings", {}).get("recent", {})
+    forms = recent.get("form", [])
+    dates = recent.get("filingDate", [])
+    items = recent.get("items", [])
+    if not items:
+        return None
+    best = None
+    for f, d, it in zip(forms, dates, items):
+        if f != "8-K" or not it or "1.01" not in it.split(","):
+            continue
+        dd = dt.date.fromisoformat(d)
+        if dd <= before and (before - dd).days <= window_days:
+            if best is None or dd > best:
+                best = dd
+    return best
+
+
 def build_deals(filings: pd.DataFrame) -> pd.DataFrame:
-    """Für jede CIK die früheste ANNOUNCE_FORMS-Zeile nehmen, den Volltext
-    holen, Konsideration + Cash-Preis extrahieren. Ein Fetch pro Deal, nicht
-    pro Filing — SEC-Fair-Use, siehe UA-Kommentar oben.
+    """Für jede CIK die früheste KEEP_WITHOUT_TICKER_FORMS-Zeile nehmen, den
+    Volltext holen, Konsideration + Cash-Preis extrahieren. Ein Fetch pro
+    Deal, nicht pro Filing — SEC-Fair-Use, siehe UA-Kommentar oben.
 
     Dedup nach CIK allein (nicht mehr (CIK, Symbol)) — collect() liefert für
-    ANNOUNCE_FORMS-Zeilen jetzt auch Kandidaten mit symbol=NaN (delisteter
-    Ticker, s. Kommentar bei extract_cover_symbol). Für die wird der Ticker
-    hier aus dem bereits geholten Volltext nachgetragen; bleibt er
-    unauflösbar, wird die Zeile verworfen (kein Zusatz-Fetch, kein Rätselraten)."""
-    cand = filings[filings["form"].isin(ANNOUNCE_FORMS)].copy()
+    KEEP_WITHOUT_TICKER_FORMS-Zeilen jetzt auch Kandidaten mit symbol=NaN
+    (delisteter Ticker, s. Kommentar bei extract_cover_symbol). Für die wird
+    der Ticker hier aus dem bereits geholten Volltext nachgetragen; bleibt
+    er unauflösbar, wird die Zeile verworfen (kein Zusatz-Fetch, kein
+    Rätselraten). Für DEFM14A-Kandidaten (reine Cash-Deals ohne 425, s.
+    KEEP_WITHOUT_TICKER_FORMS-Kommentar) wird announce_date NICHT aus der
+    DEFM14A-Zeile selbst genommen, sondern aus find_8k_announce_date()."""
+    cand = filings[filings["form"].isin(KEEP_WITHOUT_TICKER_FORMS)].copy()
     if cand.empty:
         return pd.DataFrame(columns=[c.name for c in DEALS_SCHEMA])
     cand = cand.sort_values("date").drop_duplicates(["cik"], keep="first")
@@ -259,9 +313,16 @@ def build_deals(filings: pd.DataFrame) -> pd.DataFrame:
             symbol = extract_cover_symbol(text)
             if not symbol:
                 continue  # nicht identifizierbar — verwerfen, nicht raten
+        announce_date = r["date"]
+        if r["form"] == "DEFM14A":
+            resolved = find_8k_announce_date(int(r["cik"]), r["date"])
+            if resolved is not None:
+                announce_date = resolved
+            # sonst: Fallback auf das DEFM14A-Datum selbst — spät, aber
+            # besser als die Zeile komplett zu verwerfen.
         cons = classify_consideration(text)
         price = extract_cash_price(text) if cons in ("cash", "mixed") else None
-        rows.append({"announce_date": r["date"], "symbol": symbol,
+        rows.append({"announce_date": announce_date, "symbol": symbol,
                      "cik": int(r["cik"]), "source_form": r["form"],
                      "source_accession": r["accession"],
                      "company": r["company"], "consideration_type": cons,
@@ -323,7 +384,7 @@ def refresh():
         if df.empty:
             continue
         df["symbol"] = df["cik"].map(tmap)
-        is_announce = df["form"].isin(ANNOUNCE_FORMS)
+        is_announce = df["form"].isin(KEEP_WITHOUT_TICKER_FORMS)
         # Dedup (accession, cik) — s. ausführlicher Kommentar in collect().
         frames.append(df[df["symbol"].notna() | is_announce].drop_duplicates(
             ["accession", "cik"]))
