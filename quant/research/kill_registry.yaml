@@ -151,6 +151,31 @@ familien:
       nutzen (DGS2/DGS10/T10Y3M) und wäre eine NEUE Hypothese mit eigenem
       Versuchszähler, kein Parameter-Sweep dieser hier.
 
+  - name: SECTORMOM
+    beschreibung: US-Branchen-Momentum (Moskowitz/Grinblatt JF 1999), 9 SPDR-Sektor-ETFs, 3-von-9 long/short
+    todesursache: [MECHANISMUS_WIDERLEGT]
+    zahlen: >
+      Trainings-Sharpe (bis 2019) in allen 3 Varianten negativ: -0.28/-0.15/
+      -0.10 (H 21/42/63T). Holdout 2020-2026 Sharpe 0.02, 2022+ 0.21 — beide
+      schwach. DSR fällt in allen 3 Varianten durch (0.000-0.131). Vorhersage
+      (a) WIDERLEGT: nicht monoton über Momentum-Terzile — die MITTLERE
+      Gruppe hat die niedrigste Rendite (8.7%), nicht das untere Terzil
+      (9.7%), oberes Terzil höchste (11.0%) — eher U-förmig als eine klare
+      Rangfolge. ρ zu XSR niedrig (+0.07, bestätigt die Orthogonalitäts-
+      Vorhersage), aber ρ zu ONX/VOLC überraschend positiv (+0.31/+0.31,
+      beide gehebelte Aktienwetten wie der ETF-Bot) — rettet aber nichts
+      bei widerlegtem Mechanismus und durchfallendem G5.
+    lehre: >
+      Der akademische Befund (Branchen-Momentum stärker als Einzeltitel-
+      Momentum) repliziert hier nicht robust auf nur 9 SPDR-Sektoren —
+      vermutlich strukturell zu wenig Querschnittsbreite für eine saubere
+      Terzil-Analyse (dieselbe Warnung wie bei FXCARRYs 6 Währungen: kleine
+      N machen Rang-basierte Tests strukturell verrauscht). Ein zweiter
+      Anlauf bräuchte entweder ein breiteres Branchenuniversum (GICS-Level-3-
+      Subindustrien statt 9 SPDR-Sektoren) oder eine längere
+      Formationsperiode — wäre aber eine neue Hypothese mit eigenem
+      Versuchszähler.
+
   - name: TIMESFM
     beschreibung: Time-Series-Foundation-Model als Return-Prädiktor
     todesursache: [REDUNDANT, MECHANISMUS_WIDERLEGT]

@@ -243,3 +243,37 @@ kandidaten:
       6 Währungen für eine Dezil-Analyse strukturell zu wenig sind (jedes
       Dezil ~1 Währung). Vorhersagen (b)/(c) bestätigt, rettet aber nichts
       ohne (a). DSR fällt in allen 3 Varianten durch.
+
+  - id: SECTORMOM
+    familie: SECTORMOM
+    status: verworfen_R2_2026-08-02   # siehe kill_registry.yaml + trials #82-84
+    sleeve_name: sectormom
+    beschreibung: US-Branchen-Momentum (Moskowitz/Grinblatt JF 1999), 9 SPDR-Sektor-ETFs
+    mechanismus: >
+      Branchenweite Schocks diffundieren langsamer in Erwartungen als
+      einzeltitelspezifische Nachrichten — Moskowitz/Grinblatt zeigen
+      Branchen-Momentum stärker/robuster als Einzeltitel-Momentum. Andere
+      Anlageklasse als DTRD (US-Sektor-ETFs statt Cross-Asset), andere
+      Mechanik als XSR (Branchen-Rotation statt Einzeltitel-Cross-Section).
+    quantitative_vorhersage: >
+      (a) Rendite skaliert MONOTON mit dem Formations-Momentum-Rang;
+      (b) Effekt robust über mehrere Haltedauern;
+      (c) ρ zu XSR niedrig (andere Informationsebene trotz "Momentum"-Namen).
+    braucht_tabellen: [eod_bars]
+    implementierung: quant.research.sector_mom_study.returns
+    live_signal: quant.research.sector_mom_study.live_weights
+    params: {}
+    alloc: 0.10
+    freq: monthly_first
+    tif: cls
+    tags: [momentum, sector, equity]
+    holdout_start: "2020-01-01"
+    liquiditaetstier_geprueft: true   # SPDR-Sektor-ETFs, hochliquide
+    kosten_bp_pro_trade: 10.0
+    notes: >
+      VERWORFEN. Trainings-Sharpe in allen 3 Varianten negativ (-0.28 bis
+      -0.10). Vorhersage (a) widerlegt: nicht monoton über Momentum-Terzile
+      (Mitte niedrigster Wert, eher U-förmig). ρ(XSR) niedrig wie
+      vorhergesagt (+0.07), aber DSR fällt in allen Varianten durch — 9
+      Sektoren sind für eine Terzil-Analyse strukturell dünn, dieselbe
+      Warnung wie bei FXCARRYs 6 Währungen.
