@@ -70,6 +70,13 @@ def resolve_terminal_date(prices: pd.Series, announce_date,
     today = pd.Timestamp.today().normalize()
     trading_gap = (today - last_obs).days
     if trading_gap > 10:
+        if (last_obs - ann).days > 2 * max_horizon_days:
+            # Ein "Closing" das >2x den Horizont braucht (>~18 Monate) ist bei
+            # einem echten M&A-Deal praktisch ausgeschlossen — fast immer
+            # Ticker-Wiederverwendung: das Symbol wurde später einer anderen,
+            # unabhängigen Firma zugewiesen, die selbst irgendwann delisted
+            # wurde (s. TMA-Fall im Task-3-Report: 14 Jahre "Haltedauer").
+            return None, "no_data"
         return last_obs, "closed"
     if last_obs <= horizon_end:
         return None, "open"
