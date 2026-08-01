@@ -206,3 +206,40 @@ kandidaten:
       Größen-/Liquiditätsdezil-bereinigt, NICHT gegen SPY — sonst wiederholt
       sich der ACT13D-Fehler (scheinbares -15.6%-Alpha, das der
       Small-minus-Large-Spread war).
+
+  - id: FXCARRY
+    familie: FXCARRY
+    status: verworfen_R2_2026-08-01   # siehe kill_registry.yaml + trials #73-75
+    sleeve_name: fxcarry
+    beschreibung: G10-FX-Zinsdifferenz-Carry (Fama 1984), 6 Währungen vs. USD
+    mechanismus: >
+      Ungedeckte Zinsparität (UIP) sagt Abwertung der Hochzinswährung um
+      genau den Zinsvorteil voraus — passiert im Mittel nicht (Fama 1984).
+      Halter der Hochzinswährung werden für reales Crash-Risiko bezahlt
+      (Carry-Trades brechen in Risk-off-Phasen zusammen). Neue Anlageklasse
+      (G10-FX statt Cross-Asset-ETFs), neue Hypothese mit eigenem
+      Versuchszähler — kein Sweep der gekillten CARRY-Familie (die nutzte
+      12M-Trailing-ETF-Ausschüttungsrendite als Proxy, hier die echte
+      Zinsdifferenz aus FRED-Kurzfristzinsen).
+    quantitative_vorhersage: >
+      (a) Rendite skaliert MONOTON mit der Zinsdifferenz bei Formation;
+      (b) Prämie bricht bei hohem VIX zusammen (Versicherungscharakter);
+      (c) Renditeverteilung ist linksschief (Crash-Risiko-Signatur).
+    braucht_tabellen: []   # nur FRED, keine BQ-Tabelle
+    implementierung: quant.research.fx_carry_study.returns
+    live_signal: quant.research.fx_carry_study.live_weights
+    params: {}
+    alloc: 0.10
+    freq: monthly_first
+    tif: cls
+    tags: [carry, fx, macro]
+    holdout_start: "2020-01-01"
+    liquiditaetstier_geprueft: true   # CurrencyShares-ETFs, liquide
+    kosten_bp_pro_trade: 10.0
+    notes: >
+      VERWORFEN. Trainings-Sharpe (bis 2019) in allen 3 Varianten negativ.
+      Vorhersage (a) widerlegt: keine Monotonie über die Zinsdifferenz-
+      Dezile (praktisch Rauschen) — methodisch geschwächt dadurch, dass nur
+      6 Währungen für eine Dezil-Analyse strukturell zu wenig sind (jedes
+      Dezil ~1 Währung). Vorhersagen (b)/(c) bestätigt, rettet aber nichts
+      ohne (a). DSR fällt in allen 3 Varianten durch.
