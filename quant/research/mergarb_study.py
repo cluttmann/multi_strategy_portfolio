@@ -172,8 +172,12 @@ def load_deals(cash_only: bool = True) -> pd.DataFrame:
     return df.reset_index(drop=True)
 
 
-def _resolved_deals() -> pd.DataFrame:
-    """Deals + ihr Terminalstatus, je aus eod_bars nachgerechnet."""
+def _resolved_deals(max_horizon_days: int = MAX_HORIZON_DAYS) -> pd.DataFrame:
+    """Deals + ihr Terminalstatus, je aus eod_bars nachgerechnet.
+
+    max_horizon_days: durchgereicht an resolve_terminal_date() — der einzige
+    Parameter, über den run_all_variants() ein vorregistriertes Raster fährt
+    (G5 braucht eine echte within-family Varianz, s. dortiger Kommentar)."""
     deals = load_deals(cash_only=True)
     if deals.empty:
         return deals
@@ -194,7 +198,8 @@ def _resolved_deals() -> pd.DataFrame:
             no_px_syms.add(d["symbol"])
             continue
         term, status = resolve_terminal_date(
-            px, d["announce_date"], deal_price_cash=d["deal_price_cash"])
+            px, d["announce_date"], max_horizon_days=max_horizon_days,
+            deal_price_cash=d["deal_price_cash"])
         after = px.loc[pd.Timestamp(d["announce_date"]):]
         announce_px = float(after.iloc[0]) if len(after) else np.nan
         # REALISIERTE Rendite über die tatsächliche Haltedauer (Ankündigung →
@@ -242,13 +247,13 @@ def _resolved_deals() -> pd.DataFrame:
     return out
 
 
-def returns(**params) -> pd.Series:
+def returns(max_horizon_days: int = MAX_HORIZON_DAYS, **params) -> pd.Series:
     """Discovery-Pipeline-Entry-Point (discovery.evaluate erwartet
     `fn(**params) -> pd.Series`). Nur Tage, an denen mindestens ein Deal
     offen ist — auf Tagen ohne Position künstlich 0 einzutragen würde die
     annualisierte Sharpe gegen ein Buch verwässern, das ungenutztes Kapital
     tatsächlich reinvestiert (siehe Design-Spec, Hebel 2)."""
-    resolved = _resolved_deals()
+    resolved = _resolved_deals(max_horizon_days=max_horizon_days)
     if resolved.empty:
         return pd.Series(dtype=float)
     closed = resolved[resolved["status"].isin(["closed", "break"])]
@@ -357,6 +362,34 @@ def check_predictions() -> dict:
     return out
 
 
+# Vorregistriertes Raster für G5 (Deflated Sharpe): eine neue Familie mit nur
+# einer geloggten Variante fällt auf die globale Glücksvarianz zurück und
+# fordert dann einen praktisch unerreichbaren SR* (s. ROAD_TO_50.md §0.3,
+# genau das Muster, das OPTPREM mit seinem 12-Varianten-Raster vermieden hat).
+# max_horizon_days ist die einzige Achse mit legitimem "hätten wir vertretbar
+# anders wählen können" — 180/270/365 Tage sind alle plausible Prioren dafür,
+# wie lange ein durchschnittlicher Merger bis zum Closing braucht. Die
+# Plausibilitäts-Bänder/Kappungen sind KEINE Sweep-Kandidaten: die sind aus
+# Datenqualitäts-/Ökonomie-Gründen abgeleitet (Review-Funde C2/I8), nicht aus
+# Modellwahl, und ein Sweep darüber wäre Data-Mining auf das Ergebnis selbst.
+HORIZON_GRID = [180, 270, 365]
+
+
+def run_all_variants():
+    from quant.research.trials_registry import log_trial
+    logged = []
+    for h in HORIZON_GRID:
+        label = f"horizon{h}"
+        r = returns(max_horizon_days=h)
+        if len(r) < 20:
+            print(f"{label}: nur {len(r)} Tage — überspringe")
+            continue
+        d = log_trial(family="MERGARB", returns=r, variant=label, ann=252,
+                     config={"max_horizon_days": h})
+        logged.append({"variant": label, **d})
+    return pd.DataFrame(logged)
+
+
 def run():
     deals = load_deals(cash_only=False)
     # Nutzbar = "hat einen extrahierten Cash-Preis", NICHT
@@ -383,8 +416,14 @@ def run():
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--run", action="store_true")
+    p.add_argument("--variants", action="store_true")
     a = p.parse_args()
-    if not a.run:
+    if a.variants:
+        out = run_all_variants()
+        print(out[["variant", "sharpe_net", "cagr_net", "dsr"]]
+              .to_string(index=False) if len(out) else "keine Variante geloggt")
+    elif a.run:
+        run()
+    else:
         p.print_help()
         sys.exit(1)
-    run()

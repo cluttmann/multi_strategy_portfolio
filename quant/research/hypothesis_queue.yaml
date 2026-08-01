@@ -175,6 +175,7 @@ kandidaten:
     tags: [event, dealrisk]
     holdout_start: "2020-01-01"
     kosten_bp_pro_trade: 10.0
+    liquiditaetstier_geprueft: true
     notes: >
       BRUTTO, NICHT NETTO: mergarb_study.returns() modelliert weder Spread/
       Slippage noch Leihkosten noch Steuern — es sind rohe Kursrenditen des
@@ -188,6 +189,19 @@ kandidaten:
       Delisting-Proxy (kein 8-K-Terminierungsscan), Plausibilitätsband
       [-5%,+25%] auf den Ankündigungsspread gegen Akquisiteur-Zeilen,
       ±50%-Deckel auf Tagesrenditen.
+      G6-LIQUIDITÄTSTIER (2026-08-01, Regel R3): 926 closed/break Deals nach
+      20-Tage-ADV in Terzile gebucketet. Kleinstes Terzil (Ø-ADV $576k):
+      mean_ret +5.55%. Mittleres (Ø-ADV $7,8M): +1.43%. Größtes (Ø-ADV
+      $118M): +0.92%. Die Kante fällt mit steigender Liquidität wie erwartet
+      bei einer echten Risikoprämie, verschwindet aber NICHT im größten,
+      liquidesten Terzil — besteht R3.
+      HORIZON-RASTER für G5 (2026-08-01): 3 Varianten vorregistriert
+      (max_horizon_days ∈ {180,270,365}) und in trials_registry geloggt,
+      BEVOR G5 neu geprüft wurde — Sharpe 1.03/1.02/0.71, DSR 1.00/1.00/0.48.
+      Ohne dieses Raster fällt eine Ein-Varianten-Familie mangels
+      within-family-Varianz strukturell durch G5 (SR* fällt auf die globale
+      Varianz zurück, s. ROAD_TO_50.md §0.3) — kein Zeichen für ein
+      schlechtes Signal, sondern ein Gate-Artefakt.
     r9_benchmark: >
       Größen-/Liquiditätsdezil-bereinigt, NICHT gegen SPY — sonst wiederholt
       sich der ACT13D-Fehler (scheinbares -15.6%-Alpha, das der
