@@ -1,22 +1,40 @@
-# Von der Discovery-Pipeline BEFÖRDERTE Sleeves.
-#
-# Diese Datei ist die Brücke zwischen Forschung und Live-Handel: Wer alle Gates
-# in `quant/research/discovery.py` passiert, wird hier eingetragen — und ist
-# damit automatisch live, weil `quant/sleeves/registry.py` diese Datei beim
-# Import einliest und der generische Executor jede registrierte Spec handelt.
-#
-# WARUM als YAML und nicht als Python: Beförderung ist eine DATEN-Änderung.
-# VOLC und EOMT waren wochenlang validiert und verdienten trotzdem nichts, weil
-# niemand ihren Executor gebaut hat. Mit dieser Datei ist "validiert" nicht mehr
-# von "handelbar" trennbar — ohne importierbare `live_signal` besteht ein
-# Kandidat Gate G8 nicht und wird nie eingetragen.
-#
-# Feldbedeutung:
-#   live_signal  Import-Pfad einer Funktion () -> (dict[str,float], str)
-#                → (Zielgewichte als Anteil der Sleeve-Allokation, Begründung)
-#   freq         "daily" | "monthly_first"
-#   tif          "cls" (Schlussauktion) | "opg" (Eröffnungsauktion) | "day"
-#   alloc        Anteil der Gesamt-Equity
-#   metriken     Validierungszahlen, die der Health-Monitor als Baseline nimmt
+# Von der Discovery-Pipeline BEFÖRDERTE Sleeves — siehe Kopfkommentar in git-Historie.
+befoerdert:
+- name: mergarb
+  beschreibung: Merger-Arbitrage — Long-Ziel angekündigter Übernahmen bis zum Closing
+  live_signal: quant.research.mergarb_study.live_weights
+  alloc: 0.12
+  freq: daily
+  tif: cls
+  ann: 252
+  tags:
+  - event
+  - dealrisk
+  notes: 'BRUTTO, NICHT NETTO: mergarb_study.returns() modelliert weder Spread/ Slippage
+    noch Leihkosten noch Steuern — es sind rohe Kursrenditen des Ziels von der Ankündigung
+    bis zum Terminaldatum. Weil kein brutto_bp_pro_trade hinterlegt ist, druckt der
+    G2-Screen in discovery.py "(Kosten im Backtest enthalten)" — das stimmt hier NICHT.
+    Ein brutto_bp_pro_trade wird bewusst nicht geraten, sondern erst eingetragen,
+    wenn die Kante pro Trade gemessen ist (Phase 2). Bei 1-6 Monaten Haltedauer ist
+    der Kosteneinfluss klein, aber nicht null. Weitere offengelegte Näherungen in
+    returns(): Terminaldatum per Delisting-Proxy (kein 8-K-Terminierungsscan), Plausibilitätsband
+    [-5%,+25%] auf den Ankündigungsspread gegen Akquisiteur-Zeilen, ±50%-Deckel auf
+    Tagesrenditen. G6-LIQUIDITÄTSTIER (2026-08-01, Regel R3): 926 closed/break Deals
+    nach 20-Tage-ADV in Terzile gebucketet. Kleinstes Terzil (Ø-ADV $576k): mean_ret
+    +5.55%. Mittleres (Ø-ADV $7,8M): +1.43%. Größtes (Ø-ADV $118M): +0.92%. Die Kante
+    fällt mit steigender Liquidität wie erwartet bei einer echten Risikoprämie, verschwindet
+    aber NICHT im größten, liquidesten Terzil — besteht R3. HORIZON-RASTER für G5
+    (2026-08-01): 3 Varianten vorregistriert (max_horizon_days ∈ {180,270,365}) und
+    in trials_registry geloggt, BEVOR G5 neu geprüft wurde — Sharpe 1.03/1.02/0.71,
+    DSR 1.00/1.00/0.48. Ohne dieses Raster fällt eine Ein-Varianten-Familie mangels
+    within-family-Varianz strukturell durch G5 (SR* fällt auf die globale Varianz
+    zurück, s. ROAD_TO_50.md §0.3) — kein Zeichen für ein schlechtes Signal, sondern
+    ein Gate-Artefakt.
 
-befoerdert: []
+    '
+  metriken:
+    sharpe_full: 1.017
+    sharpe_now: 0.641
+    sharpe_holdout: 0.4
+    dsr: 0.999
+    delta_sp: 0.27

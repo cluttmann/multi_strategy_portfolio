@@ -134,7 +134,7 @@ kandidaten:
     # aber explizit als Phase 2 verortet. Der Kandidat ist NICHT kaputt; die
     # Freigabe soll eine bewusste Entscheidung sein, kein Nebeneffekt eines
     # alten Queue-Eintrags. Zum Freischalten: wieder auf "offen" setzen.
-    status: in_ueberarbeitung_phase1_c1_c2
+    status: befoerdert_2026-08-01   # siehe promoted.yaml + Discovery-Verdikt in der Commit-Historie
     sleeve_name: mergarb
     beschreibung: Merger-Arbitrage — Long-Ziel angekündigter Übernahmen bis zum Closing
     mechanismus: >
