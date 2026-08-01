@@ -88,8 +88,47 @@ DEALS_SCHEMA = [
 # Zusatz-Fetch noetig.
 COVER_TABLE_TICKER_RE = re.compile(
     r"(?i:Trading\s+Symbol).{0,600}?<B>\s*([A-Z]{1,6})\s*</B>", re.DOTALL)
+
+# --- Narrativ-Regex, Fix-Runde 2026-08-01 (Review-Fund I5) -----------------
+# Die Vorversion war `under\s+the\s+symbol\s+.{0,20}?([A-Z]{2,6})\b(?=[."'&])`
+# mit re.IGNORECASE. Zwei Fehler, beide in der Live-Tabelle nachgewiesen:
+#   1. IGNORECASE laesst [A-Z]{2,6} auch KLEINBUCHSTABEN matchen. "under the
+#      symbol of the Company." lieferte damit den Ticker "OMPANY" (aus
+#      "Company." — "C" wurde vom Lueckenteil geschluckt, "ompany" matchte
+#      die Zeichenklasse, der Punkt den Lookahead). Reale Ticker stehen in
+#      diesen Filings IMMER in Grossbuchstaben.
+#   2. Die faule Luecke `.{0,20}?` durfte ueber den echten Ticker
+#      hinweglaufen. MILLIPORE CORP (CIK 66479, DEFM14A 0001193125-10-102039)
+#      landete deshalb als "MRK" in quant.merger_deals: der Text nennt zuerst
+#      Mercks Frankfurt-Notierung &#147;MRK.DE&#148; und erst spaeter die
+#      eigene &#147;MIL.&#148; — der erste Treffer gewann, und Millipores
+#      Angebotspreis von $107 haengte sich damit an Mercks eigenes Papier.
+# Neue Regel: der Ticker muss der VOLLSTAENDIGE Inhalt des zitierten Tokens
+# sein (oeffnendes Anfuehrungszeichen → Ticker → optionaler Punkt/Komma →
+# schliessendes Anfuehrungszeichen). "MRK.DE" faellt damit durch (nach dem
+# Punkt kommt "DE", kein Anfuehrungszeichen), "MIL." nicht. Nur das
+# Einleitungs-Phrase-Praefix bleibt case-insensitiv — via `(?i:...)`-Gruppe,
+# genau wie in COVER_TABLE_TICKER_RE.
+_Q_OPEN = r"(?:&#147;|&#8220;|&ldquo;|&quot;|&#34;|[\"“'‘])"
+_Q_CLOSE = r"(?:&#148;|&#8221;|&rdquo;|&quot;|&#34;|[\"”'’])"
 COVER_NARRATIVE_TICKER_RE = re.compile(
-    r"under\s+the\s+symbol\s+.{0,20}?([A-Z]{2,6})\b(?=[.\"'&])", re.IGNORECASE)
+    r"(?i:under\s+the\s+symbol)[^A-Za-z0-9]{0,20}?"
+    + _Q_OPEN + r"\s*([A-Z]{2,6})\s*[.,]?\s*" + _Q_CLOSE)
+# Zweitversuch fuer Filings ohne Anfuehrungszeichen ("...under the symbol
+# MIL."). Keine Luecke (der Ticker MUSS direkt auf die Phrase folgen) und
+# case-sensitiv, damit "under the symbol of the Company" nicht wieder
+# greift. `\.?(?![\w.])` laesst einen Satzpunkt zu, aber kein
+# Suffix — "MRK.DE" faellt auch hier durch.
+COVER_NARRATIVE_BARE_RE = re.compile(
+    r"(?i:under\s+the\s+symbol)\s+([A-Z]{2,6})\.?(?![\w.])")
+# Englische Fuellwoerter, die nie ein plausibler extrahierter Ticker sind.
+# TODCO handelte tatsaechlich als "THE" — aber die eine Zeile in der
+# Live-Tabelle, die so aufgeloest wurde, ist ohnehin eine Akquisiteur-Zeile
+# (Hercules-Offshore-CIK 1330849 mit TODCOs Ticker). Lieber diese seltene
+# Zeile verlieren als jedes Boilerplate-"THE" als Ticker zu buchen.
+TICKER_STOPWORDS = {"THE", "AND", "FOR", "INC", "LLC", "LTD", "COM", "NYSE",
+                    "NASDAQ", "AMEX", "OTC", "COMPANY", "PARENT", "MERGER",
+                    "SHARES", "STOCK", "CUSIP", "ISIN", "SYMBOL"}
 
 
 def extract_cover_symbol(text: str) -> str | None:
@@ -97,11 +136,13 @@ def extract_cover_symbol(text: str) -> str | None:
     nichts liefert (delisteter Ziel-Ticker). Erst die Cover-Tabelle (425/SC
     TO-T/SC TO-I), dann die Narrativ-Formulierung (DEFM14A/Proxy) probieren."""
     m = COVER_TABLE_TICKER_RE.search(text)
-    if m:
+    if m and m.group(1).upper() not in TICKER_STOPWORDS:
         return m.group(1).upper()
-    m = COVER_NARRATIVE_TICKER_RE.search(text)
-    if m:
-        return m.group(1).upper()
+    for rx in (COVER_NARRATIVE_TICKER_RE, COVER_NARRATIVE_BARE_RE):
+        for m in rx.finditer(text):
+            t = m.group(1).upper()
+            if t not in TICKER_STOPWORDS:
+                return t
     return None
 
 
@@ -364,6 +405,21 @@ def _resolve_from_deals(filings: pd.DataFrame, deals: pd.DataFrame) -> pd.DataFr
     return filings.dropna(subset=["symbol"])
 
 
+def _n_usable(deals: pd.DataFrame) -> int:
+    """Nutzbare Deals = solche mit extrahiertem Cash-Preis. NICHT
+    consideration_type=='cash': dieses Label unterzählt massiv (fast jeder
+    echte Cash-Deal klassifiziert als "mixed", weil Merger-Filings die
+    Cash-Abgeltung von Optionen/RSUs in "shares of ... common stock"-Sprache
+    beschreiben — s. Kommentar in mergarb_study.load_deals). Auf der
+    Live-Tabelle: 88 mit Label vs. 2.000 mit Preis (Review-Fund M3)."""
+    return int(deals["deal_price_cash"].notna().sum()) if len(deals) else 0
+
+
+def _n_labeled_cash(deals: pd.DataFrame) -> int:
+    return (int((deals["consideration_type"] == "cash").sum())
+            if len(deals) else 0)
+
+
 def backfill(start_year=2007):
     filings = collect(start_year)
     deals = build_deals(filings)
@@ -376,13 +432,57 @@ def backfill(start_year=2007):
                                 "company"]],
            schema=FILINGS_SCHEMA, write="WRITE_TRUNCATE")
     print(f"→ {T_FILINGS}")
-    print(f"{len(deals):,} Deals extrahiert "
-          f"({(deals['consideration_type'] == 'cash').sum() if len(deals) else 0} "
-          "Cash-Deals)")
+    print(f"{len(deals):,} Deals extrahiert — {_n_usable(deals):,} mit "
+          f"extrahiertem Cash-Preis (das ist die nutzbare Stichprobe, s. "
+          f"mergarb_study.load_deals); nur {_n_labeled_cash(deals):,} tragen "
+          "das unzuverlässige Label consideration_type='cash'")
     ensure_table(T_DEALS, DEALS_SCHEMA, partition_field="announce_date",
                 clustering=["symbol"])
     load_df(T_DEALS, deals, schema=DEALS_SCHEMA, write="WRITE_TRUNCATE")
     print(f"→ {T_DEALS}")
+
+
+DEAL_DEDUP_WINDOW_DAYS = 400
+# Zwei Deal-Zeilen desselben CIK, deren Ankündigungsdaten näher als das
+# beieinanderliegen, sind derselbe Deal — 400d ist bewusst grosszuegiger als
+# der 270d-Horizont in mergarb_study.MAX_HORIZON_DAYS. Zwei ECHTE,
+# unabhaengige Uebernahmeversuche derselben Firma liegen praktisch immer
+# Jahre auseinander und bleiben damit erhalten.
+
+
+def _drop_known_deals(deals: pd.DataFrame) -> pd.DataFrame:
+    """BQ-Abgleich gegen bereits vorhandene quant.merger_deals-Zeilen
+    (Review-Fund I9). build_deals() dedupliziert nur INNERHALB seines eigenen
+    Batches (`drop_duplicates(["cik"])`) — laeuft refresh() ein zweites Mal
+    und qualifiziert sich fuer dieselbe CIK ein spaeteres Filing (z.B. ein
+    DEFM14A nach einem schon verarbeiteten 425), entstuende ohne diesen
+    Abgleich eine zweite Deal-Zeile fuer denselben Deal. Analog zum
+    (accession, cik)-Abgleich fuer T_FILINGS weiter unten; fail-open (bei
+    BQ-Fehler wird nichts verworfen), weil ein Duplikat harmloser ist als
+    ein stillschweigend uebersprungener Refresh."""
+    if not len(deals):
+        return deals
+    try:
+        have = query(f"SELECT cik, announce_date FROM `{T_DEALS}`")
+    except Exception:  # noqa: BLE001
+        return deals
+    if have.empty:
+        return deals
+    have["announce_date"] = pd.to_datetime(have["announce_date"])
+    prev: dict[int, list] = {}
+    for c, a in zip(have["cik"], have["announce_date"]):
+        prev.setdefault(int(c), []).append(a)
+
+    def known(r) -> bool:
+        d = pd.Timestamp(r["announce_date"])
+        return any(abs((d - a).days) <= DEAL_DEDUP_WINDOW_DAYS
+                   for a in prev.get(int(r["cik"]), []))
+
+    mask = deals.apply(known, axis=1)
+    if mask.any():
+        print(f"Merger-Refresh: {int(mask.sum())} Deals schon in {T_DEALS} "
+              f"(±{DEAL_DEDUP_WINDOW_DAYS}d je CIK) — nicht erneut angehaengt")
+    return deals[~mask].reset_index(drop=True)
 
 
 def refresh():
@@ -438,6 +538,7 @@ def refresh():
         return
     load_df(T_FILINGS, new[["date", "symbol", "cik", "form", "accession",
                            "company"]], schema=FILINGS_SCHEMA)
+    deals = _drop_known_deals(deals)
     if len(deals):
         ensure_table(T_DEALS, DEALS_SCHEMA, partition_field="announce_date",
                     clustering=["symbol"])
@@ -455,9 +556,9 @@ def pilot():
         print("⚠ 2025 oder 2026 hat 0 Treffer — Verdacht auf SEC-Label-Update, "
               "wie bei sec_13d_ingest.py (SC 13D → SCHEDULE 13D). FORM_RE prüfen.")
     deals = build_deals(df)
-    print(f"{len(deals):,} Deals extrahiert, davon "
-          f"{(deals['consideration_type'] == 'cash').sum() if len(deals) else 0} "
-          "Cash-Deals")
+    print(f"{len(deals):,} Deals extrahiert — {_n_usable(deals):,} mit "
+          f"extrahiertem Cash-Preis (nutzbare Stichprobe); nur "
+          f"{_n_labeled_cash(deals):,} mit Label consideration_type='cash'")
     out = "quant/research/_mergarb_pilot.parquet"
     deals.to_parquet(out)
     print(f"→ {out}")

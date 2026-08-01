@@ -73,3 +73,6 @@ quant/_staging/
 
 # Zwischenartefakt des 13D-Piloten (Wahrheit liegt in BigQuery)
 quant/research/_13d_pilot.parquet
+
+# dito Merger-Pilot (merger_ingest.pilot() -> quant.merger_deals ist die Wahrheit)
+quant/research/_mergarb_pilot.parquet
