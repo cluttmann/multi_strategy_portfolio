@@ -142,7 +142,14 @@ def xsr_returns() -> pd.Series:
         return pd.Series(dtype=float)
     df["date"] = pd.to_datetime(df["date"])
     df["score"] = booster.predict(df[V2_FEATURES]).astype("float32")
-    res = simulate_tranches(df, k=5)
+    # k muss K_TRANCHE aus xsr_live.py spiegeln — das Live-Buch haelt seit
+    # commit 45f7e0d 21-Tage-Tranchen, nicht mehr 5 (vorregistrierte
+    # Entscheidung nach dem 9.9-10.0bp-Kostenbefund). Ein Monitor mit dem
+    # alten k=5 misst eine andere, nicht mehr gehandelte Strategie und
+    # meldet dabei einen ganz anderen Sharpe als das echte Buch (gefunden
+    # 2026-08-01 beim CAGR-Nachrechnen).
+    from quant.execution.xsr_live import K_TRANCHE
+    res = simulate_tranches(df, k=K_TRANCHE)
     return res["net_ret"].sort_index()
 
 
