@@ -574,3 +574,43 @@ Tages. Commit `8ad3a37`.
 Exit-Code 0 endete — nicht, dass die beabsichtigte Arbeit stattfand. Bei
 Multi-Sleeve-Loops künftig immer die tatsächlichen Log-Zeilen pro Sleeve
 prüfen, nicht nur den Execution-Status.
+
+## NACHTRAG 2026-08-01: opg-Fills sind strukturell teurer als cls — teils echt, teils Alpaca-Paper-Artefakt
+
+`cost_monitor --diagnose` nach Ordertyp statt nach Ordergröße aufgeschlüsselt
+(die %ADV-Bucketierung allein gab ein grenzwertiges, unklares Bild): cls-Fills
+(n=36, ONX-Entry + EOMT) Ø 2.7bp, sauber. opg-Fills (n=8, ONX-Exit + XSR)
+**Ø 61.6bp**, std 55.5bp — eine Größenordnung schlechter, unabhängig von der
+Ordergröße.
+
+Für ONX allein (Entry cls / Exit opg, wie im Design): Entry 3.7–4.1bp,
+**Exit 61.8–93.9bp**, Round-Trip real 65.5–97.9bp — 7–10x über dem
+Break-even von 8.3–9.8bp aus der ursprünglichen Pause-Begründung.
+
+**Eingeschränkt durch eine externe Bestätigung, nicht spekulativ:** Alpacas
+eigenes Community-Forum dokumentiert genau dieses Muster für Paper-Accounts —
+MOO/OPG-Fills kommen Sekunden nach dem echten Print und zu schlechteren
+Preisen als bei einem Live-Broker (forum.alpaca.markets/t/accuracy-of-moo-
+orders-on-paper-account/6025), und ein offener Feature-Request fordert
+genau diese Ungenauigkeit zu beheben (.../accurate-opg-and-cls-prices-for-
+paper-trading/3762). Das bestätigt den bereits in `cost_monitor.py`
+dokumentierten Vorbehalt ("Alpacas Paper-Engine füllt Auktionen ohnehin
+nicht zum offiziellen Print") mit einer externen Quelle statt nur einer
+eigenen Vermutung.
+
+**Konsequenz für ONX:** ändert die Pause-Richtung nicht (die ursprüngliche
+10bp-Schätzung war schon grenzwertig), aber die 65–98bp sind eine
+Obergrenze, kein bereinigter Realwert — Firestore-Pausenbegründung
+entsprechend präzisiert.
+
+**Offene Frage, bewusst nicht gelöst:** XSRs eigene Kostenschätzung
+(9.9–10.0bp, die den Wechsel auf 21-Tage-Tranchen ausgelöst hat) beruht
+teilweise auf `opg`-Fills und könnte also ebenfalls nach oben verzerrt sein
+— die realen Kosten wären dann besser als gemessen. Das rechtfertigt keinen
+Rückzieher vom k=21-Wechsel (vorregistrierte Regel, bereits ausgeführt),
+aber eine künftige Neumessung sollte cls- und opg-Fills getrennt ausweisen,
+statt sie zu einer Zahl zu mitteln.
+
+**Lektion:** Eine Kostendiagnose nach Ordergröße (%ADV) reicht nicht, wenn
+der eigentliche Treiber der Ordertyp ist. Bei Auktionsordern immer nach
+opg/cls trennen, bevor man eine Größen-Hypothese testet.

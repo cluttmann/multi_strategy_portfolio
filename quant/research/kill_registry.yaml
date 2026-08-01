@@ -143,6 +143,25 @@ familien:
       Ein Modell ohne marktspezifisches Pretraining bringt keine neue
       Information. Modelltausch bei gleicher Information ≈ 0 (6 Klassen getestet).
 
+  - name: OPTPREM
+    beschreibung: Wöchentlicher Short-Put-Spread SPY/QQQ, 12-Varianten-Raster (OTM 1.5/2/3% x Breite 1/2% x VIX-Filter an/aus)
+    todesursache: [MECHANISMUS_WIDERLEGT]
+    zahlen: >
+      Alle 12 vorregistrierten Varianten NEGATIV: Sharpe -0.63 bis -2.17,
+      DSR 4e-5 bis 1e-10 (alle FÄLLT DURCH). Bestes Ergebnis (breitester OTM,
+      kein VIX-Filter) noch immer Sharpe -0.63. cagr_net=-100% bei jeder
+      Variante — jede erlebte mindestens eine Woche mit Totalverlust
+      (Settlement bei/unter beiden Strikes), was die Kumulativrendite in
+      trials_registry.py permanent auf -100% zwingt.
+    lehre: >
+      Bestätigt OPT (bereits gekillt, MECHANISMUS_WIDERLEGT): hohe
+      Trefferquote bei Short-Optionalität schützt nicht vor Tail-Wochen, die
+      alles auffressen. Der 15%-Credit-Haircut allein reicht nicht — das
+      Problem ist nicht die Kostenannahme, sondern die Auszahlungsstruktur
+      selbst. Kein neuer Anlauf ohne eine echte Tail-Absicherung (z.B. als
+      Teil einer Iron-Condor- oder Ratio-Struktur), sonst wiederholt sich
+      dasselbe Muster.
+
 verworfene_feature_bloecke:
   - name: FINRA_SHORT_VOLUME
     zahlen: "Δ Sharpe -0.059 gegen die 36-Feature-Baseline"
