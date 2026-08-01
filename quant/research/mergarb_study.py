@@ -57,7 +57,7 @@ def resolve_terminal_date(prices: pd.Series, announce_date,
     # weiter (der Aufrufer übergibt nur Kurse bis "heute") → Delisting = Close.
     today = pd.Timestamp.today().normalize()
     trading_gap = (today - last_obs).days
-    if trading_gap > 10 and last_obs < horizon_end:
+    if trading_gap > 10:
         return last_obs, "closed"
     if last_obs <= horizon_end:
         return None, "open"
