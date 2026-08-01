@@ -59,25 +59,41 @@ def bar_close(contract: str, day: pd.Timestamp) -> float | None:
     return bars[-1]["c"] if bars else None
 
 
-def run():
+OTM_GRID = [0.015, 0.02, 0.03]
+WIDTH_GRID = [0.01, 0.02]
+VIX_FILTER_GRID = [True, False]
+
+
+def weekly_returns(df: pd.DataFrame) -> pd.Series:
+    """ret_on_risk-Spalte als Rendite-Serie, indiziert auf das Wochendatum —
+    der gemeinsame Nenner, den trials_registry.log_trial erwartet."""
+    s = df.set_index("date")["ret_on_risk"].sort_index()
+    s.index = pd.to_datetime(s.index)
+    return s
+
+
+def simulate(otm_short: float = OTM_SHORT, width: float = WIDTH,
+            vix_filter: bool = False) -> pd.DataFrame:
+    """Reine Backtest-Funktion für EINE Variante — liefert die Wochenzeilen,
+    schreibt nichts. `run_all_variants()` und `run()` sind die I/O-Wrapper."""
     vix = fred("VIXCLS", start="2024-01-01")
     results = []
     for u in UNDERLYINGS:
         px = alpaca_daily(u, "2024-02-01")["c"]
         px.index = pd.to_datetime(px.index)
         mondays = [d for d in px.index if d.weekday() == 0]
-        print(f"{u}: {len(mondays)} Mondays {mondays[0]:%Y-%m-%d} → "
-              f"{mondays[-1]:%Y-%m-%d}")
         for d in mondays:
             spot = px[d]
-            expiry = d + pd.Timedelta(days=4 - d.weekday() + 0)  # this Friday
             expiry = d + pd.Timedelta(days=(4 - d.weekday()) % 7)
             if expiry <= d:
                 expiry += pd.Timedelta(days=7)
             if expiry not in px.index:
                 continue
-            k_short = round(spot * (1 - OTM_SHORT))
-            k_long = round(spot * (1 - OTM_SHORT - WIDTH))
+            v = vix.reindex([d]).ffill().iloc[-1]
+            if vix_filter and v >= 25:
+                continue
+            k_short = round(spot * (1 - otm_short))
+            k_long = round(spot * (1 - otm_short - width))
             cs = occ(u, expiry, "P", k_short)
             cl = occ(u, expiry, "P", k_long)
             p_short = bar_close(cs, d)
@@ -91,12 +107,41 @@ def run():
             payoff = -max(k_short - settle, 0) + max(k_long - settle, 0)
             pnl = credit + payoff
             width_usd = k_short - k_long
-            results.append({
-                "u": u, "date": d, "vix": vix.reindex([d]).ffill().iloc[-1],
-                "credit": credit, "pnl": pnl, "max_loss": width_usd - credit,
-                "ret_on_risk": pnl / (width_usd - credit),
-            })
-    df = pd.DataFrame(results)
+            results.append({"u": u, "date": d, "vix": v, "credit": credit,
+                            "pnl": pnl, "max_loss": width_usd - credit,
+                            "ret_on_risk": pnl / (width_usd - credit)})
+    return pd.DataFrame(results)
+
+
+def run_all_variants():
+    """Das vorregistrierte 12-Varianten-Raster ({OTM 1.5/2/3%} x
+    {Breite 1/2%} x {VIX-Filter an/aus}) — jede Variante wird bei
+    trials_registry protokolliert, BEVOR irgendeine für die Beförderung
+    ausgewählt wird. Das ist die Lektion aus dem G5-Vorfall (XSR sprang
+    zwischen DSR 0.996/0.611, je nachdem ob der Modell-Zoo mitzählte, weil
+    das Variantenraster nicht vorher fixiert war)."""
+    from quant.research.trials_registry import log_trial
+    logged = []
+    for otm in OTM_GRID:
+        for width in WIDTH_GRID:
+            for vf in VIX_FILTER_GRID:
+                label = f"otm{otm}_w{width}_vix{'on' if vf else 'off'}"
+                df = simulate(otm, width, vf)
+                if len(df) < 20:
+                    print(f"{label}: nur {len(df)} Wochen — überspringe")
+                    continue
+                r = weekly_returns(df)
+                d = log_trial(family="OPTPREM", returns=r, variant=label,
+                             ann=52, config={"otm": otm, "width": width,
+                                             "vix_filter": vf})
+                logged.append({"variant": label, **d})
+    return pd.DataFrame(logged)
+
+
+def run():
+    """Unveränderter Einzellauf mit den bisherigen Default-Parametern —
+    behält die ursprüngliche `--run`-Semantik für Ad-hoc-Checks."""
+    df = simulate(OTM_SHORT, WIDTH, vix_filter=False)
     if df.empty:
         print("no fills — options bar data too sparse for these strikes")
         return
@@ -113,22 +158,22 @@ def run():
               f"worst wk={rr.min()*100:+.0f}%")
 
     block("all weeks", df)
-    block("VIX<25 filter", df[df.vix < 25])
-    block("VIX>=25 (excluded by filter)", df[df.vix >= 25])
     for u in UNDERLYINGS:
-        block(f"  {u} only (VIX<25)", df[(df.u == u) & (df.vix < 25)])
-    df["month"] = df.date.dt.to_period("M")
-    worst = df.groupby("month")["ret_on_risk"].mean().nsmallest(3)
-    print("worst months (avg P&L/risk):",
-          {str(k): f"{v*100:+.0f}%" for k, v in worst.items()})
+        block(f"  {u} only", df[df.u == u])
     df.to_parquet("quant/_staging/options_phase_a.parquet")
 
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--run", action="store_true")
+    p.add_argument("--variants", action="store_true")
     args = p.parse_args()
-    if not args.run:
+    if args.variants:
+        out = run_all_variants()
+        print(out[["variant", "sharpe_net", "cagr_net", "dsr"]]
+              .to_string(index=False))
+    elif args.run:
+        run()
+    else:
         p.print_help()
         sys.exit(1)
-    run()
