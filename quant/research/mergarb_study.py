@@ -27,6 +27,18 @@ MAX_HORIZON_DAYS = 270
 BREAK_DRIFT_PCT = 0.15   # Abweichung vom letzten Preis, ab der ein noch
                          # offener, über-den-Horizont-hinaus laufender Deal
                          # als gebrochen gilt statt als weiter offen
+IMPLAUSIBLE_SPREAD_PCT = 2.0   # >200% Spread zwischen deal_price_cash und
+                                # announce_px ist für einen echten Merger-Arb-
+                                # Deal praktisch ausgeschlossen (reale Spreads
+                                # bei Ankündigung liegen weit unter 100%,
+                                # selbst bei hohem Bruchrisiko). Ein Wert
+                                # darüber deutet auf einen falsch aufgelösten
+                                # Ticker in quant.merger_deals hin (Task-2-
+                                # Datenproblem: derselbe Ticker wurde zwei
+                                # unterschiedlichen CIKs zugeordnet, z.B.
+                                # ARJ/LZR — s. Task-3-Report), nicht auf einen
+                                # echten Deal. Wird hier verworfen statt still
+                                # die Sharpe zu verzerren.
 
 
 def resolve_terminal_date(prices: pd.Series, announce_date,
@@ -134,7 +146,17 @@ def _resolved_deals() -> pd.DataFrame:
                      "announce_px": px.loc[pd.Timestamp(d["announce_date"]):]
                                       .iloc[0] if len(px.loc[pd.Timestamp(
                                           d["announce_date"]):]) else np.nan})
-    return pd.DataFrame(rows)
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return out
+    spread = (out["deal_price_cash"] / out["announce_px"] - 1).abs()
+    implausible = spread > IMPLAUSIBLE_SPREAD_PCT
+    if implausible.any():
+        n = int(implausible.sum())
+        syms = sorted(out.loc[implausible, "symbol"].unique().tolist())
+        print(f"{n} Deals mit unplausiblem Spread (>200%) verworfen: {syms}")
+        out = out[~implausible].reset_index(drop=True)
+    return out
 
 
 def returns(**params) -> pd.Series:
