@@ -344,7 +344,7 @@ def check_predictions() -> dict:
             out["a_n"] = int(len(mono))
             out["a_monoton"] = bool(by_decile.is_monotonic_increasing)
     if len(closed) >= 5:
-        vix = fred("VIXCLS", start="2015-01-01")
+        vix = fred("VIXCLS", start="2006-01-01")
         vix_at_announce = vix.reindex(pd.to_datetime(closed["announce_date"]),
                                       method="ffill")
         closed["vix"] = vix_at_announce.values

@@ -370,11 +370,18 @@ def run(cand_id: str | None = None, run_all=False, promote_enabled=True,
         # Zurückgestellte/verworfene Kandidaten nicht jede Woche neu rechnen
         todo = [c for c in q
                 if str(c.get("status", "offen")).startswith("offen")]
+        if not todo:
+            msg = ("Discovery: Warteschlange leer — keine 'offen'-Kandidaten "
+                   "diese Woche zu testen")
+            if notify_fn:
+                notify_fn(msg)
+            print(msg)
+            return
     else:
         todo = [c for c in q if c["id"] == cand_id]
-    if not todo:
-        print(f"Kandidat '{cand_id}' nicht in der Warteschlange")
-        return
+        if not todo:
+            print(f"Kandidat '{cand_id}' nicht in der Warteschlange")
+            return
     rules = load_rules()
     print(f"Kill-Registry: {len(rules['familien'])} gekillte Familien, "
           f"{len(rules['suchregeln'])} bindende Suchregeln\n")
