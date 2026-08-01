@@ -176,6 +176,207 @@ def returns(h: int = 63, max_pos: float = 0.10) -> pd.Series:
     return s
 
 
+def load_size_deciles(start: str, end: str) -> tuple[pd.DataFrame, pd.Series]:
+    """R9-KORREKTUR (2026-08-01): die Gegenposition muss größenbereinigt
+    sein, nicht SPY. 13D-Ziele sind systematisch Small-Cap (Median-ADV im
+    untersten Tier) — "abnormal vs. SPY" misst über 2007-2026 vor allem den
+    Small-minus-Large-Spread, nicht den Aktivisten-Effekt (s. kill_registry
+    ACT13D-Lehre). Liefert (a) tägliche EW-Renditen je Größen-Dezil aus dem
+    breiten Universum, (b) die Dezil-Zuordnung je (Datum, Symbol)."""
+    df = query(f"""
+      SELECT date, symbol, mcap, ret_1d
+      FROM `trading-436516.quant.features_daily_v2`
+      WHERE date BETWEEN '{start}' AND '{end}' AND mcap > 0
+        AND ret_1d IS NOT NULL""")
+    df["date"] = pd.to_datetime(df["date"])
+    # Datenartefakt-Schutz (wie überall sonst im Projekt, z.B.
+    # portfolio_sim.MAX_ABS_RET): ein einzelner korrupter ret_1d (Split
+    # falsch verarbeitet, Delisting-Preissprung) reicht, um den Dezil-
+    # Mittelwert an dünn besetzten Tagen zu sprengen — und das dann über
+    # Wochen kumuliert zu astronomischen "Renditen". Gefunden 2026-08-01:
+    # ohne Filter kam abn. Rendite von -13 BILLIONEN % heraus.
+    n0 = len(df)
+    df = df[df["ret_1d"].abs() <= 0.5]
+    print(f"Artefakt-Schutz: {n0 - len(df):,} Zeilen mit |ret_1d|>50% verworfen")
+    df["decile"] = df.groupby("date")["mcap"].transform(
+        lambda x: pd.qcut(x.rank(method="first"), 10, labels=False,
+                          duplicates="drop"))
+    decile_ret = df.groupby(["date", "decile"])["ret_1d"].mean().unstack()
+    sym_decile = df.set_index(["date", "symbol"])["decile"]
+    return decile_ret, sym_decile
+
+
+def event_returns_r9(ev: pd.DataFrame, px: pd.DataFrame, h: int,
+                     decile_ret: pd.DataFrame, sym_decile: pd.Series
+                     ) -> pd.DataFrame:
+    """Wie event_returns(), aber die Gegenposition ist das GRÖSSEN-DEZIL-
+    PORTFOLIO des Ziels zum Ankündigungstag statt SPY (Regel R9)."""
+    dates = px.index
+    rows = []
+    for _, e in ev.iterrows():
+        s, d0 = e["symbol"], e["date"]
+        if s not in px.columns or s == "SPY":
+            continue
+        pos = dates.searchsorted(d0, side="right")
+        if pos + h >= len(dates):
+            continue
+        d_in, d_out = dates[pos], dates[pos + h]
+        p_in, p_out = px[s].iloc[pos], px[s].iloc[pos + h]
+        if not (np.isfinite(p_in) and np.isfinite(p_out)) or p_in <= 0:
+            continue
+        r = p_out / p_in - 1
+        if abs(r) > 3.0:
+            continue
+        # Dezil des Ziels ZUM ANKÜNDIGUNGSTAG (nicht später — sonst leckt
+        # der Kurserfolg selbst in die Dezil-Zuordnung).
+        try:
+            dec = sym_decile.loc[(d0, s)]
+        except KeyError:
+            continue
+        if pd.isna(dec):
+            continue
+        col = decile_ret.get(dec)
+        if col is None:
+            continue
+        bench = col.loc[d_in:d_out]
+        if len(bench) < 2:
+            continue
+        rm = float((1 + bench.dropna()).prod() - 1)
+        rows.append({"symbol": s, "date_in": d_in, "date_out": d_out,
+                     "ret": r, "mkt": rm, "abn": r - rm, "decile": dec})
+    return pd.DataFrame(rows)
+
+
+def portfolio_r9(er: pd.DataFrame, px: pd.DataFrame, h: int,
+                 decile_ret: pd.DataFrame, max_pos=0.10,
+                 cost_bps=COST_BPS_RT) -> tuple[pd.Series, pd.DataFrame]:
+    """Wie portfolio(), aber die Gegenposition je Position ist ihr EIGENES
+    Größen-Dezil (zum Einstieg fixiert, s. event_returns_r9), nicht SPY —
+    der eigentliche R9-Test auf Portfolioebene. `portfolio()` allein hedgt
+    immer gegen SPY, unabhängig davon, welche Events man ihr übergibt; ohne
+    diese Funktion würde die "R9-korrigierte" Sleeve-Simulation exakt
+    dieselbe SPY-neutrale Ökonomie testen wie das Original."""
+    ret = px.pct_change()
+    idx = px.index
+    book: dict[pd.Timestamp, list[str]] = {}
+    dec_of: dict[str, float] = {}
+    for _, e in er.iterrows():
+        i0 = idx.searchsorted(e["date_in"])
+        for j in range(i0, min(i0 + h, len(idx))):
+            book.setdefault(idx[j], []).append(e["symbol"])
+        dec_of[e["symbol"]] = e.get("decile")
+    rows, prev = [], set()
+    for d in idx:
+        names = book.get(d, [])
+        if not names:
+            prev = set()
+            continue
+        w = min(max_pos, 1.0 / len(names))
+        gross = w * len(names)
+        r_long = float(np.nansum([ret[s].get(d, 0.0) for s in names
+                                  if s in ret.columns])) * w
+        bench_terms = []
+        for s in names:
+            dec = dec_of.get(s)
+            bv = decile_ret[dec].get(d) if dec in decile_ret.columns else None
+            bench_terms.append(bv if bv is not None and pd.notna(bv) else 0.0)
+        r_bench = float(np.mean(bench_terms)) * gross if bench_terms else 0.0
+        cur = set(names)
+        turn = w * (len(cur - prev) + len(prev - cur))
+        rows.append({"date": d, "net_ret": r_long - r_bench
+                     - turn * cost_bps / 2 / 1e4, "n": len(names),
+                     "gross": gross})
+        prev = cur
+    df = pd.DataFrame(rows).set_index("date")
+    return df["net_ret"], df
+
+
+def run_r9_corrected():
+    """R9-korrigierter Nachtest (2026-08-01): dieselben Events/Kurse wie
+    run(), aber Größen-Dezil-Gegenposition statt SPY. Eigener Eintrag in
+    trials_registry (Familie ACT13D, Variante "R9-Dezil") — kein Sweep der
+    ursprünglichen SPY-Zahlen, sondern eine Methodenkorrektur derselben
+    Familie."""
+    ev = load_events()
+    ev["date"] = pd.to_datetime(ev["date"])
+    px, dv = build_panel(ev)
+    start = (ev["date"].min() - pd.Timedelta(days=40)).strftime("%Y-%m-%d")
+    end = (ev["date"].max() + pd.Timedelta(days=400)).strftime("%Y-%m-%d")
+    print("Größen-Dezil-Benchmark aus features_daily_v2 bauen ...")
+    decile_ret, sym_decile = load_size_deciles(start, end)
+    print(f"Dezil-Panel: {decile_ret.shape[1]} Dezile × {len(decile_ret):,} Tage\n")
+
+    print("═══ R9-KORRIGIERT: abnormale Rendite ggü. Größen-Dezil (nicht SPY) ═══")
+    print(f"{'H':>4s} {'N':>6s} {'abn. Rendite':>13s} {'t':>6s} "
+          f"{'Median':>8s} {'>0':>6s}")
+    ers = {}
+    for h in HORIZONS + [252]:
+        er = event_returns_r9(ev, px, h, decile_ret, sym_decile)
+        ers[h] = er
+        if len(er) < 50:
+            continue
+        print(f"{h:4d} {len(er):6,} {er['abn'].mean():+12.2%} "
+              f"{tstat(er['abn']):6.2f} {er['abn'].median():+8.2%} "
+              f"{(er['abn'] > 0).mean():6.1%}")
+
+    print("\n═══ Vergleich zur alten SPY-Zahl (H=63, alle Events) ═══")
+    er_spy = event_returns(ev, px, dv, 63)
+    print(f"  ggü. SPY:        abn {er_spy['abn'].mean():+.2%} "
+          f"(t={tstat(er_spy['abn']):.2f}), N={len(er_spy):,}")
+    print(f"  ggü. Größen-Dezil: abn {ers[63]['abn'].mean():+.2%} "
+          f"(t={tstat(ers[63]['abn']):.2f}), N={len(ers[63]):,}")
+
+    print("\n═══ Vorhersage (c): monoton über den Horizont? ═══")
+    means = {h: ers[h]["abn"].mean() for h in HORIZONS + [252] if len(ers[h]) >= 50}
+    seq = [means[h] for h in sorted(means)]
+    print(f"  {sorted(means)} → {seq}")
+    print(f"  monoton steigend: {all(b >= a - 1e-9 for a, b in zip(seq, seq[1:]))}")
+
+    print("\n═══ Sleeve-Sim mit korrigierter Gegenposition (Cap 10%, ADV≥5M) ═══")
+    from quant.research.trials_registry import log_trial
+    best, bs = None, -9
+    for h in HORIZONS:
+        er = ers[h].copy()
+        er = er.merge(dv.stack().rename("adv").reset_index()
+                      .rename(columns={"date": "date_in"}),
+                      on=["date_in", "symbol"], how="left")
+        er = er[er["adv"] >= 5e6]
+        if len(er) < 20:
+            continue
+        r, d = portfolio_r9(er, px, h, decile_ret)
+        s = stats(r)
+        if not s:
+            continue
+        print(f"  H={h:3d}: Sharpe {s['sharpe']:5.2f} | CAGR {s['cagr']:+7.1%} "
+              f"| MaxDD {s['maxdd']:6.1%} | Ø {d['n'].mean():4.1f} Positionen "
+              f"(N_events={len(er)})")
+        if s["sharpe"] > bs:
+            best, bs = h, s["sharpe"]
+        try:
+            log_trial("ACT13D", r, variant=f"H={h}d R9-Dezil ADV≥5M-v2",
+                      verdict="KANDIDAT" if h == best else "Variante",
+                      notes="R9-Korrektur v2: Dezil-Hedge auch auf Portfolioebene "
+                            "(v1-Trials #76-78 hedgten fälschlich noch gegen SPY)")
+        except Exception as e:  # noqa: BLE001
+            print(f"    (trials_registry: {e})")
+
+    if best is not None:
+        er = ers[best].copy()
+        er = er.merge(dv.stack().rename("adv").reset_index()
+                      .rename(columns={"date": "date_in"}),
+                      on=["date_in", "symbol"], how="left")
+        er = er[er["adv"] >= 5e6]
+        r_best, _ = portfolio_r9(er, px, best, decile_ret)
+        print("\n═══ ORTHOGONALITÄT (R9-korrigiert) ═══")
+        from quant.research.discovery import live_sleeve_returns, portfolio_delta
+        ex = live_sleeve_returns()
+        before, after, rhos = portfolio_delta(r_best, ex, bs)
+        for nm, rho in rhos.items():
+            print(f"  ρ(ACT13D-R9, {nm}) = {rho:+.3f}")
+        print(f"  Portfolio-Sharpe {before:.2f} → {after:.2f} "
+              f"(Δ {after-before:+.3f})")
+
+
 def run():
     ev = load_events()
     ev["date"] = pd.to_datetime(ev["date"])
@@ -287,8 +488,12 @@ def run():
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--run", action="store_true")
+    ap.add_argument("--run-r9", action="store_true")
     a = ap.parse_args()
-    if not a.run:
+    if a.run_r9:
+        run_r9_corrected()
+    elif a.run:
+        run()
+    else:
         ap.print_help()
         sys.exit(1)
-    run()

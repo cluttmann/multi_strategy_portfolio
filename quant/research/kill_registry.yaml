@@ -115,6 +115,22 @@ familien:
       GRÖSSEN-/STIL-BEREINIGTES Benchmark, sonst testet man den Faktor statt
       des Events. Zusätzlich: SECs company_tickers.json enthält nur aktuell
       notierte Firmen → übernommene Ziele fehlen im Sample.
+    nachtest_2026-08-01: >
+      R9-KORRIGIERT NACHGEHOLT (act13d_study.run_r9_corrected): echte
+      Größen-Dezil-Gegenposition aus features_daily_v2 (10 Dezile, EW,
+      Dezil zum Ankündigungstag fixiert) statt SPY — sowohl in der
+      Event-Statistik als auch im Sleeve-Sim (portfolio_r9, hedgt jede
+      Position gegen ihr eigenes Dezil). ERGEBNIS: die Vermutung war
+      FALSCH. Abnormale Rendite bleibt negativ und hoch signifikant:
+      -0.96% (21T, t=-3.46) → -2.56% (63T, t=-5.57) → -4.82% (126T,
+      t=-7.28) → -7.95% (252T, t=-8.06) — fast identisch zur alten
+      SPY-Zahl (-2.58% bei H=63). Sleeve-Sim Sharpe -0.09 bis -0.39, DSR
+      überall <0.04. Der ursprüngliche Kill war aus dem RICHTIGEN Grund
+      richtig (MECHANISMUS_WIDERLEGT), nur nicht aus dem vermuteten
+      (Benchmark). 13D-Aktivismus zeigt in diesem Sample einen echten,
+      robusten NEGATIVEN Drift, keinen positiven Unterreaktions-Effekt —
+      Brav/Jiang/Partnoy/Thomas (JF 2008, positiv) repliziert hier NICHT.
+      Fall endgültig geschlossen, kein dritter Anlauf ohne neue Idee.
 
   - name: CARRY
     beschreibung: Cross-Asset-Carry über 35 ETFs, Ausschüttungsrendite minus Geldmarkt
