@@ -233,6 +233,25 @@ familien:
       Risikoprämie in derselben Anlageklasse (z.B. FX-Momentum statt Carry).
 
 verworfene_feature_bloecke:
+  - name: SEC_13D_TAGE_SEIT_UND_ANZAHL
+    zahlen: >
+      Δ Sharpe -0.005 (Baseline 0.558 → 0.554, OOS 2019-2026). z_days_
+      since_13d + z_13d_count_252d (4.566 Symbole Abdeckung, breiter als
+      INSIDER_TRANSAKTIONEN) bringen praktisch nichts — anders als dort
+      (-0.039) auch nicht negativ, nur neutral unter der Schwelle.
+    ursache: REDUNDANT
+    lehre: >
+      Vierter Feature-Block-Versuch in Folge ohne Erfolg (nach FINRA_SHORT_
+      VOLUME, FRED_REGIME_INTERAKTIONEN, INSIDER_TRANSAKTIONEN) — auch
+      obwohl das zugrundeliegende Event selbst (Familie ACT13D) einen
+      robusten, hoch signifikanten Effekt zeigt (t bis -8.06 nach R9-
+      Korrektur). Ein Baummodell mit 36 bestehenden Features scheint
+      bereits zu sättigen, was aus täglichen Cross-Sektions-Daten
+      herausholbar ist — zusätzliche SPARSE Event-Features (nur an
+      wenigen Tagen pro Symbol von Null verschieden) tragen nicht genug
+      Dichte bei, um im Gesamtmodell durchzudringen. Deutet darauf hin,
+      dass der wertvollere Weg NEUE eigenständige Sleeves sind (wie
+      MERGARB), nicht das Anreichern von XSR mit weiteren Event-Feldern.
   - name: FINRA_SHORT_VOLUME
     zahlen: "Δ Sharpe -0.059 gegen die 36-Feature-Baseline"
     ursache: REDUNDANT
