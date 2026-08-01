@@ -27,6 +27,15 @@ MAX_HORIZON_DAYS = 270
 BREAK_DRIFT_PCT = 0.15   # Abweichung vom letzten Preis, ab der ein noch
                          # offener, über-den-Horizont-hinaus laufender Deal
                          # als gebrochen gilt statt als weiter offen
+CLIP_DAILY_RETURN = 0.50   # Einzeltitel-Tagesbewegungen jenseits dessen sind
+                            # praktisch immer Datenartefakte (falscher Tick,
+                            # Ticker-Wiederverwendung mitten in der Serie —
+                            # s. ATTO im Task-3-Report), nicht reale Merger-
+                            # Arb-Ökonomie (ein echtes Bruch-Gap liegt bei
+                            # -30% bis -40%, nie bei mehreren hundert Prozent).
+                            # Gleiches Prinzip wie SHARPE_CAP in
+                            # discovery.combined_sharpe: ein einzelner
+                            # Extremwert soll das Aggregat nicht dominieren.
 IMPLAUSIBLE_SPREAD_PCT = 2.0   # >200% Spread zwischen deal_price_cash und
                                 # announce_px ist für einen echten Merger-Arb-
                                 # Deal praktisch ausgeschlossen (reale Spreads
@@ -182,6 +191,7 @@ def returns(**params) -> pd.Series:
                                  closed["announce_date"].min())
     by_sym = {s: g.set_index("date")["px"] for s, g in prices.groupby("symbol")}
     per_deal = []
+    per_deal_symbols = []
     for _, d in closed.iterrows():
         px = by_sym.get(d["symbol"])
         if px is None or pd.isna(d["terminal_date"]):
@@ -189,8 +199,25 @@ def returns(**params) -> pd.Series:
         r = deal_return_series(d["announce_date"], d["terminal_date"], px)
         if len(r):
             per_deal.append(r)
+            per_deal_symbols.append(d["symbol"])
     if not per_deal:
         return pd.Series(dtype=float)
+    # Verteidigungs-Deckel: eine Einzeltitel-Tagesrendite jenseits von
+    # CLIP_DAILY_RETURN ist so gut wie nie reale Merger-Arb-Ökonomie, sondern
+    # ein Datenartefakt (falscher eod_bars-Tick oder Ticker-Wiederverwendung
+    # mitten in der Serie). Wird gekappt statt das Aggregat zu dominieren —
+    # gleiches Prinzip wie SHARPE_CAP in discovery.combined_sharpe.
+    n_clipped = 0
+    clipped_symbols = set()
+    for i, s in enumerate(per_deal):
+        over = s.abs() > CLIP_DAILY_RETURN
+        if over.any():
+            n_clipped += int(over.sum())
+            clipped_symbols.add(per_deal_symbols[i])
+            per_deal[i] = s.clip(-CLIP_DAILY_RETURN, CLIP_DAILY_RETURN)
+    if n_clipped:
+        print(f"{n_clipped} Tagesrenditen über ±{CLIP_DAILY_RETURN:.0%} "
+              f"gekappt (Datenartefakte): {sorted(clipped_symbols)}")
     wide = pd.concat(per_deal, axis=1)
     return wide.mean(axis=1, skipna=True).dropna()
 
