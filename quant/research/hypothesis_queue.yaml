@@ -124,7 +124,17 @@ kandidaten:
   # ── NÄCHSTER KANDIDAT nach R8 ───────────────────────────────────────────────
   - id: MERGARB
     familie: MERGARB
-    status: offen
+    # ABSICHTLICH NICHT "offen": discovery.run() filtert auf
+    # str(status).startswith("offen"), d.h. jeder andere Wert haelt den
+    # Kandidaten aus dem Sonntags-Discovery-Lauf heraus. Solange
+    # mergarb_study.py nicht existierte, scheiterte der Lauf harmlos an
+    # "Impl nicht ladbar"; seit Phase 1 wuerde er die Gates G0-G8 wirklich
+    # durchlaufen — der Plan
+    # (docs/superpowers/plans/2026-07-30-weg-zu-50-cagr-phase1.md) hat das
+    # aber explizit als Phase 2 verortet. Der Kandidat ist NICHT kaputt; die
+    # Freigabe soll eine bewusste Entscheidung sein, kein Nebeneffekt eines
+    # alten Queue-Eintrags. Zum Freischalten: wieder auf "offen" setzen.
+    status: in_ueberarbeitung_phase1_c1_c2
     sleeve_name: mergarb
     beschreibung: Merger-Arbitrage — Long-Ziel angekündigter Übernahmen bis zum Closing
     mechanismus: >
@@ -165,6 +175,19 @@ kandidaten:
     tags: [event, dealrisk]
     holdout_start: "2020-01-01"
     kosten_bp_pro_trade: 10.0
+    notes: >
+      BRUTTO, NICHT NETTO: mergarb_study.returns() modelliert weder Spread/
+      Slippage noch Leihkosten noch Steuern — es sind rohe Kursrenditen des
+      Ziels von der Ankündigung bis zum Terminaldatum. Weil kein
+      brutto_bp_pro_trade hinterlegt ist, druckt der G2-Screen in
+      discovery.py "(Kosten im Backtest enthalten)" — das stimmt hier NICHT.
+      Ein brutto_bp_pro_trade wird bewusst nicht geraten, sondern erst
+      eingetragen, wenn die Kante pro Trade gemessen ist (Phase 2). Bei 1-6
+      Monaten Haltedauer ist der Kosteneinfluss klein, aber nicht null.
+      Weitere offengelegte Näherungen in returns(): Terminaldatum per
+      Delisting-Proxy (kein 8-K-Terminierungsscan), Plausibilitätsband
+      [-5%,+25%] auf den Ankündigungsspread gegen Akquisiteur-Zeilen,
+      ±50%-Deckel auf Tagesrenditen.
     r9_benchmark: >
       Größen-/Liquiditätsdezil-bereinigt, NICHT gegen SPY — sonst wiederholt
       sich der ACT13D-Fehler (scheinbares -15.6%-Alpha, das der

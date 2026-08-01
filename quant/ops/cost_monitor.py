@@ -269,6 +269,14 @@ def check(days: int = 5, alert: bool = True):
     print(f"{'Sleeve':8s} {'Fills':>6s} {'Füllquote':>10s} "
           f"{'Slippage(>=500$)':>17s} {'n_rel':>6s}")
     alarms = []
+    # Gesamtwert über alle Sleeves — exakt dieselbe Rechnung wie in der
+    # Sleeve-Schleife unten (notional-gewichtete Slippage über Fills
+    # >= MIN_NOTIONAL_FOR_SLIPPAGE), nur ohne Gruppierung. Wird für die
+    # "alles-OK"-Telegram-Meldung gebraucht.
+    rel_all = hist[hist["notional"] >= MIN_NOTIONAL_FOR_SLIPPAGE]
+    total = (float(np.average(rel_all["slippage_bps"],
+                              weights=rel_all["notional"]))
+             if len(rel_all) else float("nan"))
     for sl, g in hist.groupby("sleeve"):
         fr = g["qty"].sum() / max(g["qty_ordered"].sum(), 1)
         rel = g[g["notional"] >= MIN_NOTIONAL_FOR_SLIPPAGE]
@@ -297,7 +305,9 @@ def check(days: int = 5, alert: bool = True):
         if alarms:
             notify("⚠️ Fill-Kosten über G10-Limit: " + " | ".join(alarms))
         else:
-            notify(f"Fill-Kosten OK: {total:.1f}bp effektiv "
+            ttxt = (f"{total:.1f}bp effektiv" if not np.isnan(total)
+                    else f"kein Fill >= {MIN_NOTIONAL_FOR_SLIPPAGE:.0f}$")
+            notify(f"Fill-Kosten OK: {ttxt} "
                    f"(Modell {COST_MODEL_BPS:.0f}bp, {len(hist)} Fills)")
 
 

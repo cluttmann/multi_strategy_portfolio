@@ -82,6 +82,16 @@ def simulate(otm_short: float = OTM_SHORT, width: float = WIDTH,
     for u in UNDERLYINGS:
         px = alpaca_daily(u, "2024-02-01")["c"]
         px.index = pd.to_datetime(px.index)
+        # VIX ERST auf den Kurskalender ausrichten, DANN forward-fillen.
+        # Die Vorversion rechnete `vix.reindex([d]).ffill()` — eine
+        # Ein-Element-Reihe hat keinen Vorgänger, aus dem gefüllt werden
+        # könnte, ffill() ist dort per Definition wirkungslos. Fehlte ein
+        # Montag in der FRED-Reihe (Feiertag/Datenlücke), kam still NaN
+        # heraus, und `NaN >= 25` ist False — der VIX-Filter liess die Woche
+        # also klammheimlich durch, statt sie zu sperren. Genau die Sorte
+        # stiller Fail-open, die die Margin-Gates im ETF-Bot verbieten.
+        vix_al = (vix.reindex(vix.index.union(px.index)).ffill()
+                     .reindex(px.index))
         mondays = [d for d in px.index if d.weekday() == 0]
         for d in mondays:
             spot = px[d]
@@ -90,7 +100,7 @@ def simulate(otm_short: float = OTM_SHORT, width: float = WIDTH,
                 expiry += pd.Timedelta(days=7)
             if expiry not in px.index:
                 continue
-            v = vix.reindex([d]).ffill().iloc[-1]
+            v = vix_al.loc[d]
             if vix_filter and v >= 25:
                 continue
             k_short = round(spot * (1 - otm_short))
@@ -120,7 +130,18 @@ def run_all_variants():
     trials_registry protokolliert, BEVOR irgendeine für die Beförderung
     ausgewählt wird. Das ist die Lektion aus dem G5-Vorfall (XSR sprang
     zwischen DSR 0.996/0.611, je nachdem ob der Modell-Zoo mitzählte, weil
-    das Variantenraster nicht vorher fixiert war)."""
+    das Variantenraster nicht vorher fixiert war).
+
+    ZUM PROTOKOLLIERTEN cagr_net = -1.0 bei JEDER Variante: das ist ein
+    Artefakt der Aufzins-Formel in trials_registry.log_trial
+    (`(1 + r).cumprod().iloc[-1] ** (ann / len(r)) - 1`), keine Messung. Die
+    Renditeserie ist `ret_on_risk` je Woche, und eine einzige Woche mit
+    -100% (ein Spread, der voll ins Maximum läuft — bei einem
+    defined-risk-Short-Put strukturell normal) setzt das Kumulativprodukt
+    dauerhaft auf 0 und damit CAGR auf exakt -1.0, egal was danach passiert.
+    Aussagekräftig sind hier `sharpe_net`/`dsr`; die CAGR-Spalte darf für
+    OPTPREM nicht gelesen werden, solange die Serie nicht als tatsächliche
+    Kontorendite (Positionsgröße × ret_on_risk) reskaliert ist."""
     from quant.research.trials_registry import log_trial
     logged = []
     for otm in OTM_GRID:
