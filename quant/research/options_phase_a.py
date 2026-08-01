@@ -1,6 +1,7 @@
 """Options Phase-A — systematic defined-risk premium selling (SPY/QQQ).
 
     python3 -m quant.research.options_phase_a --run
+    python3 -m quant.research.options_phase_a --variants
 
 The last untested instrument class. Data reality: Alpaca options BARS and
 TRADES exist since 2024-02 (~2.4y); QUOTES/greeks history does not exist
@@ -73,7 +74,7 @@ def weekly_returns(df: pd.DataFrame) -> pd.Series:
 
 
 def simulate(otm_short: float = OTM_SHORT, width: float = WIDTH,
-            vix_filter: bool = False) -> pd.DataFrame:
+             vix_filter: bool = False) -> pd.DataFrame:
     """Reine Backtest-Funktion für EINE Variante — liefert die Wochenzeilen,
     schreibt nichts. `run_all_variants()` und `run()` sind die I/O-Wrapper."""
     vix = fred("VIXCLS", start="2024-01-01")
@@ -139,8 +140,9 @@ def run_all_variants():
 
 
 def run():
-    """Unveränderter Einzellauf mit den bisherigen Default-Parametern —
-    behält die ursprüngliche `--run`-Semantik für Ad-hoc-Checks."""
+    """Einzellauf mit den Default-Parametern (VIX-Filter aus) — reduzierter
+    Report ggü. der Vorversion (VIX-Blöcke, worst-months-Analyse entfallen),
+    siehe run_all_variants() für den vollständigen vorregistrierten Sweep."""
     df = simulate(OTM_SHORT, WIDTH, vix_filter=False)
     if df.empty:
         print("no fills — options bar data too sparse for these strikes")
