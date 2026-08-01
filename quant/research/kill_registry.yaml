@@ -162,6 +162,36 @@ familien:
       Teil einer Iron-Condor- oder Ratio-Struktur), sonst wiederholt sich
       dasselbe Muster.
 
+  - name: BAB
+    beschreibung: Betting Against Beta (Frazzini/Pedersen JFE 2014), long Low-Beta short High-Beta
+    todesursache: [MECHANISMUS_WIDERLEGT]
+    zahlen: >
+      Alle 3 vorregistrierten Haltedauern (21/42/63T) negativ: Sharpe
+      -0.41/-0.43/-0.46. Holdout 2020-2026 Sharpe -0.42 (CAGR -30.4%,
+      MaxDD -95.6%), 2022+ Sharpe -0.32. Vorhersage (a) WIDERLEGT: keine
+      Monotonie über Beta-Dezile, sondern ein U — Dezil 0 (niedrigstes
+      Beta) UND Dezil 9 (höchstes Beta) haben beide hohe Renditen
+      (+97%/+47% annualisiert), die mittleren Dezile fallen durch (~+12-14%).
+      Vorhersage (c) WIDERLEGT: bei strafferen Finanzbedingungen (NFCI>0,
+      der behauptete Belastungskanal) ist die Performance SCHLECHTER
+      (Sharpe -1.10) statt besser wie vom Mechanismus verlangt. ρ zu allen
+      Live-Sleeves ≈0 (das R5-Redundanzrisiko mit XSRs z_beta_63d-Feature
+      hat sich nicht bestätigt) — rettet aber nichts bei widerlegtem
+      Mechanismus. Nachrichtlich: eine rein diagnostische, echt
+      beta-neutrale (statt nur dollar-neutrale) Konstruktion ergab Sharpe
+      +0.23 — nicht Teil der getesteten/promotable Implementierung, aber
+      ein Hinweis, dass die dollar-neutrale Standardkonstruktion selbst das
+      Problem sein könnte, nicht zwingend der gesamte Mechanismus.
+    lehre: >
+      Ein U-förmiges statt monotones Dezil-Profil ist ein härterer
+      Widerlegungsbeweis als ein einfach flaches — es zeigt, dass BEIDE
+      Extreme (nicht nur Hochbeta) eine Prämie tragen, was für einen reinen
+      Beta-Bilanzrestriktions-Mechanismus nicht passt. Bevor ein zweiter
+      Anlauf mit echter Beta-Neutralisierung (statt Dollar-Neutralität)
+      gerechtfertigt ist, bräuchte es eine neue, eigene Vorregistrierung —
+      kein Nachbessern derselben Versuchsreihe (sonst DSR-Verletzung wie
+      beim ursprünglichen G5-Vorfall).
+
 verworfene_feature_bloecke:
   - name: FINRA_SHORT_VOLUME
     zahlen: "Δ Sharpe -0.059 gegen die 36-Feature-Baseline"

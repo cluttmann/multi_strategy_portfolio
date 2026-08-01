@@ -92,7 +92,7 @@ kandidaten:
   # verbrauchen, das die Arithmetik vorab kennt.
   - id: BAB
     familie: BAB
-    status: zurückgestellt_R8
+    status: verworfen_R2_2026-08-01   # siehe kill_registry.yaml + trials #70-72
     sleeve_name: bab
     beschreibung: Betting Against Beta — long Low-Beta, short High-Beta
     mechanismus: >
