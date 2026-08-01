@@ -223,6 +223,24 @@ verworfene_feature_bloecke:
   - name: FRED_REGIME_INTERAKTIONEN
     zahlen: "Δ Sharpe +0.011 (unter dem +0.02-Kriterium)"
     ursache: REDUNDANT
+  - name: INSIDER_TRANSAKTIONEN
+    zahlen: >
+      Δ Sharpe -0.039 (Baseline 0.558 → 0.519, OOS 2019-2026, net@5bp,
+      k=5). z_insider_net_63d + z_insider_buyers_63d (63-Tage-Netto-
+      Käufe/-Käuferzahl aus SEC Form 4, cross-sektional gezscored)
+      verschlechtern das Modell statt es zu verbessern.
+    ursache: REDUNDANT
+    lehre: >
+      Nur 395 von ~1500 Namen hatten überhaupt Insider-Daten (Rest = 0,
+      neutral) — das Signal trägt nur für eine Minderheit des Universums
+      etwas bei, was das Modell verwässert statt hilft. Naive Netto-
+      USD-Konstruktion lässt sich leicht von einzelnen großen Routine-
+      Verkäufen (10b5-1-Pläne) dominieren, die kein Informationssignal
+      sind. Ein zweiter Versuch müsste (a) die Käufer-ZAHL statt des
+      USD-Volumens gewichten (Cluster-Käufe sind das robustere Signal,
+      Lakonishok/Lee 1998) und (b) auf ein 6-12-Monats-Fenster statt
+      63 Tage gehen — wäre aber eine NEUE Hypothese mit eigenem
+      Versuchszähler, kein Nachbessern dieser Zahl.
 
 # ── SUCHREGELN, die aus den Kills folgen (bindend für den Generator) ──────────
 suchregeln:
