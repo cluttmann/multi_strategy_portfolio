@@ -48,17 +48,44 @@ IMPLAUSIBLE_SPREAD_PCT = 2.0   # >200% Spread zwischen deal_price_cash und
                                 # ARJ/LZR — s. Task-3-Report), nicht auf einen
                                 # echten Deal. Wird hier verworfen statt still
                                 # die Sharpe zu verzerren.
+PLAUSIBLE_SPREAD_BAND = (-0.05, 0.25)
+# Zweite, engere Plausibilitätsstufe über IMPLAUSIBLE_SPREAD_PCT hinaus
+# (Review-Fund C2): EDGAR indexiert ein gemeinsames 425/DEFM14A unter BEIDEN
+# Parteien-CIKs mit derselben Accession, und collect() behält beide Zeilen
+# bewusst (sonst ginge der delistete Ziel-Ticker verloren, s. dortiger
+# Kommentar). Folge: der KÄUFER landet mit dem Cash-Preis des ZIELS in
+# quant.merger_deals — ökonomisch bedeutungslos für sein eigenes Papier
+# (bestätigt: CSCO mit WebEx' $57.00, LLY mit ImClones $70.00, dazu PFE/VZ).
+# Erkennbar am Spread: ein NEGATIVER Spread (Angebotspreis unter Marktpreis)
+# ist bei einer echten Merger-Arb-Longposition definitorisch unmöglich, und
+# reale Spreads bei Ankündigung liegen praktisch immer unter +25%. Die
+# saubere Lösung wäre Ziel/Käufer-Disambiguierung im Ingester — Phase 2,
+# bewusst nicht hier. Bis dahin: Band-Filter statt stiller Verzerrung.
 
 
 def resolve_terminal_date(prices: pd.Series, announce_date,
-                          max_horizon_days: int = MAX_HORIZON_DAYS
+                          max_horizon_days: int = MAX_HORIZON_DAYS,
+                          deal_price_cash: float | None = None
                           ) -> tuple[pd.Timestamp | None, str]:
     """prices: tägliche Kursreihe des Ziels AB dem Ankündigungstag (Index =
     Handelstage, wie sie in eod_bars vorliegen — kein künstliches Auffüllen).
     Liefert (Terminaldatum, Status) mit Status ∈ {closed, break, open,
     no_data}. no_data: die Kursreihe hat keine Beobachtung nahe dem
     Ankündigungstag (typischerweise Ticker-Wiederverwendung in eod_bars,
-    nicht ein tatsächlich offener Deal) — siehe Plausibilitäts-Gate unten."""
+    nicht ein tatsächlich offener Deal) — siehe Plausibilitäts-Gate unten.
+
+    deal_price_cash: der Angebotspreis. Wird für die Bruch-Erkennung
+    gebraucht — "gebrochen" heißt laut Modul-Docstring und Design-Spec, dass
+    der Kurs vom ANGEBOTSPREIS abgedriftet ist (ein noch laufender Deal
+    handelt nahe am Angebot, ein geplatzter fällt auf sein Stand-alone-Niveau
+    zurück). Die Vorversion maß stattdessen die Drift gegen den Kurs AM
+    Horizontende und benutzte deal_price_cash gar nicht — das erkennt einen
+    Bruch nur, wenn er NACH dem Horizontende passiert, und übersieht jeden
+    Deal, der schon innerhalb des Horizonts geplatzt ist und danach flach
+    auf dem tieferen Niveau weiterhandelt (Review-Fund I8). Ohne
+    deal_price_cash (None/NaN/<=0) fällt die Funktion auf das alte
+    Horizontende-Verhalten zurück, damit sie ohne Deal-Terms testbar
+    bleibt."""
     prices = prices.dropna().sort_index()
     ann = pd.Timestamp(announce_date)
     if prices.empty:
@@ -92,7 +119,10 @@ def resolve_terminal_date(prices: pd.Series, announce_date,
     tail = prices.loc[ann:horizon_end]
     if tail.empty:
         return None, "open"
-    drift = abs(prices.iloc[-1] / tail.iloc[-1] - 1)
+    ref = (float(deal_price_cash)
+           if deal_price_cash is not None and pd.notna(deal_price_cash)
+           and float(deal_price_cash) > 0 else float(tail.iloc[-1]))
+    drift = abs(prices.iloc[-1] / ref - 1)
     if drift > BREAK_DRIFT_PCT:
         return horizon_end, "break"
     return None, "open"
@@ -153,25 +183,62 @@ def _resolved_deals() -> pd.DataFrame:
         return pd.DataFrame()
     by_sym = {s: g.set_index("date")["px"] for s, g in prices.groupby("symbol")}
     rows = []
+    n_no_px, no_px_syms = 0, set()
     for _, d in deals.iterrows():
         px = by_sym.get(d["symbol"])
         if px is None:
+            # eod_bars kennt das Symbol im gesamten Abfragefenster nicht.
+            # Wird wie jeder andere Filter hier gezählt und offengelegt statt
+            # still zu verschwinden (Review-Fund I6).
+            n_no_px += 1
+            no_px_syms.add(d["symbol"])
             continue
-        term, status = resolve_terminal_date(px, d["announce_date"])
+        term, status = resolve_terminal_date(
+            px, d["announce_date"], deal_price_cash=d["deal_price_cash"])
+        after = px.loc[pd.Timestamp(d["announce_date"]):]
+        announce_px = float(after.iloc[0]) if len(after) else np.nan
+        # REALISIERTE Rendite über die tatsächliche Haltedauer (Ankündigung →
+        # Terminaldatum), aus derselben Kursreihe und mit demselben
+        # ±CLIP_DAILY_RETURN-Deckel wie returns() — nicht aus der
+        # Angebotspreis-Formel. Die Vorversion rechnete in
+        # check_predictions() sowohl "spread" ALS AUCH "holding_ret" aus
+        # deal_price_cash/announce_px-1; der Monotonietest verglich damit
+        # eine Größe mit sich selbst und war eine Tautologie (Review-Fund
+        # C1). NaN für noch offene Deals — die haben keine Haltedauer.
+        realized = np.nan
+        if term is not None and status in ("closed", "break"):
+            r = deal_return_series(d["announce_date"], term, px)
+            if len(r):
+                realized = float(
+                    (1 + r.clip(-CLIP_DAILY_RETURN, CLIP_DAILY_RETURN))
+                    .prod() - 1)
         rows.append({**d.to_dict(), "terminal_date": term, "status": status,
-                     "announce_px": px.loc[pd.Timestamp(d["announce_date"]):]
-                                      .iloc[0] if len(px.loc[pd.Timestamp(
-                                          d["announce_date"]):]) else np.nan})
+                     "announce_px": announce_px, "realized_ret": realized})
+    if n_no_px:
+        print(f"{n_no_px} Deals ohne eod_bars-Kursdeckung verworfen "
+              f"({len(no_px_syms)} Symbole)")
     out = pd.DataFrame(rows)
     if out.empty:
         return out
-    spread = (out["deal_price_cash"] / out["announce_px"] - 1).abs()
-    implausible = spread > IMPLAUSIBLE_SPREAD_PCT
+    signed = out["deal_price_cash"] / out["announce_px"] - 1
+    implausible = signed.abs() > IMPLAUSIBLE_SPREAD_PCT
     if implausible.any():
         n = int(implausible.sum())
         syms = sorted(out.loc[implausible, "symbol"].unique().tolist())
         print(f"{n} Deals mit unplausiblem Spread (>200%) verworfen: {syms}")
         out = out[~implausible].reset_index(drop=True)
+        signed = signed[~implausible].reset_index(drop=True)
+    lo, hi = PLAUSIBLE_SPREAD_BAND
+    off_band = ~signed.between(lo, hi)   # NaN-Spreads fallen hier mit heraus
+    if off_band.any():
+        n = int(off_band.sum())
+        n_neg = int((signed < lo).sum())
+        syms = sorted(out.loc[off_band, "symbol"].unique().tolist())
+        print(f"{n} Deals mit Spread außerhalb [{lo:.0%},{hi:.0%}] verworfen "
+              f"({n_neg} davon negativ) — Akquisiteur-Zeilen mit dem "
+              f"Cash-Preis des Ziels bzw. Ticker-Fehlauflösung: "
+              f"{len(syms)} Symbole, z.B. {syms[:15]}")
+        out = out[~off_band].reset_index(drop=True)
     return out
 
 
@@ -223,16 +290,27 @@ def returns(**params) -> pd.Series:
 
 
 def live_weights() -> tuple[dict, str]:
-    """G8-Entry-Point: aktuell offene Cash-Deals, gleichgewichtet, gross<=1.0."""
+    """G8-Entry-Point: aktuell offene Cash-Deals, gleichgewichtet, gross<=1.0.
+
+    Aktualitäts-Gate (Review-Fund I7): "offen" allein reicht nicht — rund die
+    Hälfte der so klassifizierten Deals wurde vor Jahren angekündigt (ältester
+    Fall 2007) und fällt nur wegen Lücken in der Auflösungskette durch. Ein
+    Deal, der schon länger als sein eigener plausibler Horizont läuft, ist
+    keine handelbare Live-Position, sondern ein Datenartefakt. Fail-closed
+    wie die Margin-Gates im ETF-Bot: im Zweifel keine Position."""
     resolved = _resolved_deals()
     if resolved.empty:
         return {}, "keine Deal-Daten (fail-closed)"
-    open_deals = resolved[resolved["status"] == "open"]
+    cutoff = (pd.Timestamp.today().normalize()
+              - pd.Timedelta(days=MAX_HORIZON_DAYS))
+    ann = pd.to_datetime(resolved["announce_date"])
+    open_deals = resolved[(resolved["status"] == "open") & (ann >= cutoff)]
     if open_deals.empty:
         return {}, "kein offener Cash-Deal → flat"
     w = 1.0 / len(open_deals)
     weights = {s: w for s in open_deals["symbol"].unique()}
-    return weights, f"{len(weights)} offene Cash-Deals, EW"
+    return (weights, f"{len(weights)} offene Cash-Deals (Ankündigung jünger "
+                     f"als {MAX_HORIZON_DAYS}d), EW")
 
 
 def check_predictions() -> dict:
@@ -240,22 +318,31 @@ def check_predictions() -> dict:
     (id: MERGARB). (b) Cash>Aktientausch ist in Phase 1 NICHT prüfbar (keine
     Aktientausch-Preisextraktion) — wird als 'nicht_pruefbar' ausgewiesen,
     nicht stillschweigend übersprungen."""
-    resolved = _resolved_deals()
     out = {"a_monotonie": None, "b_cash_vs_stock": "nicht_pruefbar_phase1",
           "c_vix_bruchrate": None}
+    resolved = _resolved_deals()
+    if resolved.empty:
+        return out
     closed = resolved[resolved["status"].isin(["closed", "break"])].copy()
     if len(closed) >= 5:
         closed["spread"] = (closed["deal_price_cash"] / closed["announce_px"]
                             - 1)
-        closed["holding_ret"] = np.where(
-            closed["status"] == "closed",
-            closed["deal_price_cash"] / closed["announce_px"] - 1, np.nan)
-        closed["decile"] = pd.qcut(closed["spread"], min(5, closed["spread"]
-                                                          .nunique()),
-                                   duplicates="drop")
-        by_decile = closed.groupby("decile")["holding_ret"].mean()
-        out["a_monotonie"] = by_decile.to_dict()
-        out["a_monoton"] = bool(by_decile.is_monotonic_increasing)
+        # holding_ret = REALISIERTE Rendite über die tatsächliche Haltedauer
+        # (aus _resolved_deals, s. dort). Bruch-Deals bleiben drin: der Test
+        # fragt, ob ein höherer Ankündigungsspread im Mittel mehr Rendite
+        # BRINGT — die Brüche sind genau das Risiko, für das die Prämie
+        # bezahlt wird, sie herauszunehmen würde den Test schönen.
+        closed["holding_ret"] = closed["realized_ret"]
+        mono = closed.dropna(subset=["spread", "holding_ret"]).copy()
+        if len(mono) >= 5:
+            mono["decile"] = pd.qcut(mono["spread"],
+                                     min(5, mono["spread"].nunique()),
+                                     duplicates="drop")
+            by_decile = mono.groupby("decile",
+                                     observed=True)["holding_ret"].mean()
+            out["a_monotonie"] = by_decile.to_dict()
+            out["a_n"] = int(len(mono))
+            out["a_monoton"] = bool(by_decile.is_monotonic_increasing)
     if len(closed) >= 5:
         vix = fred("VIXCLS", start="2015-01-01")
         vix_at_announce = vix.reindex(pd.to_datetime(closed["announce_date"]),
@@ -272,9 +359,14 @@ def check_predictions() -> dict:
 
 def run():
     deals = load_deals(cash_only=False)
-    print(f"{len(deals):,} Deals in quant.merger_deals "
-          f"({(deals['consideration_type'] == 'cash').sum() if len(deals) else 0} "
-          "Cash)")
+    # Nutzbar = "hat einen extrahierten Cash-Preis", NICHT
+    # consideration_type=='cash' — letzteres unterzählt massiv (fast jeder
+    # echte Cash-Deal klassifiziert als "mixed", s. load_deals-Kommentar).
+    n_px = int(deals["deal_price_cash"].notna().sum()) if len(deals) else 0
+    n_cash = int((deals["consideration_type"] == "cash").sum()) if len(deals) else 0
+    print(f"{len(deals):,} Deals in quant.merger_deals — {n_px:,} mit "
+          f"extrahiertem Cash-Preis (nutzbar); nur {n_cash:,} tragen das "
+          "Label consideration_type='cash' (unzuverlässig)")
     r = returns()
     if r.empty:
         print("keine auswertbare Rendite-Serie (zu wenige resolved Deals)")
