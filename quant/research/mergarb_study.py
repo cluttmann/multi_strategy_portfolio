@@ -34,11 +34,23 @@ def resolve_terminal_date(prices: pd.Series, announce_date,
                           ) -> tuple[pd.Timestamp | None, str]:
     """prices: tägliche Kursreihe des Ziels AB dem Ankündigungstag (Index =
     Handelstage, wie sie in eod_bars vorliegen — kein künstliches Auffüllen).
-    Liefert (Terminaldatum, Status) mit Status ∈ {closed, break, open}."""
+    Liefert (Terminaldatum, Status) mit Status ∈ {closed, break, open,
+    no_data}. no_data: die Kursreihe hat keine Beobachtung nahe dem
+    Ankündigungstag (typischerweise Ticker-Wiederverwendung in eod_bars,
+    nicht ein tatsächlich offener Deal) — siehe Plausibilitäts-Gate unten."""
     prices = prices.dropna().sort_index()
+    ann = pd.Timestamp(announce_date)
     if prices.empty:
         return None, "open"
-    ann = pd.Timestamp(announce_date)
+    # Plausibilitäts-Gate: hat die Kursreihe überhaupt Beobachtungen nahe dem
+    # Ankündigungstag? Wenn nicht, deckt eod_bars den Deal-Zeitraum für dieses
+    # Symbol gar nicht ab — typischerweise Ticker-Wiederverwendung (das Symbol
+    # wurde später einer anderen, unabhängigen Firma zugewiesen) statt eines
+    # tatsächlich noch offenen Deals. Das ist ein eigener Status, kein "open".
+    near_announce = prices.loc[ann - pd.Timedelta(days=15):
+                                ann + pd.Timedelta(days=15)]
+    if near_announce.empty:
+        return None, "no_data"
     horizon_end = ann + pd.Timedelta(days=max_horizon_days)
     last_obs = prices.index[-1]
     # Symbol handelt nicht mehr, aber der allgemeine Handelskalender läuft
