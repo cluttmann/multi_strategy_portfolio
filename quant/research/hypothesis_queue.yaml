@@ -277,3 +277,52 @@ kandidaten:
       vorhergesagt (+0.07), aber DSR fällt in allen Varianten durch — 9
       Sektoren sind für eine Terzil-Analyse strukturell dünn, dieselbe
       Warnung wie bei FXCARRYs 6 Währungen.
+
+  - id: MERGARB_SWAP
+    familie: MERGARB_SWAP
+    status: zurückgestellt_stichprobe_2026-08-02   # siehe Notes — kein Kill, kein Pass
+    sleeve_name: mergarb_swap
+    beschreibung: MERGARB-Erweiterung — Aktientausch-Deals mit Käufer-Hedge (long Ziel/short Käufer)
+    mechanismus: >
+      Identisch zu MERGARB (Versicherungsprämie gegen Deal-Bruch-Risiko),
+      aber Dollar-neutral long Ziel/short Käufer statt long Ziel/Cash —
+      hedgt das Umtauschverhältnis-Risiko. Phase 2 aus der ursprünglichen
+      MERGARB-Spec ("Aktientauschangebote brauchen ein Hedge-Bein gegen
+      den Käufer").
+    quantitative_vorhersage: >
+      (a) Rendite skaliert mit dem Ankündigungsspread; (c) ρ zu
+      bestehenden Sleeves niedrig. (b, Cash>Aktientausch) entfällt hier —
+      wäre ein MERGARB-vs-MERGARB_SWAP-Vergleich, mit n=113 zu klein.
+    braucht_tabellen: [merger_deals, eod_bars]
+    braucht_neue_daten: >
+      Volle LLM-Extraktion von Käufername + Umtauschverhältnis aus
+      Freitext für alle ~2.900 Aktientausch-Deals (aktuell kein API-Key
+      konfiguriert) — würde die Stichprobe von 113 auf potenziell ~2.900
+      vergrößern und eine belastbare G5-Prüfung erst möglich machen.
+    implementierung: quant.research.mergarb_swap_study.returns
+    live_signal: quant.research.mergarb_swap_study.live_weights
+    params: {}
+    alloc: 0.10
+    freq: daily
+    tif: cls
+    tags: [event, dealrisk, mergarb-extension]
+    holdout_start: "2020-01-01"
+    liquiditaetstier_geprueft: false   # noch nicht geprüft, Stichprobe zu klein
+    kosten_bp_pro_trade: 10.0
+    notes: >
+      ZURÜCKGESTELLT, NICHT VERWORFEN: nur 113 Ziel+Käufer-Paare sind aus
+      der EDGAR-Gemeinsam-Filing-Mechanik eindeutig identifizierbar (von
+      ~2.900 Aktientausch-Deals) — Ziel/Käufer-Zuordnung per Heuristik
+      (höhere Ankündigungsrendite = Ziel), ein Datenartefakt (KOSN/BMY
+      +225%) gefunden und gefiltert. Mit vorregistriertem 3-Varianten-
+      Raster (window_days 3/5/10): Sharpe 0.65-0.89, Holdout 2020+ Sharpe
+      1.16, 2022+ Sharpe 1.06 — ΔS_p +0.150 (S_p 1.47→1.62), stärker als
+      jeder andere Kandidat außer MERGARB selbst. DSR 0.86-0.90 — NAH an
+      der 0.95-Schwelle, aber darunter. Innerhalb der 3 Varianten ist die
+      Glücksvarianz klein (SR* nur 0.03-0.04) — der Flaschenhals ist die
+      STICHPROBENGRÖSSE (n=563-720 Tage), nicht der Mechanismus. Anders
+      als die 6 in derselben Runde verworfenen Kandidaten (BAB, FXCARRY,
+      SECTORMOM, Insider-/13D-Feature, ACT13D) ist dies kein widerlegter
+      Mechanismus, sondern ein datenbegrenztes Ergebnis. Empfehlung: mit
+      echter LLM-Extraktion (API-Key nötig) die Stichprobe vergrößern,
+      dann G5 neu prüfen — kein neuer Sweep derselben 113 Paare.
