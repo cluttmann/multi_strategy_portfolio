@@ -76,3 +76,6 @@ quant/research/_13d_pilot.parquet
 
 # dito Merger-Pilot (merger_ingest.pilot() -> quant.merger_deals ist die Wahrheit)
 quant/research/_mergarb_pilot.parquet
+
+# dito Filing-Sentiment-Pilot (filing_text_ingest.pilot() -> quant.filing_mdna_sentiment ist die Wahrheit)
+quant/research/_filing_sentiment_pilot.parquet
