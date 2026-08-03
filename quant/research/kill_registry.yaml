@@ -302,6 +302,47 @@ verworfene_feature_bloecke:
       63 Tage gehen — wäre aber eine NEUE Hypothese mit eigenem
       Versuchszähler, kein Nachbessern dieser Zahl.
 
+verworfene_meta_labeling_ansaetze:
+  - name: ENSEMBLE_UNEINIGKEIT_ALS_CONFIDENCE_FILTER
+    zahlen: >
+      Δ Sharpe -0.712 (Baseline Ensemble-Mean 0.530 → confidence-gefiltertes
+      Buch -0.182, OOS 2019-2026, net@5bp, k=5). Rang-IC nach Uneinigkeits-
+      Quintil: 0.024/0.024/0.029/0.034/0.050 (Quintil 0 = niedrigste
+      Uneinigkeit, Quintil 4 = höchste) — MONOTON STEIGEND, nicht fallend
+      wie die Meta-Labeling-Hypothese vorhersagt.
+    ursache: MECHANISMUS_WIDERLEGT (Vorhersage invertiert)
+    lehre: >
+      Getestet: ob die Streuung von 5 unabhängig geseedeten LightGBM-
+      Rankern (gleiche Features, gleiche Folds) ein Meta-Signal für
+      Prädiktionsqualität ist (Lopez de Prado Meta-Labeling) — ein Test auf
+      Basis des EIGENEN Modells, nicht eines externen Datenblocks, gemäß
+      der Nutzer-Vorgabe "Methoden auf Basis unserer Machine-Learning-
+      Modelle finden". Ergebnis ist das GEGENTEIL der Erwartung: die
+      Namen, bei denen sich die 5 Modelle am UNEINIGSTEN sind, haben die
+      HÖCHSTE Rang-IC, nicht die niedrigste. ρ(Uneinigkeit, Liquidität)
+      war niedrig (+0.014) wie vorhergesagt — das rettet nichts, weil
+      Vorhersage (a) bereits invertiert durchfällt. Wahrscheinliche
+      Erklärung: hohe Ensemble-Uneinigkeit korreliert mit hoher Feature-
+      Extremität (Namen nahe den Rändern der Cross-Section), und genau
+      dort liegt die stärkste, nicht die schwächste Vorhersagekraft eines
+      Rang-Modells — Uneinigkeit misst hier "seltener/extremer Fall",
+      nicht "unsicherer Fall". Ein Confidence-Filter, der aus der
+      falschen Quintile herausfiltert, zerstört die Strategie fast
+      vollständig (0.53 → -0.18). Lehre: modellinterne Uneinigkeit ist
+      kein verlässlicher Confidence-Proxy in einem Cross-Sections-
+      Rangmodell mit dieser Feature-Geometrie.
+      NACHTEST (2026-08-03, derselbe OOS-Prädiktionssatz): das Spiegelbild
+      der Konstruktion — Uneinigkeits-TILT, behält die uneinigkeitsREICHSTE
+      Hälfte statt der ärmsten — hilft ebenfalls nicht: Sharpe 0.530 → 0.505
+      (Δ -0.026). Die Quintil-IC-Monotonie übersetzt sich in KEINE der
+      beiden Richtungen in eine ökonomisch nutzbare Universums-Filterung
+      für die bestehende Top/Bottom-N_SIDE=75-Konstruktion — vermutlich
+      weil die extremsten Score-Namen (die die Konstruktion ohnehin schon
+      wählt) und die uneinigkeitsreichsten Namen stark überlappen, sodass
+      das Filtern kaum etwas verändert außer zusätzlichem Turnover/Kosten.
+      Beide Richtungen sind damit abgeschlossen getestet — kein offener
+      Faden mehr für dieses Meta-Signal.
+
 # ── SUCHREGELN, die aus den Kills folgen (bindend für den Generator) ──────────
 suchregeln:
   - id: R1_KOSTEN
