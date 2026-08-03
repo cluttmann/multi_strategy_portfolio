@@ -982,18 +982,63 @@ def current_month_id(today=None):
     return today.strftime("%Y-%m")
 
 
-def mark_monthly_run_complete(env="live"):
-    """Record that the monthly orchestrator finished, so the watchdog can verify."""
+def mark_monthly_run_complete(env="live", clean=True):
+    """Record that the monthly orchestrator finished, so the watchdog can verify.
+
+    clean=False marks a run whose margin_result carried a data-fetch error
+    (FRED/Alpaca/SMA) — see should_run_monthly_orchestrator, which uses this
+    flag to allow a retry on the next trading day within the same month's
+    1-7 window instead of silently skipping the rest of the month. A run
+    that evaluated cleanly (clean=True), even to a legitimate $0 budget, is
+    never retried — only a failed EVALUATION gets another chance, never a
+    correctly-computed cash-only decision.
+    """
     try:
         month_id = current_month_id()
         get_firestore_client().collection(f"monthly-runs-{env}").document(month_id).set(
             {
                 "month_id": month_id,
                 "timestamp": datetime.datetime.utcnow(),
+                "clean": clean,
             }
         )
     except Exception as e:
         print(f"Warning: could not write monthly-runs marker: {e}")
+
+
+def should_run_monthly_orchestrator(env="live", today=None):
+    """Gate for the monthly orchestrator: today must be a NYSE trading day
+    within the first 7 calendar days of the month, AND this month must not
+    already have a CLEAN evaluation on record.
+
+    Unlike the plain check_trading_day(mode="monthly") gate (true only on the
+    single first trading day), this allows the scheduler's existing daily
+    1-7 firing window (see cloudbuild.yaml) to retry on day 2, 3, ... if the
+    prior attempt's margin_result carried a data-fetch error — e.g. the FRED
+    timeout on 2026-08-03 that zeroed total_investing for the entire month
+    with no chance to recover. The conservative fail-closed DECISION itself
+    is never bypassed or defaulted; this only gives that same strict check
+    another shot at fresh data on the next trading day. A month that already
+    had a clean evaluation (clean=True, regardless of the resulting budget —
+    including a legitimate $0 from a real cash-only regime) is never retried.
+
+    today: injectable for tests; defaults to the real current time.
+    """
+    today = today or datetime.datetime.now()
+    if today.day > 7:
+        return False
+    nyse = mcal.get_calendar("NYSE")
+    if nyse.schedule(start_date=today.date(), end_date=today.date()).empty:
+        return False
+    month_id = current_month_id(today)
+    try:
+        doc = get_firestore_client().collection(f"monthly-runs-{env}").document(month_id).get()
+    except Exception as e:
+        print(f"Warning: could not read monthly-runs marker, allowing attempt: {e}")
+        return True
+    if not doc.exists:
+        return True
+    return doc.to_dict().get("clean", True) is False
 
 
 def quarterly_run_complete(strategy, env="live"):
@@ -5646,10 +5691,21 @@ def monthly_invest_all_strategies(api, force_execute=False, skip_order_wait=Fals
     Returns:
         dict with results from all seven strategies
     """
-    if not force_execute and not check_trading_day(mode="monthly"):
-        print("Not first trading day of the month")
-        return {"error": "Not first trading day of the month"}
-    
+    if not force_execute and not should_run_monthly_orchestrator(env=env):
+        print("Not first trading day of the month, or this month already has a clean run")
+        return {"error": "Not first trading day of the month, or this month already has a clean run"}
+
+    # Was a prior attempt this month blocked by a data-fetch error? Surfaced in
+    # the Telegram message below so a retry is never confused with a fresh
+    # first-of-month run.
+    is_retry = False
+    try:
+        prior = (get_firestore_client().collection(f"monthly-runs-{env}")
+                 .document(current_month_id()).get())
+        is_retry = prior.exists and prior.to_dict().get("clean", True) is False
+    except Exception:
+        pass
+
     # Step 1: Sync cost basis from Alpaca to Firestore BEFORE executing trades
     # This ensures we start with accurate data
     print("=== Monthly Investment Orchestrator ===")
@@ -5700,6 +5756,8 @@ def monthly_invest_all_strategies(api, force_execute=False, skip_order_wait=Fals
     margin_decision = "🟢 Margin ON (+10%)" if margin_result.get("allowed", False) else "🔴 Cash-Only"
     
     account_msg = "📊 Monthly Investment — Account Status\n\n"
+    if is_retry:
+        account_msg += "🔁 Retry: prior attempt this month errored (data-fetch failure)\n\n"
     account_msg += f"SPX: ${spx_price:,.2f} (SMA: ${spx_sma:,.2f}) {trend_emoji}\n"
     account_msg += f"Margin rate: {margin_rate*100:.1f}% | Buffer: {buffer*100:.1f}% | Leverage: {leverage:.2f}x\n"
     account_msg += f"Decision: {margin_decision}\n\n"
@@ -5771,7 +5829,7 @@ def monthly_invest_all_strategies(api, force_execute=False, skip_order_wait=Fals
         summary_lines.append(f"{icon} {label}: {truncated}")
     send_telegram_message("\n".join(summary_lines))
 
-    mark_monthly_run_complete(env=env)
+    mark_monthly_run_complete(env=env, clean=not margin_result.get("errors"))
 
     return results
 
