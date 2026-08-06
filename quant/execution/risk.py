@@ -9,7 +9,41 @@ from quant.config import BOT_TICKERS
 from quant.execution import broker, ledger
 
 MAX_PER_NAME_FRAC = 0.10       # of account equity
-MAX_SLEEVE_GROSS = {"onx": 0.60}   # sleeve gross cap as fraction of equity
+
+# ── Sleeve-Deckel: RISIKO-basiert, nicht Dollar-basiert ──────────────────────
+# Bis 2026-08-06 galt ein pauschaler Dollar-Deckel von 0.25× Equity je Sleeve.
+# Der bestraft systematisch genau die Sleeves, die man am liebsten groß hätte:
+# ein Sleeve mit 5 % Vol trägt bei 0.25× Gross nur 1.25 % Vol bei und kann zur
+# Portfoliorendite fast nichts leisten, während ein Sleeve mit 20 % Vol beim
+# selben Dollar-Deckel 5 % Vol beisteuert. Gemessen (risk_budget_study.py,
+# volle Historien): DTRD 6.0 %, EOMT 5.2 %, MERGARB 12.1 %, XSR 10.0 % Vol je
+# 1× Gross. Ein Dollar-Deckel setzt damit vier völlig verschiedene
+# Risikogrenzen und nennt es eine Regel.
+# Jetzt: je Sleeve höchstens MAX_SLEEVE_VOL_CONTRIB annualisierte Vol. Der
+# zulässige Gross folgt daraus (cap = Budget / Vol_je_1x_Gross), ist also für
+# einen ruhigen Sleeve automatisch größer. Die Risikoparitäts-Zielgewichte
+# landen bei ~2.9-3.1 % je Sleeve, der Deckel bei 5 % lässt Puffer.
+MAX_SLEEVE_VOL_CONTRIB = 0.05
+
+# Annualisierte Vol je 1× Gross-Exposure. Quelle: risk_budget_study.py auf den
+# vollen Sleeve-Historien (Monatspanel 2002-2026). XSR ist auf sein INTERNES
+# Gross von 2.0 normiert (portfolio_sim.GROSS_LEVERAGE), damit der Deckel
+# Gross-Dollar begrenzt und nicht Signal-Einheiten.
+SLEEVE_VOL_PER_GROSS = {
+    "xsr": 0.100, "dtrd": 0.060, "eomt": 0.052, "mergarb": 0.121,
+    # ONX/VOLC sind pausiert; konservative Platzhalter, damit ein
+    # versehentlicher Lauf nicht am fehlenden Eintrag vorbei groß wird.
+    "onx": 0.350, "volc": 0.250,
+}
+# Fallback-Vol für unbekannte Sleeves: bewusst hoch, damit ein neuer Sleeve
+# ohne gemessene Vol klein anfängt statt unbemerkt groß zu werden.
+UNKNOWN_SLEEVE_VOL = 0.40
+
+
+def sleeve_gross_cap(sleeve: str) -> float:
+    """Zulässiges Gross (Bruchteil der Equity) für diesen Sleeve."""
+    vol = SLEEVE_VOL_PER_GROSS.get(sleeve.lower(), UNKNOWN_SLEEVE_VOL)
+    return MAX_SLEEVE_VOL_CONTRIB / max(vol, 1e-6)
 DD_HALVE = -0.08               # halve gross below this drawdown from HWM
 DD_FLAT = -0.12                # flat + halt below this
 
@@ -74,9 +108,12 @@ def check_order(symbol: str, notional: float, sleeve: str,
     if notional > MAX_PER_NAME_FRAC * equity:
         return False, (f"{symbol} notional {notional:.0f} exceeds "
                        f"{MAX_PER_NAME_FRAC:.0%} of equity")
-    cap = MAX_SLEEVE_GROSS.get(sleeve, 0.25)
+    cap = sleeve_gross_cap(sleeve)
     if sleeve_gross_after > cap * equity:
-        return False, f"sleeve {sleeve} gross would exceed {cap:.0%} of equity"
+        vol = SLEEVE_VOL_PER_GROSS.get(sleeve.lower(), UNKNOWN_SLEEVE_VOL)
+        return False, (f"sleeve {sleeve} gross would exceed {cap:.2f}x of "
+                       f"equity (Risikodeckel {MAX_SLEEVE_VOL_CONTRIB:.0%} Vol "
+                       f"bei {vol:.1%} Vol je 1x Gross)")
     if not reduces_exposure:
         try:
             total = account_gross() + _approved_notional + notional

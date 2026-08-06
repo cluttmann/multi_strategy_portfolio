@@ -103,14 +103,21 @@ REGISTRY: dict[str, SleeveSpec] = {
         name="volc", beschreibung="Short-Vol via SVXY, Gate VIX3M/VIX-Contango>3%",
         signal=_volc_signal, alloc=0.15, freq="daily",
         sharpe_full=0.64, sharpe_now=0.46, tags=["vol"]),
+    # RISIKOPARITÄT 2026-08-06 (risk_budget_study.py, volle Historien +
+    # Split-Sample): EOMT 0.20 → 0.59, DTRD 0.15 → 0.48. Beide sind
+    # Niedrig-Vol-Sleeves (5.2 % / 6.0 % Vol je 1x Gross) mit ÜBER dem
+    # Stack-Mittel liegender Sharpe (0.88 / 0.72). Bei 0.20x bzw. 0.15x trugen
+    # sie nur ~1 % Vol bei und konnten zur Portfoliorendite praktisch nichts
+    # leisten — genau der Fall "funktioniert nur mit Hebel". Die neuen Gewichte
+    # gleichen den Vol-Beitrag aller vier Sleeves auf ~2.9-3.1 % aus.
     "eomt": SleeveSpec(
         name="eomt", beschreibung="Monatsend-Duration-Ernte Treasury-ETFs",
-        signal=_eomt_signal, alloc=0.20, freq="daily",
+        signal=_eomt_signal, alloc=0.59, freq="daily",
         sharpe_full=0.87, sharpe_now=0.65, ann=12, tags=["rates", "flow"],
         notes="nur ~5 Tage/Monat im Markt → 80% der Tage kein Reg-T-Notional"),
     "dtrd": SleeveSpec(
         name="dtrd", beschreibung="Cross-Asset-TSMOM über 30 ETFs (ohne US-Aktien/Krypto)",
-        signal=_dtrd_signal, alloc=0.15, freq="monthly_first",
+        signal=_dtrd_signal, alloc=0.48, freq="monthly_first",
         sharpe_full=0.73, sharpe_now=0.43, tags=["trend", "crossasset"],
         notes="ρ(XSR)=-0.001; monatlich → kostenimmun"),
 }

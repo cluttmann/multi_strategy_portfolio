@@ -37,7 +37,16 @@ from quant.execution import broker, ledger, risk
 from quant.execution.telegram import notify
 
 SLEEVE = "xsr"
-SLEEVE_ALLOC = 0.40       # of equity, per side (gross 2x alloc)
+# RISIKOPARITÄT 2026-08-06 (risk_budget_study.py): 0.40 → 0.14 pro Seite.
+# XSR trug mit 0.80x Gross und 20.1 % Vol rund 46 % des Risikobudgets, bei der
+# NIEDRIGSTEN Sharpe der vier Sleeves (0.60 vs. DTRD 0.72 / EOMT 0.88 /
+# MERGARB 1.05) — und kostet pro Renditeeinheit doppelt so viel Bilanz wie die
+# anderen, weil seine Reihe auf 2x internem Gross läuft. Neues Gross 0.28x
+# (= 2 × 0.14) entspricht ~2.9 % Vol-Beitrag, gleichauf mit den anderen drei.
+# Split-Sample-belegt: OOS-Sharpe des Gesamtbuchs 0.55 → 1.14, MaxDD −18.6 %
+# → −6.9 %. Die Umgewichtung bringt kaum Zusatzrendite, sondern den
+# Risikopuffer, der den Hebel überhaupt tragbar macht.
+SLEEVE_ALLOC = 0.14       # of equity, per side (gross 2x alloc)
 TARGET_POS_USD = 400.0    # min sensible whole-share position
 
 # HALTEDAUER = 21 Tage, geändert 2026-07-25 nach der vorregistrierten Regel aus

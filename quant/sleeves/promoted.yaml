@@ -3,7 +3,14 @@ befoerdert:
 - name: mergarb
   beschreibung: Merger-Arbitrage — Long-Ziel angekündigter Übernahmen bis zum Closing
   live_signal: quant.research.mergarb_study.live_weights
-  alloc: 0.12
+  # RISIKOPARITÄT 2026-08-06 (risk_budget_study.py): 0.12 → 0.25. MERGARB hat
+  # die HÖCHSTE Sharpe der vier Sleeves (1.05) bei 12.1 % Vol je 1x Gross und
+  # war mit 0.12x deutlich unterallokiert (~1.5 % Vol-Beitrag). Neu ~3.0 %,
+  # gleichauf mit den anderen drei. WICHTIG: MERGARBs Sharpe ist ein Backtest
+  # mit offengelegten Näherungen (kein Spread/Slippage/Leihkosten modelliert) —
+  # es ist damit der empfindlichste Input dieser Umgewichtung. Sobald echte
+  # Live-Kosten je Trade gemessen sind, ist dieses Gewicht neu zu prüfen.
+  alloc: 0.25
   freq: daily
   tif: cls
   ann: 252
