@@ -20,6 +20,7 @@ orders reject fractional).
 """
 
 import argparse
+import datetime as dt
 import sys
 
 import numpy as np
@@ -59,8 +60,11 @@ def decide(dry_run: bool):
     equity = float(acct["equity"])
     scale = risk.drawdown_scale(equity) * burn
     budget = equity * SLEEVE_ALLOC * scale
+    # `stand` ist das Frische-Siegel, das enter() prüft — ohne es kann enter()
+    # einen Altplan nicht von einem heutigen unterscheiden (s. Kommentar dort).
     plan = {"picks": picks, "budget": round(budget, 2), "scale": scale,
-            "n_gated": len(gated), "burn_in": burn}
+            "n_gated": len(gated), "burn_in": burn,
+            "stand": str(dt.date.today())}
     print(f"plan: {plan}")
     if not dry_run:
         ledger.set_sleeve(SLEEVE, {**ledger.get_sleeve(SLEEVE), "plan": plan})
@@ -70,11 +74,27 @@ def decide(dry_run: bool):
 
 
 def enter(dry_run: bool):
+    # PAUSE-GATE — fehlte bis 2026-08-06 und war ein echter Kapitalfehler.
+    # decide() prüft die Pause, enter() prüfte sie NICHT. Folge: seit der
+    # ONX-Pause am 2026-07-25 hat decide() den Plan nie mehr aktualisiert,
+    # während enter() JEDEN Handelstag denselben veralteten plan.picks
+    # nachgekauft hat (LABU/UDOW/FAS/DPST/YINN/DFEN/DRN/CURE — 3x gehebelte
+    # Bull-ETFs). Zusammen mit dem reconcile()-Bug unten wuchs so eine
+    # unverwaltete Long-Position von ~25 % der Equity in einem PAUSIERTEN
+    # Sleeve. Ein pausierter Sleeve darf niemals neue Positionen eröffnen.
+    from quant.execution.guard import guard_or_exit
+    guard_or_exit(SLEEVE)
     state = ledger.get_sleeve(SLEEVE)
     plan = state.get("plan") or {}
     picks, budget = plan.get("picks") or [], float(plan.get("budget") or 0)
     if not picks or budget <= 0:
         notify("ONX enter: no plan/budget — standing down (fail-closed)")
+        return
+    # Ein Plan, den decide() heute nicht geschrieben hat, ist ein Altbestand.
+    # Auf veralteten Picks zu handeln ist schlimmer als nicht zu handeln.
+    if str(plan.get("stand") or "") != str(dt.date.today()):
+        notify(f"ONX enter: Plan ist nicht von heute "
+               f"(stand={plan.get('stand')!r}) — standing down (fail-closed)")
         return
     acct = broker.account()
     equity = float(acct["equity"])
@@ -117,6 +137,27 @@ def exit_(dry_run: bool):
             s = o["symbol"]
             if s in pos and pos[s] > 0:
                 held[s] = min(o["qty"], int(pos[s]))
+    # BROKER-WAHRHEIT als letzte Instanz (Fund 2026-08-06). Vorher galt: was
+    # das Ledger nicht kennt, wird nicht verkauft — und weil reconcile() den
+    # Positionsstand täglich auf {} überschrieb, blieben 8 ONX-Positionen
+    # (~25 % der Equity) dauerhaft unverkäuflich im Konto liegen. Ein
+    # Ausstiegspfad darf sich NIE allein auf eigene Buchführung verlassen:
+    # was der Broker in ONX-eigenen Symbolen hält, muss auch geschlossen
+    # werden können. Quelle der Symbolliste ist der letzte bekannte Plan
+    # plus das Ledger — kein Blankoscheck auf fremde Positionen.
+    owned = set(held) | set((state.get("plan") or {}).get("picks") or [])
+    try:
+        actual = broker.positions()
+    except Exception as e:  # noqa: BLE001 — ohne Broker-Wahrheit nicht raten
+        actual = {}
+        notify(f"ONX exit: Broker-Positionen nicht lesbar ({e})")
+    for s in owned:
+        q = int(actual.get(s, 0))
+        if q > 0 and q != int(held.get(s, 0)):
+            if s not in held:
+                notify(f"ONX exit: {s} x{q} beim Broker, aber nicht im "
+                       f"Ledger — wird trotzdem geschlossen (Drift)")
+            held[s] = q
     if not held:
         notify("ONX exit: nothing held")
         return
@@ -132,17 +173,29 @@ def exit_(dry_run: bool):
 
 
 def reconcile():
-    """After the close: record fills into the ledger as positions."""
+    """After the close: record fills into the ledger as positions.
+
+    KORRIGIERT 2026-08-06: die alte Version baute `positions` AUSSCHLIESSLICH
+    aus den HEUTIGEN Fills. An jedem Tag ohne ONX-Fill (also jedem Tag seit
+    der Pause am 2026-07-25) schrieb sie damit `positions: {}` und löschte den
+    Bestandsnachweis — worauf exit_() "nothing held" meldete und nie verkaufte.
+    Ergebnis: ~25 % der Equity in unverwalteten 3x-Bull-ETFs. Jetzt identisch
+    zum Muster in generic_sleeve.reconcile(): Bestand + heutige Fills, dann
+    gegen die Broker-Wahrheit validiert.
+    """
     state = ledger.get_sleeve(SLEEVE)
-    # Broker-Positionen sind die Wahrheit; Fill-Historie ordnet sie dem Sleeve zu
-    fills = broker.sleeve_fills_today(SLEEVE)
+    held = {s: int(q) for s, q in (state.get("positions") or {}).items()}
+    for s, q in broker.sleeve_fills_today(SLEEVE).items():
+        held[s] = held.get(s, 0) + int(q)
+    # Plan-Picks mitführen, damit ein zuvor verlorener Bestand wieder
+    # eingefangen wird statt für immer unsichtbar zu bleiben.
+    for s in (state.get("plan") or {}).get("picks") or []:
+        held.setdefault(s, 0)
     actual = broker.positions()
-    pos = {s: int(min(abs(q), abs(actual.get(s, 0)))) for s, q in fills.items()
-           if q > 0 and actual.get(s, 0) > 0}
+    pos = {s: int(actual[s]) for s in held
+           if int(actual.get(s, 0) or 0) > 0}
     ledger.set_sleeve(SLEEVE, {**state, "positions": pos})
-    drift = {s: q for s, q in fills.items()
-             if q > 0 and s not in pos}
-    notify(f"ONX reconcile: {pos}" + (f" | DRIFT {drift}" if drift else ""))
+    notify(f"ONX reconcile: {pos or 'flat'}")
 
 
 if __name__ == "__main__":
