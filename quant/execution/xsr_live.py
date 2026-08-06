@@ -25,6 +25,7 @@ was fuer HTB-Namen unrealistisch ist.
 """
 
 import argparse
+import datetime as dt
 import os
 import sys
 
@@ -184,8 +185,11 @@ def plan(dry_run: bool):
     # am ersten Tag volle Größe mit einem einzigen Signal aufzubauen.
     merged = {s: int(v / K_TRANCHE) for s, v in agg.items()
               if abs(v / K_TRANCHE) >= 1}
+    # `stand` ist das Frische-Siegel, das execute() prüft — siehe dort. Ohne
+    # es kann execute() einen Altplan nicht von einem heutigen unterscheiden.
     plan_doc = {"target": merged, "n_side": n_side, "scale": scale,
-                "equity": equity, "k": K_TRANCHE, "tranchen": len(tranches)}
+                "equity": equity, "k": K_TRANCHE, "tranchen": len(tranches),
+                "stand": str(pd.Timestamp.today().date())}
     print(f"plan: {len([q for q in merged.values() if q > 0])} long / "
           f"{len([q for q in merged.values() if q < 0])} short, "
           f"~${side_budget:,.0f}/side, {len(tranches)}/{K_TRANCHE} Tranchen")
@@ -198,10 +202,24 @@ def plan(dry_run: bool):
 
 
 def execute(dry_run: bool):
+    # PAUSE- UND FRISCHE-GATE. Analog zum ONX-Kapitalfehler vom 2026-08-06:
+    # dort prüfte decide() die Pause, enter() aber nicht — und kaufte deshalb
+    # nach der Pause täglich denselben veralteten Plan nach, bis 25 % der
+    # Equity in einem stillgelegten Sleeve steckten. XSR hat exakt dieselbe
+    # Aufteilung (plan() um 12:30 UTC gegated, execute() um 13:00 UTC war es
+    # nicht), also exakt dieselbe latente Lücke — hier präventiv geschlossen,
+    # bevor sie einmal zuschlägt.
+    from quant.execution.guard import guard_or_exit
+    guard_or_exit(SLEEVE)
     state = ledger.get_sleeve(SLEEVE)
-    target = (state.get("plan") or {}).get("target") or {}
+    plan = state.get("plan") or {}
+    target = plan.get("target") or {}
     if not target:
         notify("XSR execute: no plan — standing down (fail-closed)")
+        return
+    if str(plan.get("stand") or "") != str(dt.date.today()):
+        notify(f"XSR execute: Plan ist nicht von heute "
+               f"(stand={plan.get('stand')!r}) — standing down (fail-closed)")
         return
     acct = broker.account()
     equity = float(acct["equity"])
