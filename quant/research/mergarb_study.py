@@ -312,10 +312,27 @@ def live_weights() -> tuple[dict, str]:
     open_deals = resolved[(resolved["status"] == "open") & (ann >= cutoff)]
     if open_deals.empty:
         return {}, "kein offener Cash-Deal → flat"
-    w = 1.0 / len(open_deals)
-    weights = {s: w for s in open_deals["symbol"].unique()}
-    return (weights, f"{len(weights)} offene Cash-Deals (Ankündigung jünger "
-                     f"als {MAX_HORIZON_DAYS}d), EW")
+    # Ein Symbol je Deal, nicht je Zeile — zwei Filing-Zeilen für dasselbe
+    # Ziel dürfen nicht zu doppeltem Exposure UND (bei naiver 1/n_zeilen-
+    # Gewichtung) zu stillschweigend unterinvestiertem Restbudget führen.
+    symbols = list(open_deals["symbol"].unique())
+    # Broker-Wahrheit vor Order-Erzeugung, nicht danach: unser Terminaldatum
+    # ist ein Delisting-PROXY (Preishistorie), kein 8-K-Terminierungsscan —
+    # ein Deal kann real geschlossen/delisted sein, bevor unsere Auflösung es
+    # merkt. Gefunden 2026-08-06: FORA-Order abgelehnt ("asset not active"),
+    # weil der Broker es zuerst wusste.
+    from quant.execution.broker import tradable_symbols
+    tradable = tradable_symbols(symbols)
+    dropped = set(symbols) - tradable
+    if not tradable:
+        return {}, "alle offenen Deals broker-seitig inaktiv → flat"
+    w = 1.0 / len(tradable)
+    weights = {s: w for s in tradable}
+    note = (f"{len(weights)} offene Cash-Deals (Ankündigung jünger "
+            f"als {MAX_HORIZON_DAYS}d), EW")
+    if dropped:
+        note += f" — {sorted(dropped)} broker-inaktiv übersprungen"
+    return weights, note
 
 
 def check_predictions() -> dict:

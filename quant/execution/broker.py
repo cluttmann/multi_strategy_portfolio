@@ -27,6 +27,28 @@ def positions() -> dict[str, float]:
     return {p["symbol"]: float(p["qty"]) for p in r.json()}
 
 
+def tradable_symbols(symbols: list[str]) -> set[str]:
+    """Welche der Symbole sind bei Alpaca aktuell aktiv/handelbar?
+
+    MERGARB-Deals lösen sich manchmal auf, bevor unser Delisting-Proxy
+    (Terminaldatum per Preishistorie, kein 8-K-Terminierungsscan) es merkt —
+    der Broker weiß es zuerst. Gefunden 2026-08-06: erster Live-Order-Versuch
+    für FORA (bereits delisted) schlug mit "asset FORA is not active" fehl.
+    """
+    out = set()
+    for s in symbols:
+        try:
+            r = requests.get(f"{ALPACA_PAPER_BASE}/v2/assets/{s}",
+                             headers=H, timeout=15)
+            if r.status_code == 200:
+                a = r.json()
+                if a.get("tradable") and a.get("status") == "active":
+                    out.add(s)
+        except Exception:  # noqa: BLE001
+            continue
+    return out
+
+
 def latest_prices(symbols: list[str]) -> dict[str, float]:
     """REST batch snapshot (IEX) — quotes for sizing, not for pegging."""
     out = {}
