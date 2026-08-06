@@ -361,6 +361,34 @@ ODER ρ̄ ≤ 0.047 (ein Drittel des heutigen) ODER Hebel 4.3× (2.3× über Reg
 Daraus Regel **R8**: nach Qualität und Orthogonalität suchen, nicht nach Anzahl.
 **Ehrliche Erwartung unverändert-präziser: 15–25 %/Jahr, Mittelfall 22 %.**
 
+#### KORREKTUR 2026-08-06: der ρ̄=0.16-Input war prior-kontaminiert
+`quant/research/risk_budget_study.py` hat die Korrelationen auf den VOLLEN
+Historien neu geschätzt (239–283 gemeinsame Monate je Paar, weit über
+MIN_OVERLAP=36). Ergebnis: **ρ̄ = 0.003 roh, 0.033 mit der konservativen
+Negativ-Kappung** — nicht 0.16. Die 0.16 stammten aus den
+Health-Monitor-Rekonstruktionen (XSR dort nur **7** Monatsbeobachtungen), in
+denen ALLE XSR-Korrelationen der Prior-Wert 0.20 waren, **keine Messung**.
+Damit rechnet sich die Decke auf **4.6 (kappte ρ̄) bis 14.7 (rohes ρ̄)** statt
+1.27 — sie ist **nicht mehr die bindende Restriktion**.
+
+| gemessene ρ (volle Historie) | DTRD | EOMT | MERGARB | XSR |
+|---|---:|---:|---:|---:|
+| DTRD | 1.00 | 0.08 | 0.01 | 0.02 |
+| EOMT | | 1.00 | −0.12 | −0.06 |
+| MERGARB | | | 1.00 | 0.09 |
+
+**Was jetzt wirklich bindet, ist der HEBEL.** Das risikoparitätisch
+gewichtete Portfolio hat nur **3.9 % Vol**; Reg-T (1.9×) deckelt es bei
+7.4 % Vol → 6.4 % CAGR. Erst 3.9×/6.4×/7.7× Hebel ergeben 12.9 %/21.6 %/
+25.9 %. Die Diagnose verschiebt sich damit von "wir finden keine
+unkorrelierten Sleeves" (wir HABEN ρ̄≈0) zu "wir können das diversifizierte
+Portfolio nicht hoch genug hebeln". R8 bleibt gültig (Qualität > Anzahl),
+aber der Engpass ist die Hebel-ZUGÄNGLICHKEIT, nicht die Orthogonalität.
+Caveat: unkonditionale ρ≈0 schützt nicht im Krisen-Tail (ρ→1), und MERGARBs
+Sharpe ist ein Backtest mit offengelegten Näherungen (kein Spread/Slippage/
+Leihkosten) — es ist der größte Gewinner der Umgewichtung, also der
+empfindlichste Input.
+
 ### Zwei stille Datenfehler
 - **`daily.sh` behauptete im Kommentar "FRED refresh", das `--fred`-Flag fehlte
   aber** — `fred_series` stand 15 Tage still. Aufgefallen, weil CARRY den
