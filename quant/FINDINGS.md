@@ -377,16 +377,40 @@ Damit rechnet sich die Decke auf **4.6 (kappte ρ̄) bis 14.7 (rohes ρ̄)** sta
 | EOMT | | 1.00 | −0.12 | −0.06 |
 | MERGARB | | | 1.00 | 0.09 |
 
-**Was jetzt wirklich bindet, ist der HEBEL.** Das risikoparitätisch
-gewichtete Portfolio hat nur **3.9 % Vol**; Reg-T (1.9×) deckelt es bei
-7.4 % Vol → 6.4 % CAGR. Erst 3.9×/6.4×/7.7× Hebel ergeben 12.9 %/21.6 %/
-25.9 %. Die Diagnose verschiebt sich damit von "wir finden keine
-unkorrelierten Sleeves" (wir HABEN ρ̄≈0) zu "wir können das diversifizierte
-Portfolio nicht hoch genug hebeln". R8 bleibt gültig (Qualität > Anzahl),
-aber der Engpass ist die Hebel-ZUGÄNGLICHKEIT, nicht die Orthogonalität.
+**KORREKTUR DER KORREKTUR (gleicher Tag, eigener Skalierungsfehler):** der
+erste Lauf dieser Studie kombinierte die Reihen mit Dollar-Gewichten, obwohl
+jede Reihe auf IHREM EIGENEN internen Gross gemessen ist (XSR:
+`portfolio_sim.GROSS_LEVERAGE`=2.0, alle anderen 1.0). Rechengröße ist der
+Multiplikator m_i auf die Einheitsreihe, mit Konto-Gross = Σ m_i·gross_i.
+Dadurch kostet eine Einheit XSR-Rendite **doppelt so viel Bilanz** wie eine
+Einheit DTRD — bei bindendem Gross ein zweiter Grund zur Untergewichtung.
+Der zuerst berichtete Umgewichtungsgewinn von "+1.5 pp" war ein Artefakt:
+er verglich das umgewichtete Buch bei 1.9× Gross gegen das aktuelle bei nur
+1.10×, also überwiegend MEHR HEBEL, nicht bessere Gewichtung.
+
+**Ehrliche Zerlegung, OOS 2014-2026 (144 Monate, inkl. 2020 und 2022):**
+
+| Konfiguration | Sharpe | Vol | MaxDD | CAGR |
+|---|---:|---:|---:|---:|
+| HEUTE: aktuelle Gewichte @1.27× | 0.55 | 8.8 % | −12.7 % | **+3.6 %** |
+| nur Gross hoch: aktuell @1.9× | 0.55 | 13.2 % | −18.6 % | +5.4 % |
+| nur Umgewichtung: ERC @1.27× | 1.14 | 4.5 % | **−4.6 %** | +3.9 % |
+| **beides: ERC @1.9×** | **1.14** | 6.8 % | −6.9 % | **+5.8 %** |
+
+Die Umgewichtung allein bringt praktisch **keine** Zusatzrendite (+0.3 pp) —
+sie bringt eine **Drittelung des Drawdowns**. Genau dieser Risikopuffer
+macht den Hebel erst tragbar; der Hebel liefert dann die Rendite. Zusammen:
+**+2.2 pp CAGR UND halber MaxDD gegenüber heute**, split-sample-validiert.
+Aktuelles Konto-Gross ist **1.27× von 1.9×** — 0.63× liegen ungenutzt.
+
+**Was bindet, ist der HEBEL.** Bei Sharpe 1.14 und 6.8 % Vol @1.9× braucht
+20 % Ziel-Vol ein Gross von ≈5.6× → CAGR ≈17 %. Die Diagnose verschiebt sich
+von "wir finden keine unkorrelierten Sleeves" (wir HABEN ρ̄≈0) zu "wir können
+das diversifizierte Portfolio nicht hoch genug hebeln". R8 bleibt gültig
+(Qualität > Anzahl), aber der Engpass ist die Hebel-ZUGÄNGLICHKEIT.
 Caveat: unkonditionale ρ≈0 schützt nicht im Krisen-Tail (ρ→1), und MERGARBs
 Sharpe ist ein Backtest mit offengelegten Näherungen (kein Spread/Slippage/
-Leihkosten) — es ist der größte Gewinner der Umgewichtung, also der
+Leihkosten) — es ist ein Hauptgewinner der Umgewichtung, also der
 empfindlichste Input.
 
 ### Zwei stille Datenfehler

@@ -43,12 +43,29 @@ VOL_TARGET = 0.15     # Portfolio-Vol-Ziel für die Hebel-Rechnung
 MIN_OVERLAP = 36      # Monate, unter denen eine Korrelation nicht geschätzt wird
 SHRINK = 0.30         # Korrelations-Schrumpfung (wie discovery.py)
 
-# Aktuelle Live-Allokationen (Dollar-Gross je Sleeve, aus dem Code gelesen):
-#   XSR  : xsr_live.SLEEVE_ALLOC 0.40 pro Seite → 0.80 Gross
-#   EOMT : registry.py alloc 0.20
-#   DTRD : registry.py alloc 0.15
-#   MERGARB: promoted.yaml alloc 0.12
-CURRENT_ALLOC = {"XSR": 0.80, "EOMT": 0.20, "DTRD": 0.15, "MERGARB": 0.12}
+# ── Skalierung: WARUM zwei Größen nötig sind ──────────────────────────────────
+# KORRIGIERT 2026-08-06 (Bug im ersten Lauf dieser Studie): jede Sleeve-
+# Renditereihe ist auf IHREM EIGENEN internen Gross gemessen. Wer die Reihen
+# direkt mit Dollar-Gewichten kombiniert, vergleicht Äpfel mit Birnen.
+#   * XSR: portfolio_sim.GROSS_LEVERAGE = 2.0 → die Reihe gilt für ein
+#     2.0×-Gross-Buch (1× long + 1× short).
+#   * DTRD: dtrd_study.sleeve() kappt Gross bei 1.0 → Reihe gilt per 1.0×.
+#   * EOMT: EW über IEF/TLT/EDV, Summe 1.0 → per 1.0×.
+#   * MERGARB: live_weights() summiert auf 1.0 → per 1.0×.
+# Rechengröße ist deshalb der MULTIPLIKATOR m_i auf die Einheitsreihe:
+#     Portfoliorendite = Σ m_i · r_i
+#     belegtes Konto-Gross = Σ m_i · internes_gross_i   ≤ REGT_MAX
+# Damit kostet eine Einheit XSR-Rendite DOPPELT so viel Bilanz wie eine
+# Einheit DTRD — ein zweiter, unabhängiger Grund zur Untergewichtung, sobald
+# das Gross (nicht die Vol) bindet.
+INTERNAL_GROSS = {"XSR": 2.0, "DTRD": 1.0, "EOMT": 1.0, "MERGARB": 1.0}
+
+# Aktuelle Live-Multiplikatoren, aus dem Code gelesen:
+#   XSR  : xsr_live.SLEEVE_ALLOC 0.40/Seite → 0.80 Gross → m = 0.80/2.0 = 0.40
+#   EOMT : registry.py alloc 0.20 → m = 0.20
+#   DTRD : registry.py alloc 0.15 → m = 0.15
+#   MERGARB: promoted.yaml alloc 0.12 → m = 0.12
+CURRENT_M = {"XSR": 0.40, "EOMT": 0.20, "DTRD": 0.15, "MERGARB": 0.12}
 
 
 def load_full_series() -> dict[str, pd.Series]:
@@ -145,8 +162,22 @@ def _shrunk(C: np.ndarray, fill: float) -> np.ndarray:
 
 
 def weights_current(names, vols, C) -> np.ndarray:
-    w = np.array([CURRENT_ALLOC.get(n, 0.0) for n in names], float)
+    w = np.array([CURRENT_M.get(n, 0.0) for n in names], float)
     return w / w.sum()
+
+
+def scale_to_gross(names, w: np.ndarray, gross_budget: float) -> np.ndarray:
+    """Normierte Gewichte → Multiplikatoren m, die das Gross-Budget ausschöpfen.
+
+    m = w · k mit k so, dass Σ m_i·internes_gross_i = gross_budget. Schemata,
+    die bilanzsparsame Sleeves bevorzugen, bekommen dadurch automatisch ein
+    größeres k — das ist der Punkt: unter einer GROSS-Restriktion (Reg-T) ist
+    Gross-Effizienz Teil der Optimierung, nicht ein Nachgedanke.
+    """
+    ig = np.array([INTERNAL_GROSS[n] for n in names], float)
+    cost = float((w * ig).sum())
+    k = gross_budget / cost if cost > 0 else 0.0
+    return w * k
 
 
 def weights_inverse_vol(names, vols, C) -> np.ndarray:
@@ -180,25 +211,29 @@ def weights_mean_variance(names, vols, C, sharpes) -> np.ndarray:
     return w / w.sum()
 
 
-def portfolio_series(M: pd.DataFrame, w: np.ndarray) -> pd.Series:
-    """Monats-Portfoliorendite. NaN-Sleeves werden pro Monat herausgewichtet
-    und die verbleibenden renormiert — sonst wäre ein fehlender Sleeve
-    stillschweigend eine Cash-Position und würde die Vol künstlich senken."""
-    W = pd.DataFrame(np.tile(w, (len(M), 1)), index=M.index, columns=M.columns)
-    W = W.where(M.notna(), 0.0)
-    rs = W.sum(axis=1)
-    W = W.div(rs.where(rs > 0), axis=0)
-    return (W * M.fillna(0.0)).sum(axis=1).where(rs > 0).dropna()
+def portfolio_series(M: pd.DataFrame, m: np.ndarray) -> pd.Series:
+    """Monatsrendite = Σ m_i·r_i auf dem VOLLSTÄNDIGEN Panel (complete case).
+
+    Bewusst keine Renormierung fehlender Sleeves: m ist ein absoluter
+    Multiplikator, keine Anteilsquote — Renormieren würde die Skala zerstören
+    und damit genau die Hebelfrage verfälschen, um die es hier geht. Statt
+    dessen werden nur Monate benutzt, in denen ALLE Sleeves Daten haben; das
+    vermeidet zugleich, "Daten fehlen" mit "Sleeve war flat" zu verwechseln.
+    """
+    Mc = M.dropna()
+    return (Mc * m).sum(axis=1)
 
 
-def report_scheme(label: str, r: pd.Series) -> dict:
+def report_scheme(label: str, names: list, M: pd.DataFrame, w: np.ndarray,
+                  gross: float) -> dict:
+    m = scale_to_gross(names, w, gross)
+    r = portfolio_series(M, m)
     st = sleeve_stats(r, 12)
-    lev = min(VOL_TARGET / st["vol"], REGT_MAX) if st["vol"] > 0 else 0.0
-    cagr_lev = st["sharpe"] * st["vol"] * lev * LIVE_HAIRCUT
+    cagr = st["sharpe"] * st["vol"] * LIVE_HAIRCUT
     print(f"  {label:22s} Sharpe {st['sharpe']:5.2f}  Vol {st['vol']:6.1%}  "
-          f"MaxDD {st['maxdd']:7.1%}  |  Hebel→{VOL_TARGET:.0%}Vol {lev:4.2f}x "
-          f"(Reg-T-Deckel {REGT_MAX}x)  CAGR {cagr_lev:+6.1%}")
-    return {"label": label, **st, "lev": lev, "cagr_lev": cagr_lev}
+          f"MaxDD {st['maxdd']:7.1%}  CAGR {cagr:+6.1%}  |  m = " +
+          " ".join(f"{n}:{x:.2f}" for n, x in zip(names, m)))
+    return {"label": label, **st, "cagr": cagr, "m": m}
 
 
 def run():
@@ -239,27 +274,36 @@ def run():
     vols = np.array([M[n].std() * np.sqrt(12) for n in names])
     sharpes = np.array([M[n].mean() / M[n].std() * np.sqrt(12) for n in names])
     Cs = _shrunk(C.values.copy(), fill)
+    ig = np.array([INTERNAL_GROSS[n] for n in names], float)
 
-    print("\n═══ GEWICHTUNGSSCHEMATA (Dollar-Gewichte, Summe 1) ═══")
+    cur_m = np.array([CURRENT_M[n] for n in names])
+    cur_gross = float((cur_m * ig).sum())
+    print(f"\nAktuelles Konto-Gross: {cur_gross:.2f}x von {REGT_MAX}x Reg-T "
+          f"→ {REGT_MAX - cur_gross:.2f}x ungenutzt")
+
+    print("\n═══ GEWICHTUNGSSCHEMATA (normiert auf Summe 1, VOR Gross-Skalierung) ═══")
     schemes = {
         "aktuell (live)": weights_current(names, vols, Cs),
         "inverse Vol": weights_inverse_vol(names, vols, Cs),
         "ERC/Risk-Parity": weights_erc(names, vols, Cs),
         "Mean-Variance": weights_mean_variance(names, vols, Cs, sharpes),
     }
-    hdr = "  " + f"{'Schema':22s}" + "".join(f"{n:>10s}" for n in names)
-    print(hdr)
+    print("  " + f"{'Schema':22s}" + "".join(f"{n:>10s}" for n in names))
     for lab, w in schemes.items():
         print(f"  {lab:22s}" + "".join(f"{x:9.1%} " for x in w))
-    print("  " + f"{'(Sleeve-Vol)':22s}" +
-          "".join(f"{v:9.1%} " for v in vols))
-    print("  " + f"{'(Sleeve-Sharpe)':22s}" +
-          "".join(f"{s:9.2f} " for s in sharpes))
+    print("  " + f"{'(Vol per 1x Gross)':22s}" +
+          "".join(f"{v/g:9.1%} " for v, g in zip(vols, ig)))
+    print("  " + f"{'(Sharpe)':22s}" + "".join(f"{s:9.2f} " for s in sharpes))
+    print("  " + f"{'(internes Gross)':22s}" + "".join(f"{g:9.1f} " for g in ig))
 
-    print(f"\n═══ IN-SAMPLE-ERGEBNIS (optimistisch — Gewichte auf DIESEN "
-          f"Daten geschätzt) ═══")
+    print(f"\n═══ IN-SAMPLE, alle auf Reg-T {REGT_MAX}x Gross skaliert "
+          f"(optimistisch — Gewichte auf DIESEN Daten geschätzt) ═══")
     for lab, w in schemes.items():
-        report_scheme(lab, portfolio_series(M, w))
+        report_scheme(lab, names, M, w, REGT_MAX)
+    print(f"\n  Vergleich: aktuelle Allokation bei ihrem HEUTIGEN Gross "
+          f"({cur_gross:.2f}x), nicht hochskaliert:")
+    report_scheme("aktuell @heute", names, M, schemes["aktuell (live)"],
+                  cur_gross)
 
     # ── Der entscheidende Test: Split-Sample ────────────────────────────────
     print("\n═══ SPLIT-SAMPLE (Gewichte auf 1. Hälfte, bewertet auf 2.) ═══")
@@ -298,15 +342,17 @@ def run():
     print("    " + f"{'Schema':22s}" + "".join(f"{n:>10s}" for n in usable))
     for lab, w in schemesA.items():
         print(f"    {lab:22s}" + "".join(f"{x:9.1%} " for x in w))
-    print("  Ergebnis auf der 2. Hälfte (out-of-sample):")
-    oos = [report_scheme(lab, portfolio_series(B2, w))
+    print(f"  Ergebnis auf der 2. Hälfte (out-of-sample), alle auf "
+          f"{REGT_MAX}x Gross:")
+    oos = [report_scheme(lab, usable, B2, w, REGT_MAX)
            for lab, w in schemesA.items()]
     base = next(o for o in oos if o["label"] == "aktuell (live)")
-    print("\n  ΔCAGR gegen die aktuelle Allokation (out-of-sample):")
+    print("\n  ΔCAGR gegen die aktuelle Allokation, beide auf gleichem Gross")
+    print("  (isoliert die UMGEWICHTUNG vom Hochskalieren):")
     for o in oos:
         if o["label"] == "aktuell (live)":
             continue
-        d = o["cagr_lev"] - base["cagr_lev"]
+        d = o["cagr"] - base["cagr"]
         verdict = "BESSER" if d > 0.01 else ("neutral" if d > -0.01 else "SCHLECHTER")
         print(f"    {o['label']:22s} {d:+6.1%}  → {verdict}")
 
