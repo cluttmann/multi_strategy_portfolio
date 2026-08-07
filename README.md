@@ -994,7 +994,8 @@ ALPACA_SECRET_KEY_LIVE=your_live_secret
 ALPACA_API_KEY_PAPER=your_paper_key
 ALPACA_SECRET_KEY_PAPER=your_paper_secret
 TELEGRAM_KEY=your_telegram_bot_token
-TELEGRAM_CHAT_ID=your_telegram_chat_id
+TELEGRAM_CHAT_ID=your_telegram_chat_id       # ETF-Bot (diese Strategien)
+TELEGRAM_CHAT_ID_QNT=your_quant_chat_id      # Quant-Desk; fehlt er, fällt quant/ auf TELEGRAM_CHAT_ID zurück
 FREDKEY=your_fred_api_key
 GOOGLE_CLOUD_PROJECT_ID=your_project_id
 ```

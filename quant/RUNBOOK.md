@@ -11,6 +11,14 @@
 > --config=quant/cloud/cloudbuild.yaml .`. Handelstag-Guard + Burn-in 25 %
 > wie zuvor. launchd (Mac) ist abgebaut.
 >
+> **Telegram (2026-08-07):** Der Quant-Desk postet in die eigene Gruppe
+> „Quant Desk" (`TELEGRAM_CHAT_ID_QNT`, Secret Manager), getrennt vom
+> ETF-Bot-Chat „Trading Bot Alerts" (`TELEGRAM_CHAT_ID`). Bot-Token ist
+> derselbe. `notify()` fällt auf `TELEGRAM_CHAT_ID` zurück, wenn das
+> QNT-Secret fehlt — nach einem neuen Job/Container immer prüfen, dass
+> `TELEGRAM_CHAT_ID_QNT` als Env gesetzt ist, sonst tauchen QNT-Meldungen
+> wieder im ETF-Chat auf.
+>
 > **4 Sleeves live (2026-07-25):** XSR (Sharpe 0.60 nach Leihkosten),
 > ONX (1.06 full / 0.57 aktuell), VOLC (0.64), EOMT (0.87 / 0.65 Holdout).
 > Krypto/CTREND ausgeschlossen. 10 Cloud-Scheduler, alle ET-Zeiten:
