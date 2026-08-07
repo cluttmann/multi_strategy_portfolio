@@ -1,6 +1,62 @@
 steps:
 
 # ─────────────────────────────────────────────────────────────────────────────
+# WAVE 0 — build two immutable source trees before any deploy runs.
+#
+# `torch` + `transformers` (FinBERT) are reachable ONLY from daily_regime_check:
+# compute_regime_score is called at exactly one site inside it, the monthly regime
+# buy only reads persisted state via regime_state(), and backfill_regime_scores
+# skips the news signal by design. Shipping them in all 16 images took every image
+# from 71 MB to 2.89 GB on 2026-05-10 (commit 282beed) = 45 GB of new images per
+# deploy wave, which is what ran Artifact Registry to 272 GB / €16 per month.
+#
+# fn-light  = requirements.txt minus every line tagged `# ML-ONLY`  (15 functions)
+# fn-heavy  = requirements.txt verbatim                            (daily_regime_check)
+#
+# These trees are written ONCE here and never mutated again. That matters: the
+# deploy waves below run up to 6 steps CONCURRENTLY against the same /workspace,
+# so rewriting a shared requirements.txt between steps would be a race in which a
+# light deploy could pick up the heavy file.
+# ─────────────────────────────────────────────────────────────────────────────
+
+  - name: 'gcr.io/cloud-builders/gcloud'
+    id: 'prep-sources'
+    entrypoint: 'bash'
+    args:
+    - -c
+    - |
+      set -euo pipefail
+      rm -rf fn-light fn-heavy
+      mkdir -p fn-light fn-heavy
+
+      # main.py has no local module imports, so main.py + requirements.txt is a
+      # complete deployable tree for every entry point.
+      cp main.py fn-light/main.py
+      cp main.py fn-heavy/main.py
+      cp requirements.txt fn-heavy/requirements.txt
+      # Strip only *dependency* lines carrying the tag — a leading '#' means the
+      # line is documentation and must survive, or fn-light ends up with orphaned
+      # comment fragments from the tag's own explanation block.
+      grep -vE '^[^#].*# ML-ONLY' requirements.txt > fn-light/requirements.txt
+
+      # Explicit empty ignore files: gcloud resolves .gcloudignore relative to the
+      # source dir, and these trees must not inherit any repo-root exclusions.
+      : > fn-light/.gcloudignore
+      : > fn-heavy/.gcloudignore
+
+      # Fail the build loudly rather than silently shipping the wrong deps.
+      test -s fn-light/requirements.txt
+      test -s fn-heavy/requirements.txt
+      ! grep -qE '^(torch|transformers)' fn-light/requirements.txt
+      grep -qE '^transformers' fn-heavy/requirements.txt
+      grep -qE '^torch' fn-heavy/requirements.txt
+      test -s fn-light/main.py
+      test -s fn-heavy/main.py
+
+      echo "--- fn-light deps (15 functions) ---"; cat fn-light/requirements.txt
+    waitFor: ['-']
+
+# ─────────────────────────────────────────────────────────────────────────────
 # WAVE A — first 5 function deploys (run in parallel, no dependency).
 #
 # Cloud Build has a per-project concurrent-build quota; each `gcloud functions
@@ -19,7 +75,7 @@ steps:
     - functions
     - deploy
     - monthly_buy_hfea
-    - --source=.
+    - --source=fn-light
     - --trigger-http
     - --region=europe-west3
     - --runtime=python310
@@ -27,7 +83,7 @@ steps:
     - --entry-point=monthly_buy_hfea
     - --memory=512MB
     - --set-env-vars=GOOGLE_CLOUD_PROJECT=1098661711782,GOOGLE_CLOUD_PROJECT_ID=trading-436516
-    waitFor: ['-']
+    waitFor: ['prep-sources']
 
   # Step 2: Deploy the rebalance_hfea Function
   - name: 'gcr.io/cloud-builders/gcloud'
@@ -36,7 +92,7 @@ steps:
     - functions
     - deploy
     - rebalance_hfea
-    - --source=.
+    - --source=fn-light
     - --trigger-http
     - --region=europe-west3
     - --runtime=python310
@@ -44,7 +100,7 @@ steps:
     - --entry-point=rebalance_hfea
     - --memory=512MB
     - --set-env-vars=GOOGLE_CLOUD_PROJECT=1098661711782,GOOGLE_CLOUD_PROJECT_ID=trading-436516
-    waitFor: ['-']
+    waitFor: ['prep-sources']
 
   # Step 3: Deploy the monthly_buy_spxl Function
   - name: 'gcr.io/cloud-builders/gcloud'
@@ -53,7 +109,7 @@ steps:
     - functions
     - deploy
     - monthly_buy_spxl
-    - --source=.
+    - --source=fn-light
     - --trigger-http
     - --region=europe-west3
     - --runtime=python310
@@ -61,7 +117,7 @@ steps:
     - --entry-point=monthly_buy_spxl
     - --memory=512MB
     - --set-env-vars=GOOGLE_CLOUD_PROJECT=1098661711782,GOOGLE_CLOUD_PROJECT_ID=trading-436516
-    waitFor: ['-']
+    waitFor: ['prep-sources']
 
   # Step 4: Deploy the monthly_nine_sig_contributions Function
   - name: 'gcr.io/cloud-builders/gcloud'
@@ -70,7 +126,7 @@ steps:
     - functions
     - deploy
     - monthly_nine_sig_contributions
-    - --source=.
+    - --source=fn-light
     - --trigger-http
     - --region=europe-west3
     - --runtime=python310
@@ -78,7 +134,7 @@ steps:
     - --entry-point=monthly_nine_sig_contributions
     - --memory=512MB
     - --set-env-vars=GOOGLE_CLOUD_PROJECT=1098661711782,GOOGLE_CLOUD_PROJECT_ID=trading-436516
-    waitFor: ['-']
+    waitFor: ['prep-sources']
 
   # Step 5: Deploy the monthly_invest_all ORCHESTRATOR (runs all 7 monthly strategies)
   - name: 'gcr.io/cloud-builders/gcloud'
@@ -87,7 +143,7 @@ steps:
     - functions
     - deploy
     - monthly_invest_all
-    - --source=.
+    - --source=fn-light
     - --trigger-http
     - --region=europe-west3
     - --runtime=python310
@@ -95,7 +151,7 @@ steps:
     - --entry-point=monthly_invest_all
     - --memory=512MB
     - --set-env-vars=GOOGLE_CLOUD_PROJECT=1098661711782,GOOGLE_CLOUD_PROJECT_ID=trading-436516
-    waitFor: ['-']
+    waitFor: ['prep-sources']
 
 # ─────────────────────────────────────────────────────────────────────────────
 # WAVE B — next 6 function deploys (start after Wave A completes).
@@ -108,7 +164,7 @@ steps:
     - functions
     - deploy
     - monthly_dual_momentum
-    - --source=.
+    - --source=fn-light
     - --trigger-http
     - --region=europe-west3
     - --runtime=python310
@@ -134,7 +190,7 @@ steps:
     - functions
     - deploy
     - quarterly_nine_sig_signal
-    - --source=.
+    - --source=fn-light
     - --trigger-http
     - --region=europe-west3
     - --runtime=python310
@@ -156,7 +212,7 @@ steps:
     - functions
     - deploy
     - daily_trade_spxl_200sma
-    - --source=.
+    - --source=fn-light
     - --trigger-http
     - --region=europe-west3
     - --runtime=python310
@@ -180,7 +236,7 @@ steps:
     - functions
     - deploy
     - daily_regime_check
-    - --source=.
+    - --source=fn-heavy      # the ONLY function that needs torch/transformers
     - --trigger-http
     - --region=europe-west3
     - --runtime=python310
@@ -202,7 +258,7 @@ steps:
     - functions
     - deploy
     - monthly_buy_regime_sso
-    - --source=.
+    - --source=fn-light
     - --trigger-http
     - --region=europe-west3
     - --runtime=python310
@@ -224,7 +280,7 @@ steps:
     - functions
     - deploy
     - backfill_regime_scores
-    - --source=.
+    - --source=fn-light
     - --trigger-http
     - --region=europe-west3
     - --runtime=python310
@@ -260,7 +316,7 @@ steps:
     - functions
     - deploy
     - monthly_buy_aaa
-    - --source=.
+    - --source=fn-light
     - --trigger-http
     - --region=europe-west3
     - --runtime=python310
@@ -284,7 +340,7 @@ steps:
     - functions
     - deploy
     - monthly_buy_f4
-    - --source=.
+    - --source=fn-light
     - --trigger-http
     - --region=europe-west3
     - --runtime=python310
@@ -309,7 +365,7 @@ steps:
     - functions
     - deploy
     - quarterly_rebalance_f4
-    - --source=.
+    - --source=fn-light
     - --trigger-http
     - --region=europe-west3
     - --runtime=python310
@@ -336,7 +392,7 @@ steps:
     - functions
     - deploy
     - index_alert
-    - --source=.
+    - --source=fn-light
     - --trigger-http
     - --region=europe-west3
     - --runtime=python310
@@ -356,7 +412,7 @@ steps:
     - functions
     - deploy
     - audit_monthly_run
-    - --source=.
+    - --source=fn-light
     - --trigger-http
     - --region=europe-west3
     - --runtime=python310

@@ -4287,7 +4287,15 @@ def score_news_sentiment(articles):
     """
     if not articles:
         return 0.0, 0, 0.0
-    pipe = _get_finbert()
+    try:
+        pipe = _get_finbert()
+    except ImportError as e:
+        # transformers/torch are ML-ONLY deps and ship only in the daily_regime_check
+        # image (see the prep-sources step in cloudbuild.yaml). No other function can
+        # reach this path today — compute_regime_score is called from daily_regime_check
+        # alone — but degrade to a neutral signal rather than crash if one ever does.
+        print(f"FinBERT unavailable ({e}) — news sentiment signal returns neutral")
+        return 0.0, 0, 0.0
     texts = []
     for a in articles:
         text = f"{a.get('headline','') or ''}. {a.get('summary','') or ''}".strip()

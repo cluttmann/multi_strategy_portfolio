@@ -1,0 +1,328 @@
+# Hypothesen-Warteschlange der Discovery-Pipeline.
+#
+# Jeder Eintrag muss die Gates in `quant/research/discovery.py` bestehen. Die
+# Felder sind keine Dokumentation, sondern Gate-Eingaben: fehlt `mechanismus`
+# oder `quantitative_vorhersage`, scheitert G1; fehlt `live_signal`, scheitert
+# G8 und der Kandidat kann nie befördert werden.
+#
+# AUSWAHLLOGIK (aus kill_registry.yaml abgeleitet): Von 17 getesteten Familien
+# überlebten die, deren Zahler NICHT der Ungeduldige war und deren Haltedauer
+# Wochen betrug (DTRD, EOMT, XSR-5d) oder die in einer Auktion füllen (ONX).
+# Gestorben sind alle Hochfrequenz-Ideen (IMOM, GAP, CAT, PEAD) am Kostenwall.
+# Neue Kandidaten werden deshalb bevorzugt nach dieser Signatur gesucht:
+# dokumentierte Risikotransferprämie + Monatshorizont + Daten schon vorhanden.
+
+kandidaten:
+
+  - id: RESID-MR
+    familie: RESID-MR
+    status: verworfen_G3
+    beschreibung: Residuale Mean-Reversion auf Sektor/Beta/Größe-Residuum
+    mechanismus: >
+      Zwangsverkäufer (Fondsabflüsse, Risikolimits) drücken Kurse unter Fair
+      Value und zahlen dem Liquiditätsgeber eine Prämie. Wir sind der Geduldige.
+    quantitative_vorhersage: >
+      (a) stärker in illiquiden Namen, (b) stärker bei hohem VIX,
+      (c) residuale Umkehr > rohe Umkehr.
+    braucht_tabellen: [features_daily_v2]
+    implementierung: quant.research.resid_mr_study.returns
+    live_signal: null
+    params: {h: 21}
+    holdout_start: "2020-01-01"
+    liquiditaetstier_geprueft: true
+    kosten_bp_pro_trade: 10.0
+
+  - id: ACT13D
+    familie: ACT13D
+    status: verworfen_G2_R9
+    beschreibung: Drift nach Aktivisten-Einstieg (SEC Schedule 13D)
+    mechanismus: >
+      Der Wertbeitrag eines Aktivisten (Governance, Spartenverkauf, Rückkäufe)
+      realisiert sich über Monate, die Offenlegung erfolgt sofort. Der Markt
+      unterreagiert wegen Ergebnisunsicherheit — Aufmerksamkeitsargument, kein
+      Informationsvorsprung. Brav/Jiang/Partnoy/Thomas (JF 2008).
+    quantitative_vorhersage: >
+      (a) initiale 13D > 13D/A, (b) kleine Firmen stärker (weniger Abdeckung),
+      (c) Drift wächst monoton mit dem Horizont.
+    braucht_tabellen: [sec_13d_filings, eod_bars]
+    implementierung: quant.research.act13d_study.returns
+    live_signal: null
+    params: {h: 63}
+    holdout_start: "2020-01-01"
+    liquiditaetstier_geprueft: true
+    kosten_bp_pro_trade: 10.0
+
+  - id: CARRY
+    familie: CARRY
+    status: verworfen_G5_G7
+    sleeve_name: carry
+    beschreibung: Cross-Asset-Carry über ETFs (Anleihen/Währungen/Rohstoffe)
+    mechanismus: >
+      Carry ist die Kompensation dafür, das Risiko zu tragen, dass der
+      Kassakurs gegen einen läuft — der Terminmarkt bepreist Risikotransfer
+      von Hedgern zu Spekulanten. Wie die Trendprämie in DTRD ist es KEIN
+      Informationsvorsprung und verfällt nicht durch Publikation.
+      Koijen/Moskowitz/Pedersen/Vrugt (JFE 2018): diversifizierter Carry
+      Sharpe 0.7-0.9 über vier Anlageklassen, ρ zu Trend nahe null.
+    quantitative_vorhersage: >
+      (a) Rendite skaliert MONOTON mit der Carry-Höhe (Quintile geordnet) —
+      bricht die Monotonie, ist es kein Carry-Effekt;
+      (b) über Anlageklassen hinweg positiv, nicht nur in einer;
+      (c) ρ zu DTRD (Trend) nahe null, da orthogonale Signalquelle.
+    braucht_tabellen: [eod_bars, fred_series]
+    implementierung: quant.research.carry_study.returns
+    live_signal: quant.research.carry_study.live_weights
+    params: {}
+    alloc: 0.12
+    freq: monthly_first
+    tif: cls
+    tags: [carry, crossasset]
+    holdout_start: "2020-01-01"
+    liquiditaetstier_geprueft: true
+    kosten_bp_pro_trade: 5.0
+    notes: monatlich → kostenimmun; Universum ohne US-Aktien und ohne Krypto
+
+  # ── Von R8 ZURÜCKGESTELLT, ohne Test ────────────────────────────────────────
+  # BAB bleibt hier dokumentiert, wird aber NICHT gebaut: erwarteter Sharpe
+  # 0.4-0.5 (Frazzini/Pedersen, post-2010 abgeschwächt) bei ρ zu XSR
+  # voraussichtlich > 0.3, weil XSR z_beta_63d als Feature führt. Nach R8 ist
+  # der ΔS_p-Beitrag damit ≈ +0.01 — dieselbe Größenordnung wie CARRY, das
+  # bereits an G7 gescheitert ist. Zurückstellen ist hier die Anwendung der
+  # Regel, nicht ihre Umgehung; ein Test würde Rechenzeit für ein Ergebnis
+  # verbrauchen, das die Arithmetik vorab kennt.
+  - id: BAB
+    familie: BAB
+    status: verworfen_R2_2026-08-01   # siehe kill_registry.yaml + trials #70-72
+    sleeve_name: bab
+    beschreibung: Betting Against Beta — long Low-Beta, short High-Beta
+    mechanismus: >
+      Wer Hebel braucht, aber keinen bekommt (Fonds mit Leverage-Verbot,
+      Privatanleger), kauft stattdessen Hochbeta-Titel und treibt deren Preis
+      über den Fair Value. Wir haben Zugang zu Reg-T-Hebel und können die
+      Gegenposition einnehmen — die Prämie ist Kompensation für eine
+      Bilanzrestriktion, die wir nicht haben. Frazzini/Pedersen (JFE 2014).
+    quantitative_vorhersage: >
+      (a) Rendite skaliert monoton FALLEND mit Beta-Dezil;
+      (b) der Effekt ist nach Beta-Neutralisierung positiv (sonst ist es nur
+      eine versteckte Marktwette);
+      (c) stärker nach Perioden knapper Finanzierung (hoher TED-/Repo-Spread).
+    braucht_tabellen: [features_daily_v2]
+    implementierung: quant.research.bab_study.returns
+    live_signal: quant.research.bab_study.live_weights
+    params: {}
+    alloc: 0.10
+    freq: monthly_first
+    tif: cls
+    tags: [factor, equity, lowbeta]
+    holdout_start: "2020-01-01"
+    liquiditaetstier_geprueft: true
+    kosten_bp_pro_trade: 10.0
+    notes: >
+      R5-Risiko: XSR nutzt z_beta_63d als Feature → ρ zu XSR messen, bevor
+      etwas befördert wird. Bei ρ > 0.5 ist es REDUNDANT, nicht neu.
+
+  # ── NÄCHSTER KANDIDAT nach R8 ───────────────────────────────────────────────
+  - id: MERGARB
+    familie: MERGARB
+    # ABSICHTLICH NICHT "offen": discovery.run() filtert auf
+    # str(status).startswith("offen"), d.h. jeder andere Wert haelt den
+    # Kandidaten aus dem Sonntags-Discovery-Lauf heraus. Solange
+    # mergarb_study.py nicht existierte, scheiterte der Lauf harmlos an
+    # "Impl nicht ladbar"; seit Phase 1 wuerde er die Gates G0-G8 wirklich
+    # durchlaufen — der Plan
+    # (docs/superpowers/plans/2026-07-30-weg-zu-50-cagr-phase1.md) hat das
+    # aber explizit als Phase 2 verortet. Der Kandidat ist NICHT kaputt; die
+    # Freigabe soll eine bewusste Entscheidung sein, kein Nebeneffekt eines
+    # alten Queue-Eintrags. Zum Freischalten: wieder auf "offen" setzen.
+    status: befoerdert_2026-08-01   # siehe promoted.yaml + Discovery-Verdikt in der Commit-Historie
+    sleeve_name: mergarb
+    beschreibung: Merger-Arbitrage — Long-Ziel angekündigter Übernahmen bis zum Closing
+    mechanismus: >
+      Der Aktionär eines Übernahmeziels will die Deal-Unsicherheit nicht tragen
+      (Kartellamt, Finanzierung, Aktionärsvotum) und verkauft mit Abschlag zum
+      Angebotspreis. Der Arbitrageur wird für die Übernahme genau dieses
+      Bruch-Risikos bezahlt — eine VERSICHERUNGSPRÄMIE, kein
+      Informationsvorsprung, und damit publikationsresistent wie die
+      Trendprämie in DTRD. Mitchell/Pulvino (JF 2001): Sharpe ~0.6-0.9,
+      Rendite ist eine kurze Put-Position auf den Markt (Beta ~0.05 in ruhigen
+      Phasen, springt in Krisen).
+    quantitative_vorhersage: >
+      (a) Rendite skaliert MONOTON mit dem Deal-Spread bei Ankündigung —
+      bricht die Monotonie, ist es kein Risikoprämien-Effekt;
+      (b) Barangebote > Aktientauschangebote (letztere brauchen ein Hedge-Bein
+      und tragen zusätzliches Kursrisiko des Käufers);
+      (c) Bruchrate steigt bei hohem VIX → die Prämie muss dort ebenfalls
+      höher sein, sonst ist sie nicht Kompensation für Bruch-Risiko.
+    warum_r8_erfuellt: >
+      Die Auszahlung hängt am DEAL-AUSGANG, nicht an Markt-, Zins- oder
+      Vol-Faktoren. Genau das braucht R8: nicht ein weiterer Sleeve mit
+      Sharpe 0.45 und ρ = 0.3, sondern eine Renditequelle mit ρ nahe null zu
+      allen fünf bestehenden. Haltedauer 1-6 Monate → kostenimmun (Regel R1).
+    braucht_tabellen: [eod_bars]
+    braucht_neue_daten: >
+      Deal-Datenbank aus SEC EDGAR: Formulare 425, DEFM14A, SC 14D9, plus
+      8-K Item 1.01. Angebotspreis und Barkomponente müssen aus dem Volltext
+      extrahiert werden — der Ingester nach dem Muster von
+      quant/data/sec_13d_ingest.py (form.zip-Index + CIK→Ticker-Join), aber
+      mit LLM-Extraktion der Deal-Terms. ACHTUNG: Formularlabels der SEC
+      ändern sich (13D → SCHEDULE 13D ab Dez. 2024), Filter müssen beide
+      Varianten kennen.
+    implementierung: quant.research.mergarb_study.returns
+    live_signal: quant.research.mergarb_study.live_weights
+    alloc: 0.12
+    freq: daily
+    tif: cls
+    tags: [event, dealrisk]
+    holdout_start: "2020-01-01"
+    kosten_bp_pro_trade: 10.0
+    liquiditaetstier_geprueft: true
+    notes: >
+      BRUTTO, NICHT NETTO: mergarb_study.returns() modelliert weder Spread/
+      Slippage noch Leihkosten noch Steuern — es sind rohe Kursrenditen des
+      Ziels von der Ankündigung bis zum Terminaldatum. Weil kein
+      brutto_bp_pro_trade hinterlegt ist, druckt der G2-Screen in
+      discovery.py "(Kosten im Backtest enthalten)" — das stimmt hier NICHT.
+      Ein brutto_bp_pro_trade wird bewusst nicht geraten, sondern erst
+      eingetragen, wenn die Kante pro Trade gemessen ist (Phase 2). Bei 1-6
+      Monaten Haltedauer ist der Kosteneinfluss klein, aber nicht null.
+      Weitere offengelegte Näherungen in returns(): Terminaldatum per
+      Delisting-Proxy (kein 8-K-Terminierungsscan), Plausibilitätsband
+      [-5%,+25%] auf den Ankündigungsspread gegen Akquisiteur-Zeilen,
+      ±50%-Deckel auf Tagesrenditen.
+      G6-LIQUIDITÄTSTIER (2026-08-01, Regel R3): 926 closed/break Deals nach
+      20-Tage-ADV in Terzile gebucketet. Kleinstes Terzil (Ø-ADV $576k):
+      mean_ret +5.55%. Mittleres (Ø-ADV $7,8M): +1.43%. Größtes (Ø-ADV
+      $118M): +0.92%. Die Kante fällt mit steigender Liquidität wie erwartet
+      bei einer echten Risikoprämie, verschwindet aber NICHT im größten,
+      liquidesten Terzil — besteht R3.
+      HORIZON-RASTER für G5 (2026-08-01): 3 Varianten vorregistriert
+      (max_horizon_days ∈ {180,270,365}) und in trials_registry geloggt,
+      BEVOR G5 neu geprüft wurde — Sharpe 1.03/1.02/0.71, DSR 1.00/1.00/0.48.
+      Ohne dieses Raster fällt eine Ein-Varianten-Familie mangels
+      within-family-Varianz strukturell durch G5 (SR* fällt auf die globale
+      Varianz zurück, s. ROAD_TO_50.md §0.3) — kein Zeichen für ein
+      schlechtes Signal, sondern ein Gate-Artefakt.
+    r9_benchmark: >
+      Größen-/Liquiditätsdezil-bereinigt, NICHT gegen SPY — sonst wiederholt
+      sich der ACT13D-Fehler (scheinbares -15.6%-Alpha, das der
+      Small-minus-Large-Spread war).
+
+  - id: FXCARRY
+    familie: FXCARRY
+    status: verworfen_R2_2026-08-01   # siehe kill_registry.yaml + trials #73-75
+    sleeve_name: fxcarry
+    beschreibung: G10-FX-Zinsdifferenz-Carry (Fama 1984), 6 Währungen vs. USD
+    mechanismus: >
+      Ungedeckte Zinsparität (UIP) sagt Abwertung der Hochzinswährung um
+      genau den Zinsvorteil voraus — passiert im Mittel nicht (Fama 1984).
+      Halter der Hochzinswährung werden für reales Crash-Risiko bezahlt
+      (Carry-Trades brechen in Risk-off-Phasen zusammen). Neue Anlageklasse
+      (G10-FX statt Cross-Asset-ETFs), neue Hypothese mit eigenem
+      Versuchszähler — kein Sweep der gekillten CARRY-Familie (die nutzte
+      12M-Trailing-ETF-Ausschüttungsrendite als Proxy, hier die echte
+      Zinsdifferenz aus FRED-Kurzfristzinsen).
+    quantitative_vorhersage: >
+      (a) Rendite skaliert MONOTON mit der Zinsdifferenz bei Formation;
+      (b) Prämie bricht bei hohem VIX zusammen (Versicherungscharakter);
+      (c) Renditeverteilung ist linksschief (Crash-Risiko-Signatur).
+    braucht_tabellen: []   # nur FRED, keine BQ-Tabelle
+    implementierung: quant.research.fx_carry_study.returns
+    live_signal: quant.research.fx_carry_study.live_weights
+    params: {}
+    alloc: 0.10
+    freq: monthly_first
+    tif: cls
+    tags: [carry, fx, macro]
+    holdout_start: "2020-01-01"
+    liquiditaetstier_geprueft: true   # CurrencyShares-ETFs, liquide
+    kosten_bp_pro_trade: 10.0
+    notes: >
+      VERWORFEN. Trainings-Sharpe (bis 2019) in allen 3 Varianten negativ.
+      Vorhersage (a) widerlegt: keine Monotonie über die Zinsdifferenz-
+      Dezile (praktisch Rauschen) — methodisch geschwächt dadurch, dass nur
+      6 Währungen für eine Dezil-Analyse strukturell zu wenig sind (jedes
+      Dezil ~1 Währung). Vorhersagen (b)/(c) bestätigt, rettet aber nichts
+      ohne (a). DSR fällt in allen 3 Varianten durch.
+
+  - id: SECTORMOM
+    familie: SECTORMOM
+    status: verworfen_R2_2026-08-02   # siehe kill_registry.yaml + trials #82-84
+    sleeve_name: sectormom
+    beschreibung: US-Branchen-Momentum (Moskowitz/Grinblatt JF 1999), 9 SPDR-Sektor-ETFs
+    mechanismus: >
+      Branchenweite Schocks diffundieren langsamer in Erwartungen als
+      einzeltitelspezifische Nachrichten — Moskowitz/Grinblatt zeigen
+      Branchen-Momentum stärker/robuster als Einzeltitel-Momentum. Andere
+      Anlageklasse als DTRD (US-Sektor-ETFs statt Cross-Asset), andere
+      Mechanik als XSR (Branchen-Rotation statt Einzeltitel-Cross-Section).
+    quantitative_vorhersage: >
+      (a) Rendite skaliert MONOTON mit dem Formations-Momentum-Rang;
+      (b) Effekt robust über mehrere Haltedauern;
+      (c) ρ zu XSR niedrig (andere Informationsebene trotz "Momentum"-Namen).
+    braucht_tabellen: [eod_bars]
+    implementierung: quant.research.sector_mom_study.returns
+    live_signal: quant.research.sector_mom_study.live_weights
+    params: {}
+    alloc: 0.10
+    freq: monthly_first
+    tif: cls
+    tags: [momentum, sector, equity]
+    holdout_start: "2020-01-01"
+    liquiditaetstier_geprueft: true   # SPDR-Sektor-ETFs, hochliquide
+    kosten_bp_pro_trade: 10.0
+    notes: >
+      VERWORFEN. Trainings-Sharpe in allen 3 Varianten negativ (-0.28 bis
+      -0.10). Vorhersage (a) widerlegt: nicht monoton über Momentum-Terzile
+      (Mitte niedrigster Wert, eher U-förmig). ρ(XSR) niedrig wie
+      vorhergesagt (+0.07), aber DSR fällt in allen Varianten durch — 9
+      Sektoren sind für eine Terzil-Analyse strukturell dünn, dieselbe
+      Warnung wie bei FXCARRYs 6 Währungen.
+
+  - id: MERGARB_SWAP
+    familie: MERGARB_SWAP
+    status: zurückgestellt_stichprobe_2026-08-02   # siehe Notes — kein Kill, kein Pass
+    sleeve_name: mergarb_swap
+    beschreibung: MERGARB-Erweiterung — Aktientausch-Deals mit Käufer-Hedge (long Ziel/short Käufer)
+    mechanismus: >
+      Identisch zu MERGARB (Versicherungsprämie gegen Deal-Bruch-Risiko),
+      aber Dollar-neutral long Ziel/short Käufer statt long Ziel/Cash —
+      hedgt das Umtauschverhältnis-Risiko. Phase 2 aus der ursprünglichen
+      MERGARB-Spec ("Aktientauschangebote brauchen ein Hedge-Bein gegen
+      den Käufer").
+    quantitative_vorhersage: >
+      (a) Rendite skaliert mit dem Ankündigungsspread; (c) ρ zu
+      bestehenden Sleeves niedrig. (b, Cash>Aktientausch) entfällt hier —
+      wäre ein MERGARB-vs-MERGARB_SWAP-Vergleich, mit n=113 zu klein.
+    braucht_tabellen: [merger_deals, eod_bars]
+    braucht_neue_daten: >
+      Volle LLM-Extraktion von Käufername + Umtauschverhältnis aus
+      Freitext für alle ~2.900 Aktientausch-Deals (aktuell kein API-Key
+      konfiguriert) — würde die Stichprobe von 113 auf potenziell ~2.900
+      vergrößern und eine belastbare G5-Prüfung erst möglich machen.
+    implementierung: quant.research.mergarb_swap_study.returns
+    live_signal: quant.research.mergarb_swap_study.live_weights
+    params: {}
+    alloc: 0.10
+    freq: daily
+    tif: cls
+    tags: [event, dealrisk, mergarb-extension]
+    holdout_start: "2020-01-01"
+    liquiditaetstier_geprueft: false   # noch nicht geprüft, Stichprobe zu klein
+    kosten_bp_pro_trade: 10.0
+    notes: >
+      ZURÜCKGESTELLT, NICHT VERWORFEN: nur 113 Ziel+Käufer-Paare sind aus
+      der EDGAR-Gemeinsam-Filing-Mechanik eindeutig identifizierbar (von
+      ~2.900 Aktientausch-Deals) — Ziel/Käufer-Zuordnung per Heuristik
+      (höhere Ankündigungsrendite = Ziel), ein Datenartefakt (KOSN/BMY
+      +225%) gefunden und gefiltert. Mit vorregistriertem 3-Varianten-
+      Raster (window_days 3/5/10): Sharpe 0.65-0.89, Holdout 2020+ Sharpe
+      1.16, 2022+ Sharpe 1.06 — ΔS_p +0.150 (S_p 1.47→1.62), stärker als
+      jeder andere Kandidat außer MERGARB selbst. DSR 0.86-0.90 — NAH an
+      der 0.95-Schwelle, aber darunter. Innerhalb der 3 Varianten ist die
+      Glücksvarianz klein (SR* nur 0.03-0.04) — der Flaschenhals ist die
+      STICHPROBENGRÖSSE (n=563-720 Tage), nicht der Mechanismus. Anders
+      als die 6 in derselben Runde verworfenen Kandidaten (BAB, FXCARRY,
+      SECTORMOM, Insider-/13D-Feature, ACT13D) ist dies kein widerlegter
+      Mechanismus, sondern ein datenbegrenztes Ergebnis. Empfehlung: mit
+      echter LLM-Extraktion (API-Key nötig) die Stichprobe vergrößern,
+      dann G5 neu prüfen — kein neuer Sweep derselben 113 Paare.

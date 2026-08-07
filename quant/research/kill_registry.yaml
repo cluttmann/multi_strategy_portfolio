@@ -1,0 +1,400 @@
+# Kill-Registry — Pflichtinput für jeden Hypothesen-Generator.
+#
+# WARUM: Ein Generator, der diese Datei nicht liest, erfindet IMOM neu. Das ist
+# der wertvollste Datensatz des Programms: 11 Familien, die an einer KONKRETEN
+# Ursache gestorben sind. Die Todesursache ist wichtiger als das Verdikt —
+# sie definiert die Suchregeln unten.
+
+todesursachen:
+  KOSTENWALL: >
+    Signal war echt, aber kleiner als Spread+Slippage. Trifft alles mit
+    Haltedauer < 5 Tagen im liquiden Universum. Wir sind strukturell
+    Liquiditätsnehmer (IEX ~2% Volumenanteil, Sekunden-Latenz, keine Rebates,
+    keine Queue-Priorität).
+  REGIME_ZERFALL: >
+    Funktionierte vor 2021, danach nicht. Identische Signatur bei drei
+    unabhängigen Familien (IMOM, GAP, ONX) — vermutlich dieselbe Ursache
+    (Retail-Flow-Regime 2020/21, danach arbitriert).
+  UNHANDELBAR: >
+    Edge existiert nur dort, wo wir nicht handeln können — unleihbare
+    Microcaps, Titel unter 5 M$ ADV, Limit-up-Namen.
+  REDUNDANT: >
+    Information steckt bereits in einem bestehenden Feature/Sleeve.
+  MECHANISMUS_WIDERLEGT: >
+    Der behauptete Wirkmechanismus hielt dem Test nicht stand.
+
+familien:
+  - name: IMOM
+    beschreibung: ETF-Intraday-Momentum (Gao/Han/Li/Zhou JFE 2018)
+    todesursache: [KOSTENWALL, REGIME_ZERFALL]
+    zahlen: "Regel +0.02bp brutto über 50k Trades; Meta-Filter Sharpe 0.14 netto"
+    lehre: Publizierte Intraday-Anomalien sind nach Publikation tot.
+  - name: GAP
+    beschreibung: Overnight-Gap Drift-vs-Fade, ML-klassifiziert
+    todesursache: [REGIME_ZERFALL]
+    zahlen: "IC +0.17 (2019-21) → +0.03 (2022+); netto negativ jedes Jahr ab 2022"
+    lehre: IC-Zerfall an einer Regime-Grenze ist tödlich, nicht heilbar.
+  - name: CAT
+    beschreibung: LLM/FinBERT-Katalysator-Drift, 137k Übernacht-Events
+    todesursache: [KOSTENWALL]
+    zahlen: "brutto Sharpe 0.71 (+19.7%); netto -30.6%/Jahr — Edge 4x kleiner als Kosten"
+    lehre: >
+      Der wichtigste Kill. Ein echtes Signal mit Sharpe 0.71 brutto stirbt an
+      20bp Kosten. Jede News-/Event-Idee muss VOR dem Bau eine
+      Kostenrechnung in bp pro Trade bestehen.
+  - name: PEAD
+    beschreibung: Post-Earnings-Drift mit echten Terminen + SUE (102k Events)
+    todesursache: [REGIME_ZERFALL, KOSTENWALL]
+    zahlen: "L/S 20d-Spread +1.64% (2003-09) → +0.1-0.3% (2016-26)"
+    lehre: Lehrbuch-Anomalien sind im liquiden Segment abgeerntet.
+  - name: OPT
+    beschreibung: Wöchentliche 2%-OTM-Put-Spreads SPY/QQQ
+    todesursache: [MECHANISMUS_WIDERLEGT]
+    zahlen: "83% Trefferquote, aber -4.3% P&L/Risiko — Tail-Wochen fressen alles"
+    lehre: Hohe Trefferquote ≠ positiver Erwartungswert bei Short-Optionalität.
+  - name: PAIR
+    beschreibung: 3x-Bull/Bear-Doppel-Short (Vol-Decay-Ernte)
+    todesursache: [KOSTENWALL]
+    zahlen: "-3% bis -4%/Jahr; Leihkosten bepreisen den Decay exakt"
+    lehre: Wo ein Effekt allgemein bekannt ist, bepreist ihn der Leihmarkt.
+  - name: RSPLIT
+    beschreibung: Reverse-Split-Drift (short)
+    todesursache: [UNHANDELBAR]
+    zahlen: "-1.5%/Trade nach Leihkosten im handelbaren Segment"
+    lehre: Effekt lebt nur in unleihbaren Microcaps.
+  - name: OVN_FADE
+    beschreibung: Extremmove-Fade in der 24/5-Übernachtbörse
+    todesursache: [UNHANDELBAR]
+    zahlen: "Junk-Tier +181bp/Trade (t=6.1), liquides Tier nur -13bp"
+    lehre: >
+      Das ganze Edge saß in Pump-and-Dump-Namen ohne Leihe. Immer nach
+      Liquiditätstier trennen, bevor man jubelt.
+  - name: DOW_KALENDER
+    beschreibung: Wochentags-Verfeinerung von ONX
+    todesursache: [MECHANISMUS_WIDERLEGT]
+    zahlen: "OOS widerlegt"
+    lehre: Kalender-Feinschnitt ohne Mechanismus ist Data-Snooping.
+  - name: LETF_REBAL
+    beschreibung: LETF-Zwangsrebalancierung als Signal
+    todesursache: [MECHANISMUS_WIDERLEGT]
+    zahlen: "Effekt skaliert NICHT mit L²−L (2x stärker als 3x) → nicht LETF-Mechanik"
+    lehre: >
+      Hypothese mit quantitativer Vorhersage testen (hier: Skalierung mit
+      L²−L). Wenn die Vorhersage bricht, ist der Mechanismus falsch, auch
+      wenn das Signal existiert.
+  - name: RESID-MR
+    beschreibung: Residuale Mean-Reversion (Blitz/Huij/Lansdorp 2013), Sektor/Beta/Größe-Residuum
+    todesursache: [MECHANISMUS_WIDERLEGT, REGIME_ZERFALL]
+    zahlen: >
+      Alle 3 vorregistrierten Horizonte NEGATIV: Sharpe -0.93/-0.50/-0.54
+      (H=10/21/63) im Training; Holdout 2020-2026 -0.14, Voll-Sample -0.30,
+      2022+ -0.41. Jahresreihe 2024:-22 % 2025:-16 %. Vorhersage (c)
+      verletzt — residual war SCHLECHTER als roh (-0.93 vs -0.49 bei H=10).
+    lehre: >
+      Kurzfrist-Umkehr im liquiden US-Universum ist nicht nur abgeerntet,
+      sondern im Momentum-Regime 2024/25 aktiv verlustbringend. Das
+      vorzeichenverdrehte Ergebnis (Momentum statt Umkehr) NICHT einsammeln:
+      das wäre die klassische Data-Snooping-Falle, weil die Hypothese
+      vorregistriert das andere Vorzeichen behauptet hat.
+
+  - name: ACT13D
+    beschreibung: Drift nach Aktivisten-Einstieg, SEC Schedule 13D (12.483 Events 2007-2026)
+    todesursache: [MECHANISMUS_WIDERLEGT]
+    zahlen: >
+      Abnormale Rendite vs. SPY NEGATIV und mit dem Horizont wachsend:
+      -0.83 % (21T) → -2.58 % (63T) → -15.59 % (252T, t=-25.4). Vorhersage (a)
+      widerlegt (13D/A -1.43 % ist WENIGER negativ als initiale 13D -2.58 %),
+      Vorhersage (c) widerlegt (Drift wächst, aber mit falschem Vorzeichen).
+      Bester Sleeve H=21 Sharpe 0.50 bei MaxDD -65 %.
+    lehre: >
+      Das negative Vorzeichen ist mit hoher Wahrscheinlichkeit
+      BENCHMARK-FEHLSPEZIFIKATION, nicht Aktivisten-Wertvernichtung:
+      13D-Ziele sind Small-Cap-Value (Median-ADV im untersten Tier $0.0M), und
+      "abnormal vs. SPY" misst über 2007-2026 vor allem den
+      Small-minus-Large-Spread. Ein Event-Sleeve braucht ein
+      GRÖSSEN-/STIL-BEREINIGTES Benchmark, sonst testet man den Faktor statt
+      des Events. Zusätzlich: SECs company_tickers.json enthält nur aktuell
+      notierte Firmen → übernommene Ziele fehlen im Sample.
+    nachtest_2026-08-01: >
+      R9-KORRIGIERT NACHGEHOLT (act13d_study.run_r9_corrected): echte
+      Größen-Dezil-Gegenposition aus features_daily_v2 (10 Dezile, EW,
+      Dezil zum Ankündigungstag fixiert) statt SPY — sowohl in der
+      Event-Statistik als auch im Sleeve-Sim (portfolio_r9, hedgt jede
+      Position gegen ihr eigenes Dezil). ERGEBNIS: die Vermutung war
+      FALSCH. Abnormale Rendite bleibt negativ und hoch signifikant:
+      -0.96% (21T, t=-3.46) → -2.56% (63T, t=-5.57) → -4.82% (126T,
+      t=-7.28) → -7.95% (252T, t=-8.06) — fast identisch zur alten
+      SPY-Zahl (-2.58% bei H=63). Sleeve-Sim Sharpe -0.09 bis -0.39, DSR
+      überall <0.04. Der ursprüngliche Kill war aus dem RICHTIGEN Grund
+      richtig (MECHANISMUS_WIDERLEGT), nur nicht aus dem vermuteten
+      (Benchmark). 13D-Aktivismus zeigt in diesem Sample einen echten,
+      robusten NEGATIVEN Drift, keinen positiven Unterreaktions-Effekt —
+      Brav/Jiang/Partnoy/Thomas (JF 2008, positiv) repliziert hier NICHT.
+      Fall endgültig geschlossen, kein dritter Anlauf ohne neue Idee.
+
+  - name: CARRY
+    beschreibung: Cross-Asset-Carry über 35 ETFs, Ausschüttungsrendite minus Geldmarkt
+    todesursache: [MECHANISMUS_WIDERLEGT, REDUNDANT]
+    zahlen: >
+      Voll-Sample Sharpe 0.58, Holdout 0.39, 2022+ 0.52 — für sich brauchbar.
+      Aber: Vorhersage (a) WIDERLEGT, Quintilsordnung invertiert (höchster
+      Carry +0.03 % p.a., niedrigster +0.33 % p.a., Q1−Q5 = -0.30 %).
+      Und ρ(CARRY, DTRD) = +0.78 → dieselbe Wette wie der Trend-Sleeve.
+      Nach Anlageklasse: Kredit 0.55, Treasuries 0.41, aber Rohstoffe -0.14
+      und Währungen -0.25.
+    lehre: >
+      Zwei Lehren. (1) Ein Sleeve mit brauchbarem Sharpe kann trotzdem wertlos
+      sein: ρ=0.78 zum bestehenden DTRD heißt, wir kaufen dieselbe Prämie zum
+      zweiten Mal. (2) Die 12M-Trailing-Ausschüttungsrendite ist als
+      Carry-Maß für Anleihen-ETFs zu träge — im Zinsschock 2022 misst sie den
+      Carry von vor einem Jahr. Ein neuer Anlauf müsste die Zinskurve direkt
+      nutzen (DGS2/DGS10/T10Y3M) und wäre eine NEUE Hypothese mit eigenem
+      Versuchszähler, kein Parameter-Sweep dieser hier.
+
+  - name: SECTORMOM
+    beschreibung: US-Branchen-Momentum (Moskowitz/Grinblatt JF 1999), 9 SPDR-Sektor-ETFs, 3-von-9 long/short
+    todesursache: [MECHANISMUS_WIDERLEGT]
+    zahlen: >
+      Trainings-Sharpe (bis 2019) in allen 3 Varianten negativ: -0.28/-0.15/
+      -0.10 (H 21/42/63T). Holdout 2020-2026 Sharpe 0.02, 2022+ 0.21 — beide
+      schwach. DSR fällt in allen 3 Varianten durch (0.000-0.131). Vorhersage
+      (a) WIDERLEGT: nicht monoton über Momentum-Terzile — die MITTLERE
+      Gruppe hat die niedrigste Rendite (8.7%), nicht das untere Terzil
+      (9.7%), oberes Terzil höchste (11.0%) — eher U-förmig als eine klare
+      Rangfolge. ρ zu XSR niedrig (+0.07, bestätigt die Orthogonalitäts-
+      Vorhersage), aber ρ zu ONX/VOLC überraschend positiv (+0.31/+0.31,
+      beide gehebelte Aktienwetten wie der ETF-Bot) — rettet aber nichts
+      bei widerlegtem Mechanismus und durchfallendem G5.
+    lehre: >
+      Der akademische Befund (Branchen-Momentum stärker als Einzeltitel-
+      Momentum) repliziert hier nicht robust auf nur 9 SPDR-Sektoren —
+      vermutlich strukturell zu wenig Querschnittsbreite für eine saubere
+      Terzil-Analyse (dieselbe Warnung wie bei FXCARRYs 6 Währungen: kleine
+      N machen Rang-basierte Tests strukturell verrauscht). Ein zweiter
+      Anlauf bräuchte entweder ein breiteres Branchenuniversum (GICS-Level-3-
+      Subindustrien statt 9 SPDR-Sektoren) oder eine längere
+      Formationsperiode — wäre aber eine neue Hypothese mit eigenem
+      Versuchszähler.
+
+  - name: TIMESFM
+    beschreibung: Time-Series-Foundation-Model als Return-Prädiktor
+    todesursache: [REDUNDANT, MECHANISMUS_WIDERLEGT]
+    zahlen: "R²_OOS -2.80%; eigener Pilot IC -0.052, corr -0.18 zu Momentum"
+    lehre: >
+      Ein Modell ohne marktspezifisches Pretraining bringt keine neue
+      Information. Modelltausch bei gleicher Information ≈ 0 (6 Klassen getestet).
+
+  - name: OPTPREM
+    beschreibung: Wöchentlicher Short-Put-Spread SPY/QQQ, 12-Varianten-Raster (OTM 1.5/2/3% x Breite 1/2% x VIX-Filter an/aus)
+    todesursache: [MECHANISMUS_WIDERLEGT]
+    zahlen: >
+      Alle 12 vorregistrierten Varianten NEGATIV: Sharpe -0.63 bis -2.17,
+      DSR 4e-5 bis 1e-10 (alle FÄLLT DURCH). Bestes Ergebnis (breitester OTM,
+      kein VIX-Filter) noch immer Sharpe -0.63. cagr_net=-100% bei jeder
+      Variante — jede erlebte mindestens eine Woche mit Totalverlust
+      (Settlement bei/unter beiden Strikes), was die Kumulativrendite in
+      trials_registry.py permanent auf -100% zwingt.
+    lehre: >
+      Bestätigt OPT (bereits gekillt, MECHANISMUS_WIDERLEGT): hohe
+      Trefferquote bei Short-Optionalität schützt nicht vor Tail-Wochen, die
+      alles auffressen. Der 15%-Credit-Haircut allein reicht nicht — das
+      Problem ist nicht die Kostenannahme, sondern die Auszahlungsstruktur
+      selbst. Kein neuer Anlauf ohne eine echte Tail-Absicherung (z.B. als
+      Teil einer Iron-Condor- oder Ratio-Struktur), sonst wiederholt sich
+      dasselbe Muster.
+
+  - name: BAB
+    beschreibung: Betting Against Beta (Frazzini/Pedersen JFE 2014), long Low-Beta short High-Beta
+    todesursache: [MECHANISMUS_WIDERLEGT]
+    zahlen: >
+      Alle 3 vorregistrierten Haltedauern (21/42/63T) negativ: Sharpe
+      -0.41/-0.43/-0.46. Holdout 2020-2026 Sharpe -0.42 (CAGR -30.4%,
+      MaxDD -95.6%), 2022+ Sharpe -0.32. Vorhersage (a) WIDERLEGT: keine
+      Monotonie über Beta-Dezile, sondern ein U — Dezil 0 (niedrigstes
+      Beta) UND Dezil 9 (höchstes Beta) haben beide hohe Renditen
+      (+97%/+47% annualisiert), die mittleren Dezile fallen durch (~+12-14%).
+      Vorhersage (c) WIDERLEGT: bei strafferen Finanzbedingungen (NFCI>0,
+      der behauptete Belastungskanal) ist die Performance SCHLECHTER
+      (Sharpe -1.10) statt besser wie vom Mechanismus verlangt. ρ zu allen
+      Live-Sleeves ≈0 (das R5-Redundanzrisiko mit XSRs z_beta_63d-Feature
+      hat sich nicht bestätigt) — rettet aber nichts bei widerlegtem
+      Mechanismus. Nachrichtlich: eine rein diagnostische, echt
+      beta-neutrale (statt nur dollar-neutrale) Konstruktion ergab Sharpe
+      +0.23 — nicht Teil der getesteten/promotable Implementierung, aber
+      ein Hinweis, dass die dollar-neutrale Standardkonstruktion selbst das
+      Problem sein könnte, nicht zwingend der gesamte Mechanismus.
+    lehre: >
+      Ein U-förmiges statt monotones Dezil-Profil ist ein härterer
+      Widerlegungsbeweis als ein einfach flaches — es zeigt, dass BEIDE
+      Extreme (nicht nur Hochbeta) eine Prämie tragen, was für einen reinen
+      Beta-Bilanzrestriktions-Mechanismus nicht passt. Bevor ein zweiter
+      Anlauf mit echter Beta-Neutralisierung (statt Dollar-Neutralität)
+      gerechtfertigt ist, bräuchte es eine neue, eigene Vorregistrierung —
+      kein Nachbessern derselben Versuchsreihe (sonst DSR-Verletzung wie
+      beim ursprünglichen G5-Vorfall).
+
+  - name: FXCARRY
+    beschreibung: G10-FX-Zinsdifferenz-Carry (Fama 1984), 6 Währungen vs. USD (FRED-Kurzfristzinsen + Spot)
+    todesursache: [MECHANISMUS_WIDERLEGT, REGIME_ZERFALL]
+    zahlen: >
+      Trainings-Sharpe (bis 2019) in allen 3 Varianten NEGATIV: -0.04/-0.30/
+      -0.06 (n_leg 1/2/3). Holdout 2020-2026 Sharpe 0.22, 2022+ 0.42 — beide
+      schwach. DSR fällt in allen 3 Varianten durch (0.011-0.538). Vorhersage
+      (a) WIDERLEGT: keine Monotonie über die Zinsdifferenz-Dezile, praktisch
+      Rauschen (+1.0%/-1.4%/-2.3%/+1.1%/-3.1%/+0.9% annualisiert je Dezil,
+      keine Ordnung). Vorhersagen (b) und (c) BESTÄTIGT (Prämie schwächer bei
+      hohem VIX: Sharpe -0.15 vs 0.31; Schiefe -1.95, echtes Crash-Profil) —
+      rettet aber nichts, wenn der Kernmechanismus (a) nicht trägt.
+    lehre: >
+      Zwei Lehren. (1) Die Dezil-Analyse selbst ist mit nur 6 Währungen
+      strukturell unterbesetzt (jedes "Dezil" hat meist genau eine Währung)
+      — ein methodisches Warnsignal für jede zukünftige G10-FX-Idee mit
+      diesem kleinen Universum, nicht nur für Carry. (2) Bestätigt aus der
+      Literatur: der Carry-Trade ist seit 2008 (Nullzins-Ära, danach
+      Crowding) empirisch deutlich schwächer als in den klassischen
+      Papieren — dieselbe REGIME_ZERFALL-Signatur wie bei IMOM/GAP/ONX.
+      Ein neuer Anlauf bräuchte entweder ein breiteres Währungsuniversum
+      (mehr als 6 für eine echte Dezil-Analyse) oder eine andere
+      Risikoprämie in derselben Anlageklasse (z.B. FX-Momentum statt Carry).
+
+verworfene_feature_bloecke:
+  - name: SEC_13D_TAGE_SEIT_UND_ANZAHL
+    zahlen: >
+      Δ Sharpe -0.005 (Baseline 0.558 → 0.554, OOS 2019-2026). z_days_
+      since_13d + z_13d_count_252d (4.566 Symbole Abdeckung, breiter als
+      INSIDER_TRANSAKTIONEN) bringen praktisch nichts — anders als dort
+      (-0.039) auch nicht negativ, nur neutral unter der Schwelle.
+    ursache: REDUNDANT
+    lehre: >
+      Vierter Feature-Block-Versuch in Folge ohne Erfolg (nach FINRA_SHORT_
+      VOLUME, FRED_REGIME_INTERAKTIONEN, INSIDER_TRANSAKTIONEN) — auch
+      obwohl das zugrundeliegende Event selbst (Familie ACT13D) einen
+      robusten, hoch signifikanten Effekt zeigt (t bis -8.06 nach R9-
+      Korrektur). Ein Baummodell mit 36 bestehenden Features scheint
+      bereits zu sättigen, was aus täglichen Cross-Sektions-Daten
+      herausholbar ist — zusätzliche SPARSE Event-Features (nur an
+      wenigen Tagen pro Symbol von Null verschieden) tragen nicht genug
+      Dichte bei, um im Gesamtmodell durchzudringen. Deutet darauf hin,
+      dass der wertvollere Weg NEUE eigenständige Sleeves sind (wie
+      MERGARB), nicht das Anreichern von XSR mit weiteren Event-Feldern.
+  - name: FINRA_SHORT_VOLUME
+    zahlen: "Δ Sharpe -0.059 gegen die 36-Feature-Baseline"
+    ursache: REDUNDANT
+  - name: FRED_REGIME_INTERAKTIONEN
+    zahlen: "Δ Sharpe +0.011 (unter dem +0.02-Kriterium)"
+    ursache: REDUNDANT
+  - name: INSIDER_TRANSAKTIONEN
+    zahlen: >
+      Δ Sharpe -0.039 (Baseline 0.558 → 0.519, OOS 2019-2026, net@5bp,
+      k=5). z_insider_net_63d + z_insider_buyers_63d (63-Tage-Netto-
+      Käufe/-Käuferzahl aus SEC Form 4, cross-sektional gezscored)
+      verschlechtern das Modell statt es zu verbessern.
+    ursache: REDUNDANT
+    lehre: >
+      Nur 395 von ~1500 Namen hatten überhaupt Insider-Daten (Rest = 0,
+      neutral) — das Signal trägt nur für eine Minderheit des Universums
+      etwas bei, was das Modell verwässert statt hilft. Naive Netto-
+      USD-Konstruktion lässt sich leicht von einzelnen großen Routine-
+      Verkäufen (10b5-1-Pläne) dominieren, die kein Informationssignal
+      sind. Ein zweiter Versuch müsste (a) die Käufer-ZAHL statt des
+      USD-Volumens gewichten (Cluster-Käufe sind das robustere Signal,
+      Lakonishok/Lee 1998) und (b) auf ein 6-12-Monats-Fenster statt
+      63 Tage gehen — wäre aber eine NEUE Hypothese mit eigenem
+      Versuchszähler, kein Nachbessern dieser Zahl.
+
+verworfene_meta_labeling_ansaetze:
+  - name: ENSEMBLE_UNEINIGKEIT_ALS_CONFIDENCE_FILTER
+    zahlen: >
+      Δ Sharpe -0.712 (Baseline Ensemble-Mean 0.530 → confidence-gefiltertes
+      Buch -0.182, OOS 2019-2026, net@5bp, k=5). Rang-IC nach Uneinigkeits-
+      Quintil: 0.024/0.024/0.029/0.034/0.050 (Quintil 0 = niedrigste
+      Uneinigkeit, Quintil 4 = höchste) — MONOTON STEIGEND, nicht fallend
+      wie die Meta-Labeling-Hypothese vorhersagt.
+    ursache: MECHANISMUS_WIDERLEGT (Vorhersage invertiert)
+    lehre: >
+      Getestet: ob die Streuung von 5 unabhängig geseedeten LightGBM-
+      Rankern (gleiche Features, gleiche Folds) ein Meta-Signal für
+      Prädiktionsqualität ist (Lopez de Prado Meta-Labeling) — ein Test auf
+      Basis des EIGENEN Modells, nicht eines externen Datenblocks, gemäß
+      der Nutzer-Vorgabe "Methoden auf Basis unserer Machine-Learning-
+      Modelle finden". Ergebnis ist das GEGENTEIL der Erwartung: die
+      Namen, bei denen sich die 5 Modelle am UNEINIGSTEN sind, haben die
+      HÖCHSTE Rang-IC, nicht die niedrigste. ρ(Uneinigkeit, Liquidität)
+      war niedrig (+0.014) wie vorhergesagt — das rettet nichts, weil
+      Vorhersage (a) bereits invertiert durchfällt. Wahrscheinliche
+      Erklärung: hohe Ensemble-Uneinigkeit korreliert mit hoher Feature-
+      Extremität (Namen nahe den Rändern der Cross-Section), und genau
+      dort liegt die stärkste, nicht die schwächste Vorhersagekraft eines
+      Rang-Modells — Uneinigkeit misst hier "seltener/extremer Fall",
+      nicht "unsicherer Fall". Ein Confidence-Filter, der aus der
+      falschen Quintile herausfiltert, zerstört die Strategie fast
+      vollständig (0.53 → -0.18). Lehre: modellinterne Uneinigkeit ist
+      kein verlässlicher Confidence-Proxy in einem Cross-Sections-
+      Rangmodell mit dieser Feature-Geometrie.
+      NACHTEST (2026-08-03, derselbe OOS-Prädiktionssatz): das Spiegelbild
+      der Konstruktion — Uneinigkeits-TILT, behält die uneinigkeitsREICHSTE
+      Hälfte statt der ärmsten — hilft ebenfalls nicht: Sharpe 0.530 → 0.505
+      (Δ -0.026). Die Quintil-IC-Monotonie übersetzt sich in KEINE der
+      beiden Richtungen in eine ökonomisch nutzbare Universums-Filterung
+      für die bestehende Top/Bottom-N_SIDE=75-Konstruktion — vermutlich
+      weil die extremsten Score-Namen (die die Konstruktion ohnehin schon
+      wählt) und die uneinigkeitsreichsten Namen stark überlappen, sodass
+      das Filtern kaum etwas verändert außer zusätzlichem Turnover/Kosten.
+      Beide Richtungen sind damit abgeschlossen getestet — kein offener
+      Faden mehr für dieses Meta-Signal.
+
+# ── SUCHREGELN, die aus den Kills folgen (bindend für den Generator) ──────────
+suchregeln:
+  - id: R1_KOSTEN
+    regel: >
+      Verwirf jede Hypothese, deren Zahler "der Ungeduldige" ist — AUSSER der
+      Fill kommt aus einer Auktion oder die Haltedauer beträgt Wochen.
+      Begründung: CAT/IMOM/GAP/PEAD starben genau hier; ONX (Auktion) und
+      XSR-5d (mehrtägig) überlebten.
+  - id: R2_MECHANISMUS
+    regel: >
+      Jede Hypothese braucht einen ökonomischen Mechanismus MIT quantitativer
+      Vorhersage (wer zahlt, warum, und wie skaliert der Effekt?). Ohne
+      testbare Skalierungsvorhersage ist es Data-Mining (siehe LETF_REBAL).
+  - id: R3_LIQUIDITAETSTIER
+    regel: >
+      Ergebnisse IMMER nach Liquiditätstier getrennt ausweisen. Ein Edge, der
+      nur im untersten Tier lebt, ist unhandelbar (siehe OVN_FADE, RSPLIT).
+  - id: R4_REGIME
+    regel: >
+      Jede Zahl doppelt ausweisen: Voll-Sample UND 2022+. Nur das aktuelle
+      Regime prognostiziert die Zukunft.
+  - id: R5_ORTHOGONALITAET
+    regel: >
+      ρ gegen XSR/ONX/VOLC/EOMT/DTRD messen. Ein Sleeve mit Sharpe 1.0 und
+      ρ=0.7 zu ONX bringt fast nichts; ein Sleeve mit 0.4 und ρ=0.0 bringt
+      mehr. Erwarteten Portfolio-Beitrag ausrechnen, nicht nur den Sharpe.
+  - id: R6_VARIANTEN_VORREGISTRIEREN
+    regel: >
+      Variantensatz VOR dem ersten Lauf festlegen und eng halten (3-5). Der
+      DSR deflationiert mit der Varianz der Varianten; ein breiter Sweep macht
+      das G5-Gate unpassierbar (bei 1 Variante braucht es Sharpe 1.74).
+  - id: R7_HOLDOUT
+    regel: >
+      Ein Zeitfenster (mind. die letzten 5 Jahre) wird NIE für Parameterwahl
+      benutzt. EOMT und DTRD wurden so validiert; beide bestanden.
+
+  - id: R8_QUALITAET_STATT_ANZAHL
+    regel: >
+      Suche nach QUALITÄT und ORTHOGONALITÄT, nicht nach ANZAHL. Für N→∞ gilt
+      S_p → S̄/√ρ̄; bei den heutigen Werten (Ø-Sharpe 0.51, ρ̄ = 0.16) ist die
+      Obergrenze S_p = 1.25, also ≈ 27 %/Jahr unter Reg-T — UNABHÄNGIG von der
+      Zahl der Sleeves. Gerechnet: +50 gleichwertige Sleeves heben die Rendite
+      von 22.0 % auf 25.6 %. Ein Kandidat ist deshalb nur interessant, wenn er
+      (a) Sharpe deutlich über 0.51 liefert ODER (b) ρ̄ senkt, also ρ < 0.05 zu
+      ALLEN bestehenden Sleeves hat. Ein weiterer Sleeve mit Sharpe 0.45 und
+      ρ = 0.3 ist Arbeit ohne Wirkung — genau das war CARRY.
+      Nachgerechnet in `quant/research/portfolio_math.py`.
+
+  - id: R9_BENCHMARK
+    regel: >
+      Event-Studien gegen ein GRÖSSEN- UND STILBEREINIGTES Benchmark rechnen,
+      nie gegen SPY allein. ACT13D erzeugte so ein scheinbares -15.6 %-Alpha
+      über 12 Monate (t=-25), das fast vollständig der
+      Small-minus-Large-Spread 2007-2026 war. Konkret: Gegenposition aus
+      Namen gleicher Größen-/Liquiditätsdezile, nicht der Index.
