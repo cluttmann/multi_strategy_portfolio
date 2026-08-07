@@ -9,6 +9,9 @@ pandas  # For SMA calculations from Alpaca data
 alpaca-py>=0.21.0         # Alpaca Trading API SDK (modern version)
 gspread>=5.12.0           # Google Sheets API
 oauth2client>=4.1.3       # Google auth (service account credentials)
-transformers>=4.36.0      # FinBERT for regime detector news sentiment
-torch>=2.1.0              # FinBERT runtime (CPU)
+# Lines tagged `# ML-ONLY` are stripped from the fn-light source tree by the
+# prep-sources step in cloudbuild.yaml — only daily_regime_check ships them.
+# Keep the tag on any future heavy dependency or it lands in all 16 images.
+transformers>=4.36.0      # ML-ONLY: FinBERT for regime detector news sentiment
+torch>=2.1.0              # ML-ONLY: FinBERT runtime (CPU)
 beautifulsoup4>=4.12      # HTML parsing for the S&P 500 constituents scrape
