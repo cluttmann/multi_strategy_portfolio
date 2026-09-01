@@ -630,11 +630,17 @@ def get_telegram_secrets():
 # zeroed the entire monthly budget on 2026-08-03 and again on 2026-09-01.
 # 10s was too tight: monthly_invest_all runs once a month, so it ALWAYS cold-starts,
 # and both observed failures (2026-08-03, 2026-09-01) were `Read timed out` — the TLS
-# connection stood and FRED was merely slow, not blocking. The nightly quant job hits
-# the same API from the same project with timeout=60 and has never failed in ~250 runs
-# (quant/data/public_ingest.py). 20s buys that headroom while keeping the worst case
-# (3 sources x 2 attempts) at ~125s, far inside the 540s function budget.
-POLICY_RATE_TIMEOUT_SECONDS = 20
+# connection stood and FRED was merely slow, not blocking. 60s is the empirically
+# proven value: the nightly quant job hits the same API from the same project with
+# timeout=60 and has never failed in ~250 runs (quant/data/public_ingest.py), and its
+# requests are far heavier (full history since 1999 vs our single observation).
+#
+# A flat 60s x 3 sources x 2 attempts would be 360s though, which crowds the 540s
+# function budget. So the per-request timeout stays generous and the WHOLE chain gets
+# a hard wall-clock ceiling instead — each request is additionally clamped to whatever
+# budget is left, and an exhausted budget fails closed like any other total failure.
+POLICY_RATE_TIMEOUT_SECONDS = 60         # per request; matches the proven quant value
+POLICY_RATE_TOTAL_BUDGET_SECONDS = 240   # hard ceiling for the entire source chain
 POLICY_RATE_SOURCE_ATTEMPTS = 2          # per source, before moving to the next
 POLICY_RATE_MAX_STALENESS_DAYS = 10      # target range only moves at FOMC meetings
 POLICY_RATE_SANITY_BOUNDS = (0.0, 0.25)  # decimal; reject anything outside 0-25%
@@ -659,7 +665,7 @@ def _policy_rate_valid(rate, obs_date, source):
     return True
 
 
-def _policy_rate_fred_api():
+def _policy_rate_fred_api(timeout):
     """FRED JSON API (DFEDTARU) — primary source. Requires FREDKEY."""
     fred_key = get_secret_or_env("FREDKEY")
     if not fred_key:
@@ -670,7 +676,7 @@ def _policy_rate_fred_api():
         "https://api.stlouisfed.org/fred/series/observations"
         f"?series_id=DFEDTARU&api_key={fred_key}&file_type=json&sort_order=desc&limit=1"
     )
-    response = requests.get(url, timeout=POLICY_RATE_TIMEOUT_SECONDS)
+    response = requests.get(url, timeout=timeout)
     response.raise_for_status()
 
     observations = response.json().get("observations") or []
@@ -685,7 +691,7 @@ def _policy_rate_fred_api():
     return float(value) / 100.0, obs_date
 
 
-def _policy_rate_fred_csv():
+def _policy_rate_fred_csv(timeout):
     """FRED graph CSV — same series, no API key, different service path.
 
     Covers a rate-limited or revoked FREDKEY as well as an api.stlouisfed.org
@@ -694,7 +700,7 @@ def _policy_rate_fred_csv():
     cosd = (datetime.date.today() - datetime.timedelta(days=30)).isoformat()
     response = requests.get(
         f"https://fred.stlouisfed.org/graph/fredgraph.csv?id=DFEDTARU&cosd={cosd}",
-        timeout=POLICY_RATE_TIMEOUT_SECONDS,
+        timeout=timeout,
     )
     response.raise_for_status()
 
@@ -710,7 +716,7 @@ def _policy_rate_fred_csv():
     return None
 
 
-def _policy_rate_nyfed():
+def _policy_rate_nyfed(timeout):
     """NY Fed markets API — fully independent host, and the primary publisher.
 
     `targetRateTo` is the FOMC target-range upper bound, i.e. exactly what
@@ -719,7 +725,7 @@ def _policy_rate_nyfed():
     """
     response = requests.get(
         "https://markets.newyorkfed.org/api/rates/unsecured/effr/last/1.json",
-        timeout=POLICY_RATE_TIMEOUT_SECONDS,
+        timeout=timeout,
     )
     response.raise_for_status()
 
@@ -748,10 +754,22 @@ def get_fred_rate():
         ("NY Fed", _policy_rate_nyfed),
     )
 
+    deadline = time.monotonic() + POLICY_RATE_TOTAL_BUDGET_SECONDS
+
     for source, fetch in sources:
         for attempt in range(1, POLICY_RATE_SOURCE_ATTEMPTS + 1):
+            # Clamp each request to whatever wall-clock budget is left, so a chain of
+            # slow-but-not-dead sources can never eat into the function's own timeout.
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                print(
+                    f"Policy rate: {POLICY_RATE_TOTAL_BUDGET_SECONDS}s total budget "
+                    f"exhausted before {source} — giving up"
+                )
+                break
+
             try:
-                fetched = fetch()
+                fetched = fetch(min(POLICY_RATE_TIMEOUT_SECONDS, remaining))
             except Exception as e:
                 print(
                     f"Policy rate: {source} attempt {attempt}/"
@@ -773,6 +791,9 @@ def get_fred_rate():
 
             print(f"Policy rate: {rate * 100:.2f}% from {source} (obs {obs_date})")
             return rate
+
+        if time.monotonic() >= deadline:
+            break
 
     print("Error fetching FRED rate: all sources exhausted — staying cash-only")
     return None
