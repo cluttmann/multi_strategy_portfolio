@@ -620,40 +620,162 @@ def get_telegram_secrets():
     )
 
 
-def get_fred_rate():
-    """Fetch the current Federal Funds Target Rate (Upper Limit) from FRED API."""
-    try:
-        fred_key = get_secret_or_env("FREDKEY")
-        if not fred_key:
-            print("FRED API key not found")
-            return None
-        
-        # Fetch DFEDTARU (Federal Funds Target Rate - Upper Limit)
-        url = f"https://api.stlouisfed.org/fred/series/observations?series_id=DFEDTARU&api_key={fred_key}&file_type=json&sort_order=desc&limit=1"
-        
-        response = requests.get(url, timeout=10)
-        response.raise_for_status()
-        
-        data = response.json()
-        
-        if "observations" in data and len(data["observations"]) > 0:
-            # Get the most recent observation value
-            rate_value = data["observations"][0]["value"]
-            
-            # Handle '.' (missing data) or other non-numeric values
-            if rate_value == "." or rate_value is None:
-                print("FRED API returned missing data")
-                return None
-            
-            # Convert to float and return as decimal (FRED returns percentage, e.g., 5.25)
-            return float(rate_value) / 100.0
-        else:
-            print("No FRED data available")
-            return None
-            
-    except Exception as e:
-        print(f"Error fetching FRED rate: {e}")
+# --- Federal Funds Target Rate (Upper Limit) --------------------------------
+# Three INDEPENDENT reads of the same official number (the FOMC target-range
+# upper bound). This is deliberately not a "fallback default": if every source
+# fails, get_fred_rate() still returns None and check_margin_conditions flips
+# to cash-only, exactly as before. The conservative-by-default gate documented
+# in CLAUDE.md is untouched — this only stops a single dropped packet from
+# standing in for a real signal. A 10s read timeout against api.stlouisfed.org
+# zeroed the entire monthly budget on 2026-08-03 and again on 2026-09-01.
+# 10s was too tight: monthly_invest_all runs once a month, so it ALWAYS cold-starts,
+# and both observed failures (2026-08-03, 2026-09-01) were `Read timed out` — the TLS
+# connection stood and FRED was merely slow, not blocking. The nightly quant job hits
+# the same API from the same project with timeout=60 and has never failed in ~250 runs
+# (quant/data/public_ingest.py). 20s buys that headroom while keeping the worst case
+# (3 sources x 2 attempts) at ~125s, far inside the 540s function budget.
+POLICY_RATE_TIMEOUT_SECONDS = 20
+POLICY_RATE_SOURCE_ATTEMPTS = 2          # per source, before moving to the next
+POLICY_RATE_MAX_STALENESS_DAYS = 10      # target range only moves at FOMC meetings
+POLICY_RATE_SANITY_BOUNDS = (0.0, 0.25)  # decimal; reject anything outside 0-25%
+
+
+def _policy_rate_valid(rate, obs_date, source):
+    """Reject implausible or stale observations before they can be trusted.
+
+    A spuriously LOW rate is the dangerous direction: it would wrongly pass the
+    `margin_rate <= 8%` gate and switch leverage on. Too-high or stale values
+    only ever gate margin off, which is the safe failure mode.
+    """
+    lo, hi = POLICY_RATE_SANITY_BOUNDS
+    if rate is None or not (lo <= rate <= hi):
+        print(f"Policy rate: {source} rejected — {rate} outside sanity bounds")
+        return False
+    if obs_date is not None:
+        age = (datetime.date.today() - obs_date).days
+        if age > POLICY_RATE_MAX_STALENESS_DAYS:
+            print(f"Policy rate: {source} rejected — observation {obs_date} is {age}d stale")
+            return False
+    return True
+
+
+def _policy_rate_fred_api():
+    """FRED JSON API (DFEDTARU) — primary source. Requires FREDKEY."""
+    fred_key = get_secret_or_env("FREDKEY")
+    if not fred_key:
+        print("FRED API key not found")
         return None
+
+    url = (
+        "https://api.stlouisfed.org/fred/series/observations"
+        f"?series_id=DFEDTARU&api_key={fred_key}&file_type=json&sort_order=desc&limit=1"
+    )
+    response = requests.get(url, timeout=POLICY_RATE_TIMEOUT_SECONDS)
+    response.raise_for_status()
+
+    observations = response.json().get("observations") or []
+    if not observations:
+        return None
+
+    value = observations[0].get("value")
+    if value is None or value == ".":  # '.' is FRED's missing-data marker
+        return None
+
+    obs_date = datetime.datetime.strptime(observations[0]["date"], "%Y-%m-%d").date()
+    return float(value) / 100.0, obs_date
+
+
+def _policy_rate_fred_csv():
+    """FRED graph CSV — same series, no API key, different service path.
+
+    Covers a rate-limited or revoked FREDKEY as well as an api.stlouisfed.org
+    blip that leaves the graph backend healthy.
+    """
+    cosd = (datetime.date.today() - datetime.timedelta(days=30)).isoformat()
+    response = requests.get(
+        f"https://fred.stlouisfed.org/graph/fredgraph.csv?id=DFEDTARU&cosd={cosd}",
+        timeout=POLICY_RATE_TIMEOUT_SECONDS,
+    )
+    response.raise_for_status()
+
+    # Header is `observation_date,DFEDTARU`; walk backwards to the newest value.
+    rows = [ln.split(",") for ln in response.text.strip().splitlines()[1:] if ln.strip()]
+    for row in reversed(rows):
+        if len(row) < 2:
+            continue
+        date_str, value = row[0].strip(), row[1].strip()
+        if value in ("", "."):
+            continue
+        return float(value) / 100.0, datetime.datetime.strptime(date_str, "%Y-%m-%d").date()
+    return None
+
+
+def _policy_rate_nyfed():
+    """NY Fed markets API — fully independent host, and the primary publisher.
+
+    `targetRateTo` is the FOMC target-range upper bound, i.e. exactly what
+    DFEDTARU tracks. Published with a one-business-day lag, which is irrelevant
+    for a number that only moves at the 8 scheduled FOMC meetings per year.
+    """
+    response = requests.get(
+        "https://markets.newyorkfed.org/api/rates/unsecured/effr/last/1.json",
+        timeout=POLICY_RATE_TIMEOUT_SECONDS,
+    )
+    response.raise_for_status()
+
+    ref_rates = response.json().get("refRates") or []
+    if not ref_rates:
+        return None
+
+    target_to = ref_rates[0].get("targetRateTo")
+    if target_to is None:
+        return None
+
+    obs_date = datetime.datetime.strptime(ref_rates[0]["effectiveDate"], "%Y-%m-%d").date()
+    return float(target_to) / 100.0, obs_date
+
+
+def get_fred_rate():
+    """Current Federal Funds Target Rate (Upper Limit) as a decimal, e.g. 0.0375.
+
+    Walks the three sources in order of authority and stops at the first value
+    that passes the sanity + freshness checks. Returns None only when ALL of
+    them fail, which keeps check_margin_conditions fail-closed (cash-only).
+    """
+    sources = (
+        ("FRED API", _policy_rate_fred_api),
+        ("FRED CSV", _policy_rate_fred_csv),
+        ("NY Fed", _policy_rate_nyfed),
+    )
+
+    for source, fetch in sources:
+        for attempt in range(1, POLICY_RATE_SOURCE_ATTEMPTS + 1):
+            try:
+                fetched = fetch()
+            except Exception as e:
+                print(
+                    f"Policy rate: {source} attempt {attempt}/"
+                    f"{POLICY_RATE_SOURCE_ATTEMPTS} failed: {e}"
+                )
+                if attempt < POLICY_RATE_SOURCE_ATTEMPTS:
+                    time.sleep(1.5 * attempt)
+                continue
+
+            # A well-formed response we cannot use (missing data, bad shape) is
+            # not worth retrying — move straight on to the next source.
+            if fetched is None:
+                print(f"Policy rate: {source} returned no usable observation")
+                break
+
+            rate, obs_date = fetched
+            if not _policy_rate_valid(rate, obs_date, source):
+                break
+
+            print(f"Policy rate: {rate * 100:.2f}% from {source} (obs {obs_date})")
+            return rate
+
+    print("Error fetching FRED rate: all sources exhausted — staying cash-only")
+    return None
 
 
 def get_account_info(api):
@@ -5753,23 +5875,39 @@ def monthly_invest_all_strategies(api, force_execute=False, skip_order_wait=Fals
     # Send one shared account status message to Telegram before executing strategies
     metrics = margin_result.get("metrics", {})
     gate_results = margin_result.get("gate_results", {})
+    margin_errors = margin_result.get("errors", [])
     trend_emoji = "✅" if gate_results.get("market_trend", False) else "❌"
-    spx_price = metrics.get("spx_price", 0)
-    spx_sma = metrics.get("spx_sma", 0)
-    margin_rate = metrics.get("margin_rate", 0)
-    buffer = metrics.get("buffer", 0)
-    leverage = metrics.get("leverage", 0)
-    equity = metrics.get("equity", 0)
-    portfolio_value = metrics.get("portfolio_value", 0)
-    margin_decision = "🟢 Margin ON (+10%)" if margin_result.get("allowed", False) else "🔴 Cash-Only"
-    
+
+    # A gate that never RAN (check_margin_conditions returns early on a data-fetch
+    # error) must not render as "0.0%" — that reads like a real measurement. On
+    # 2026-09-01 a FRED timeout produced "Margin rate: 0.0% | Buffer: 0.0% |
+    # Leverage: 0.00x", indistinguishable from a genuine cash-only decision.
+    def _pct(key):
+        return f"{metrics[key] * 100:.1f}%" if key in metrics else "n/a"
+
+    def _usd(key):
+        return f"${metrics[key]:,.2f}" if key in metrics else "n/a"
+
+    leverage_str = f"{metrics['leverage']:.2f}x" if "leverage" in metrics else "n/a"
+
+    if margin_errors:
+        margin_decision = "⚠️ Cash-Only — data error, NOT a market signal"
+    elif margin_result.get("allowed", False):
+        margin_decision = "🟢 Margin ON (+10%)"
+    else:
+        margin_decision = "🔴 Cash-Only"
+
     account_msg = "📊 Monthly Investment — Account Status\n\n"
     if is_retry:
         account_msg += "🔁 Retry: prior attempt this month errored (data-fetch failure)\n\n"
-    account_msg += f"SPX: ${spx_price:,.2f} (SMA: ${spx_sma:,.2f}) {trend_emoji}\n"
-    account_msg += f"Margin rate: {margin_rate*100:.1f}% | Buffer: {buffer*100:.1f}% | Leverage: {leverage:.2f}x\n"
-    account_msg += f"Decision: {margin_decision}\n\n"
-    account_msg += f"Equity: ${equity:,.2f} | Portfolio: ${portfolio_value:,.2f}\n"
+    account_msg += f"SPX: {_usd('spx_price')} (SMA: {_usd('spx_sma')}) {trend_emoji}\n"
+    account_msg += f"Margin rate: {_pct('margin_rate')} | Buffer: {_pct('buffer')} | Leverage: {leverage_str}\n"
+    account_msg += f"Decision: {margin_decision}\n"
+    if margin_errors:
+        account_msg += "⚠️ " + "; ".join(margin_errors) + "\n"
+        account_msg += "↳ Auto-retry on the next trading day (day 1–7 window).\n"
+    account_msg += "\n"
+    account_msg += f"Equity: {_usd('equity')} | Portfolio: {_usd('portfolio_value')}\n"
     account_msg += f"Investing: ${total_investing:,.2f}\n\n"
     
     # Per-strategy budget breakdown (allocations updated 2026-05-12 — F4 promoted,
