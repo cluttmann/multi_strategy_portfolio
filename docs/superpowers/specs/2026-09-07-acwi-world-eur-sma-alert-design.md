@@ -45,7 +45,7 @@ Die Signalreihe ist ein 17:30-gesampelter Fondspreis, die Studie lief auf einem
    mittelt sich über ein 250-Tage-Fenster praktisch heraus. Vgl. die Notiz in
    `msci-index-eod-api`: LSE-Schluss vs. US-Schluss ergibt Tageskorrelation 0,64,
    aber Wochenkorrelation 0,90 — reines Timing-Artefakt.
-2. **Fonds-TER ~0,20 %/Jahr.** Über eine SMA-Halbwertsbreite (~125 Tage) ein
+2. **Fonds-TER ~0,20 %/Jahr.** Über eine SMA-Halbwertsbreite (~127 Tage) ein
    Versatz von ~0,10 %.
 
 Beides eine Größenordnung unter dem 1-%-Band. Weil die Tracker **thesaurierend**
@@ -65,14 +65,22 @@ von `trading-436516`; `get_secret_or_env("EODHD_TOKEN")` genügt.
 
 | Symbol | Instrument | Fenster |
 |---|---|---:|
-| `IUSQ.XETRA` | iShares Core MSCI ACWI UCITS ETF Acc (EUR) | 250d |
-| `EUNL.XETRA` | iShares Core MSCI World UCITS ETF Acc (EUR) | 255d |
+| `IUSQ.XETRA` | iShares Core MSCI ACWI UCITS ETF Acc (EUR) | 255d |
+| `EUNL.XETRA` | iShares Core MSCI World UCITS ETF Acc (EUR) | 250d |
 
-Fensterwahl: ACWI 250d ist die Mitte des langsamen Plateaus (240–280d) aus der
-EUR-Neurechnung vom 2026-08-12. World 255d übernimmt das Fenster des zu
-ersetzenden `urth_255sma_alert`; die Studie maß für den World post-1988
-240d (Commit `c42382d`) — 15 Tage Unterschied liegen innerhalb desselben
-Plateaus, deshalb kein Einwand.
+Fensterwahl (von Carl gesetzt, 2026-09-07): ACWI 255d, World 250d. Beide liegen
+im jeweiligen langsamen Plateau — ACWI 240–280d aus der EUR-Neurechnung vom
+2026-08-12, World mit gemessenem Optimum 240d post-1988 (Commit `c42382d`).
+Innerhalb eines Plateaus ist ein Unterschied von 10–15 Tagen definitionsgemäß
+Rauschen, deshalb kein Einwand gegen beide Werte.
+
+Zur Einordnung für später: die ursprüngliche Prämisse „250d ist der Sweetspot"
+stammt aus der **alten USD-Fassung** der Studie (`sma_sweep_acwi.py`). Die
+EUR-Neurechnung fand **zwei** Plateaus (140–180d und 240–280d). Vor Steuern
+gewinnt das schnelle (160d schlägt 250d um ΔSharpe 0,040, in 74 % der
+Bootstrap-Pfade), nach deutscher Steuer ist es ein Gleichstand, weil das
+schnelle Fenster 37 % mehr handelt. Die hier gewählten Fenster sind also die
+steuerlich ruhigere Hälfte einer Pattsituation, nicht eine gemessene Spitze.
 
 Datenqualität geprüft (2026-09-07): `IUSQ.XETRA` liefert 681 Bars seit 2024-01,
 keine Nullvolumen-Tage, Lücken nur zu Ostern und Weihnachten (max. 6 Kalendertage).
@@ -103,8 +111,8 @@ auf demselben Index wie `level`).
 
 | | Live | SMA | Abstand | Zustand | Ausstiegslinie (SMA−1 %) |
 |---|---:|---:|---:|:---:|---:|
-| `IUSQ.XETRA` @250d | 107,4800 € | 97,4657 € | +10,27 % | above | 96,4910 € |
-| `EUNL.XETRA` @255d | 127,3300 € | 115,9443 € | +9,82 % | above | 114,7849 € |
+| `IUSQ.XETRA` @255d | 107,4800 € | 97,2664 € | +10,50 % | above | 96,2937 € |
+| `EUNL.XETRA` @250d | 127,3300 € | 116,1591 € | +9,62 % | above | 114,9975 € |
 
 Die Implementierung muss diese Zahlen reproduzieren (bis auf den seither
 gelaufenen Kurs).
@@ -184,7 +192,7 @@ sagt, ist schlimmer als keiner.
 
 4. **State-Machine unverändert.** `get_index_sma_state` / `save_index_sma_state`
    sind schon auf `(symbol, sma_period)` verschlüsselt, also laufen
-   `IUSQ.XETRA`@250 und `EUNL.XETRA`@255 kollisionsfrei nebeneinander.
+   `IUSQ.XETRA`@255 und `EUNL.XETRA`@250 kollisionsfrei nebeneinander.
 
 5. **Nachrichteninhalt** um die Ausstiegslinie erweitern: Abstand in Prozent
    *und* der absolute Kurs, bei dem das Band gerissen wird. Das ist die Zahl,
@@ -232,10 +240,10 @@ Lokal, nach dem CLI-Fix:
 
 ```bash
 python3 main.py --action index_alert --source eodhd --run_role advisory \
-  --index_symbol IUSQ.XETRA --index_name "MSCI ACWI (EUR)" --sma_period 250 --env paper
+  --index_symbol IUSQ.XETRA --index_name "MSCI ACWI (EUR)" --sma_period 255 --env paper
 
 python3 main.py --action index_alert --source eodhd --run_role advisory \
-  --index_symbol EUNL.XETRA --index_name "MSCI World (EUR)" --sma_period 255 --env paper
+  --index_symbol EUNL.XETRA --index_name "MSCI World (EUR)" --sma_period 250 --env paper
 ```
 
 Erwartung: reproduziert die Referenztabelle oben, Zustand `above`, keine
