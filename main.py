@@ -3236,6 +3236,290 @@ def mark_last_hour_alert_sent(index_symbol, sma_period, env="live"):
 
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# EODHD-Zweig des Index-Alerts (EUR-notierte XETRA-Tracker)
+#
+# Warum eine eigene Quelle statt Alpaca: der Alert entscheidet ueber einen Trade,
+# der um 17:30 CET an der XETRA in EUR ausgefuehrt wird. Alpaca fuehrt keine
+# EUR-Variante des ACWI, liefert Bars nur mit adjustment="split" (also ohne
+# Dividenden, ~1,8 %/Jahr Versatz gegen eine Net-TR-Studie) und quotet diese
+# Ticker im IEX-Feed unbrauchbar breit (ACWI am 2026-09-07: 156,85/166,65).
+# Details: docs/superpowers/specs/2026-09-07-acwi-world-eur-sma-alert-design.md
+# ─────────────────────────────────────────────────────────────────────────────
+
+EODHD_BASE_URL = "https://eodhd.com/api"
+MAX_EOD_GAP_DAYS = 10      # beobachtete Maximalluecke bei IUSQ.XETRA: 6 (Weihnachten)
+MAX_LIVE_JUMP = 0.08       # groesserer Sprung => Tickerwechsel, Split oder Fehlprint
+
+
+class EodhdDataError(Exception):
+    """EODHD-Daten fehlen, sind veraltet oder unplausibel.
+
+    Wird bewusst NIE in einen Default abgefangen. Ein Alert, der bei
+    Datenausfall stillschweigend 'alles in Ordnung' meldet, ist schlimmer als
+    keiner - dieselbe Regel wie fuer die Margin-Gates in CLAUDE.md.
+    """
+
+
+def _heute_iso():
+    """Heutiges Datum als ISO-String. Eigene Funktion, damit Tests sie ersetzen koennen."""
+    return datetime.date.today().isoformat()
+
+
+def _sma_state_from_diff(diff_percent, noise_threshold):
+    """Zustand aus dem prozentualen Abstand zur SMA, mit Totband."""
+    if diff_percent > noise_threshold:
+        return "above"
+    if diff_percent < -noise_threshold:
+        return "below"
+    return "neutral"
+
+
+def _eodhd_sma_series(hist, live_price, period, today_iso):
+    """SMA-Fenster fuer advisory/decisive: (period-1) Schlusskurse + Live-Kurs.
+
+    `hist` ist [(datum_iso, close)] aufsteigend und darf den heutigen Bar
+    enthalten - der wird verworfen, damit der Tag nicht doppelt im Fenster
+    steht (einmal als Schluss, einmal als Live-Kurs).
+    """
+    past = [(d, c) for d, c in hist if d < today_iso]
+    if len(past) < period - 1:
+        raise EodhdDataError(
+            f"nur {len(past)} historische Schlusskurse vor {today_iso}, "
+            f"benoetigt {period - 1}")
+
+    newest_date, newest_close = past[-1]
+    gap = (datetime.date.fromisoformat(today_iso)
+           - datetime.date.fromisoformat(newest_date)).days
+    if gap > MAX_EOD_GAP_DAYS:
+        raise EodhdDataError(
+            f"neuester Schlusskurs ist {gap} Kalendertage alt ({newest_date})")
+
+    if abs(live_price / newest_close - 1) > MAX_LIVE_JUMP:
+        raise EodhdDataError(
+            f"Live-Kurs {live_price:.4f} weicht "
+            f"{(live_price / newest_close - 1) * 100:+.2f} % vom letzten "
+            f"Schluss {newest_close:.4f} ({newest_date}) ab")
+
+    series = [c for _, c in past[-(period - 1):]] + [live_price]
+    if len(series) != period:
+        raise EodhdDataError(f"Fenster hat {len(series)} statt {period} Werte")
+    return series
+
+
+def _eodhd_close_series(hist, period, today_iso):
+    """SMA-Fenster fuer reconcile: `period` echte Schlusskurse inkl. heute."""
+    if not hist or hist[-1][0] != today_iso:
+        neuester = hist[-1][0] if hist else "keiner"
+        raise EodhdDataError(
+            f"kein Schlusskurs fuer {today_iso} vorhanden (neuester: {neuester})")
+    if len(hist) < period:
+        raise EodhdDataError(
+            f"nur {len(hist)} Schlusskurse, benoetigt {period}")
+    return [c for _, c in hist[-period:]]
+
+
+def _eodhd_token():
+    token = get_secret_or_env("EODHD_TOKEN")
+    if not token:
+        raise EodhdDataError(
+            "EODHD_TOKEN nicht gefunden (weder Secret Manager noch .env)")
+    return token
+
+
+def fetch_eodhd_eod_series(symbol, calendar_days=600):
+    """Taegliche Schlusskurse von EODHD als [(datum_iso, close)] aufsteigend.
+
+    Nutzt `adjusted_close`; die verwendeten Tracker sind thesaurierend, die
+    Reihe ist also Total Return per Konstruktion.
+    """
+    start = (datetime.date.today()
+             - datetime.timedelta(days=calendar_days)).isoformat()
+    response = requests.get(
+        f"{EODHD_BASE_URL}/eod/{symbol}",
+        params={"api_token": _eodhd_token(), "fmt": "json",
+                "period": "d", "from": start},
+        timeout=30)
+
+    if response.status_code != 200:
+        raise EodhdDataError(
+            f"EOD-Abruf fuer {symbol}: HTTP {response.status_code}")
+    try:
+        rows = response.json()
+    except ValueError:
+        raise EodhdDataError(f"EOD-Abruf fuer {symbol}: Antwort ist kein JSON")
+    if not isinstance(rows, list) or not rows:
+        raise EodhdDataError(f"EOD-Abruf fuer {symbol}: keine Bars geliefert")
+
+    series = []
+    for row in rows:
+        close = row.get("adjusted_close", row.get("close"))
+        if close in (None, "NA") or not row.get("date"):
+            continue
+        series.append((row["date"], float(close)))
+    if not series:
+        raise EodhdDataError(
+            f"EOD-Abruf fuer {symbol}: keine verwertbaren Schlusskurse")
+    return sorted(series)
+
+
+def fetch_eodhd_realtime(symbol):
+    """Aktueller Kurs von EODHD als (close, zeitstempel_utc)."""
+    response = requests.get(
+        f"{EODHD_BASE_URL}/real-time/{symbol}",
+        params={"api_token": _eodhd_token(), "fmt": "json"},
+        timeout=20)
+
+    if response.status_code != 200:
+        raise EodhdDataError(
+            f"Live-Abruf fuer {symbol}: HTTP {response.status_code}")
+    try:
+        data = response.json()
+    except ValueError:
+        raise EodhdDataError(f"Live-Abruf fuer {symbol}: Antwort ist kein JSON")
+
+    close, timestamp = data.get("close"), data.get("timestamp")
+    if close in (None, "NA") or timestamp in (None, "NA"):
+        raise EodhdDataError(
+            f"Live-Abruf fuer {symbol}: EODHD meldet 'NA' - Ticker unbekannt "
+            f"oder umbenannt?")
+    return float(close), datetime.datetime.utcfromtimestamp(int(timestamp))
+
+
+def get_eodhd_sma_state(index_symbol, sma_period, env="live"):
+    """Letzter bekannter Crossing-Zustand eines EODHD-Index, oder None.
+
+    Bewusst NICHT get_index_sma_state(): das legt den Zustand als Feld im
+    Alpaca-Preis-Cache (`market-data-{env}`) ab und schreibt gar nicht, wenn
+    das Dokument fehlt. Fuer EODHD-Symbole legt update_market_data() nie eines
+    an - der Zustand wuerde also nie persistieren, previous_state waere immer
+    None und es gaebe nie einen Crossover-Alert.
+    """
+    try:
+        doc = (get_firestore_client()
+               .collection(f"index-alert-state-{env}")
+               .document(normalize_symbol(index_symbol))
+               .get())
+        if not doc.exists:
+            return None
+        return doc.to_dict().get(f"sma{sma_period}_state")
+    except Exception as e:
+        print(f"Warning: could not load EODHD SMA state for {index_symbol}: {e}")
+        return None
+
+
+def save_eodhd_sma_state(index_symbol, sma_period, state, price, sma_value,
+                         env="live"):
+    """Crossing-Zustand schreiben. Legt das Dokument an, falls noetig.
+
+    Faengt bewusst keine Exception ab: schlaegt das Schreiben fehl, sieht der
+    naechste Lauf noch den alten Zustand und wuerde denselben Alert erneut
+    senden. Das soll auffallen, nicht in einem Log versickern.
+    """
+    (get_firestore_client()
+     .collection(f"index-alert-state-{env}")
+     .document(normalize_symbol(index_symbol))
+     .set({f"sma{sma_period}_state": state,
+           f"sma{sma_period}_value": sma_value,
+           "price": price,
+           "timestamp": datetime.datetime.utcnow()}, merge=True))
+
+
+def _handle_eodhd_sma_crossing(index_symbol, index_name, sma_period,
+                               noise_threshold, currency_symbol, run_role, env):
+    """SMA-Crossing-Alert auf einem EUR-notierten XETRA-Tracker.
+
+    Drei Rollen statt der US-Handelszeiten-Logik des Alpaca-Pfads:
+      advisory  - Vorwarnung 15:00-17:00, schreibt bewusst KEINEN State
+      decisive  - Handelsalarm 17:20, schreibt den State
+      reconcile - Abgleich 17:45 auf den echten Schluss, korrigiert den State
+    """
+    today_iso = _heute_iso()
+    hist = fetch_eodhd_eod_series(index_symbol)
+
+    if run_role == "reconcile":
+        series = _eodhd_close_series(hist, sma_period, today_iso)
+        current_price = series[-1]
+        price_source = f"XETRA-Schluss {today_iso}"
+    elif run_role in ("advisory", "decisive"):
+        current_price, live_ts = fetch_eodhd_realtime(index_symbol)
+        if run_role == "decisive" and live_ts.date().isoformat() != today_iso:
+            raise EodhdDataError(
+                f"Live-Kurs stammt vom {live_ts.date()}, nicht von heute "
+                f"({today_iso}) - Feiertag oder haengender Feed?")
+        series = _eodhd_sma_series(hist, current_price, sma_period, today_iso)
+        price_source = f"live {live_ts:%H:%M} UTC"
+    else:
+        raise EodhdDataError(
+            f"Unbekannte run_role '{run_role}' - erlaubt: advisory, decisive, "
+            f"reconcile")
+
+    sma_value = sum(series) / len(series)
+    diff_percent = (current_price / sma_value - 1) * 100
+    current_state = _sma_state_from_diff(diff_percent, noise_threshold)
+    previous_state = get_eodhd_sma_state(index_symbol, sma_period, env=env)
+    trigger = sma_value * (1 - noise_threshold / 100)
+
+    def body(headline):
+        return (f"{headline}\n"
+                f"Kurs: {current_price:.2f} {currency_symbol} ({price_source})\n"
+                f"SMA{sma_period}: {sma_value:.2f} {currency_symbol} "
+                f"({diff_percent:+.2f} %)\n"
+                f"Ausstiegslinie (SMA -{noise_threshold:.1f} %): "
+                f"{trigger:.2f} {currency_symbol} "
+                f"({(trigger / current_price - 1) * 100:+.2f} % vom Kurs)")
+
+    message, status = None, f"{current_state}_no_change"
+
+    if run_role == "advisory":
+        # Meldet nur, wenn es eng wird oder das Vorzeichen gegen den letzten
+        # Tagesschluss kippt. Schreibt bewusst keinen State: ein am Band
+        # zitternder Intraday-Kurs wuerde sonst Whipsaw-Alerts erzeugen, die
+        # der Backtest nie hatte - der schaut nur auf Schlusskurse.
+        if current_state == "neutral" or (previous_state
+                                          and current_state != previous_state):
+            message = body(f"⚠️ {index_name} Vorwarnung (SMA{sma_period}) - "
+                           f"Handelsschluss XETRA 17:30 CET")
+            status = "advisory"
+
+    elif run_role == "decisive":
+        if previous_state is None:
+            message = body(f"🆕 {index_name}: Alert initialisiert "
+                           f"(SMA{sma_period}) - Zustand {current_state.upper()}")
+            status = "initialised"
+        elif previous_state != current_state:
+            emoji = {"above": "🚀", "below": "📉", "neutral": "📊"}[current_state]
+            message = body(f"{emoji} {index_name}: SMA{sma_period} "
+                           f"{previous_state.upper()} -> {current_state.upper()} "
+                           f"- noch bis 17:30 CET handelbar")
+            status = f"crossover_{current_state}"
+        save_eodhd_sma_state(index_symbol, sma_period, current_state,
+                             current_price, sma_value, env=env)
+
+    else:  # reconcile
+        if previous_state != current_state:
+            message = body(f"🔁 {index_name}: Korrektur nach Schlusskurs "
+                           f"(SMA{sma_period}) - {previous_state} -> {current_state}")
+            status = "reconciled"
+        save_eodhd_sma_state(index_symbol, sma_period, current_state,
+                             current_price, sma_value, env=env)
+
+    if message:
+        send_telegram_message(message)
+
+    return jsonify({
+        "message": message or f"{index_name} ist {current_state} SMA{sma_period}",
+        "status": status,
+        "run_role": run_role,
+        "current_price": current_price,
+        "sma_value": sma_value,
+        "price_diff_percent": diff_percent,
+        "trigger_price": trigger,
+        "previous_state": previous_state,
+        "current_state": current_state,
+    }), 200
+
+
 def check_unified_index_alert(request, env=None):
     """
     Unified index alert function that can handle multiple indices and alert types.
@@ -3265,6 +3549,9 @@ def check_unified_index_alert(request, env=None):
     sma_period = request_json.get("sma_period", 200)  # Default to 200-day SMA
     threshold_percent = request_json.get("threshold_percent", 30.0)  # For ATH drops
     noise_threshold = request_json.get("noise_threshold", 1.0)  # For SMA crossings
+    source = request_json.get("source", "alpaca")             # "alpaca" | "eodhd"
+    currency_symbol = request_json.get("currency_symbol", "$")
+    run_role = request_json.get("run_role", "decisive")        # nur bei source="eodhd"
     
     # Determine environment: from parameter, request JSON, or default to alpaca_environment
     if env is None:
@@ -3291,6 +3578,12 @@ def check_unified_index_alert(request, env=None):
                 }), 200
                 
         elif alert_type == "sma_crossing":
+            if source == "eodhd":
+                return _handle_eodhd_sma_crossing(
+                    index_symbol, index_name, sma_period, noise_threshold,
+                    currency_symbol, run_role, env)
+
+            # ── Alpaca-Pfad, unveraendert ──────────────────────────────────
             # Handle SMA crossing alerts with crossover detection
             # Get all market data at once for efficiency
             market_data = get_all_market_data(index_symbol, env=env)
@@ -3417,6 +3710,11 @@ def check_unified_index_alert(request, env=None):
         else:
             return jsonify({"error": f"Invalid alert_type: {alert_type}. Must be 'ath_drop' or 'sma_crossing'"}), 400
                 
+    except EodhdDataError as e:
+        error_message = f"❗ {index_name} ({index_symbol}, {run_role}): {e}"
+        print(error_message)
+        send_telegram_message(error_message)
+        return jsonify({"error": str(e), "status": "data_error"}), 500
     except Exception as e:
         error_message = f"Error checking {index_name} alert: {str(e)}"
         print(error_message)
@@ -6211,7 +6509,22 @@ def audit_monthly_run_route(request):
     return audit_monthly_run(api, env=alpaca_environment)
 
 
-def run_local(action, env="paper", request="test", force_execute=False, investment_amount=None):
+class _LocalRequest:
+    """Minimaler Ersatz fuer ein Flask-Request-Objekt, damit run_local die
+    HTTP-Handler direkt aufrufen kann."""
+
+    content_type = "application/json"
+
+    def __init__(self, payload):
+        self._payload = payload
+        self.data = json.dumps(payload).encode("utf-8")
+
+    def get_json(self, silent=False):
+        return self._payload
+
+
+def run_local(action, env="paper", request="test", force_execute=False,
+              investment_amount=None, alert_payload=None):
     api = set_alpaca_environment(env=env, use_secret_manager=False)
     if action == "monthly_invest_all":
         return monthly_invest_all_strategies(api, force_execute=force_execute, skip_order_wait=True, env=env)
@@ -6228,7 +6541,16 @@ def run_local(action, env="paper", request="test", force_execute=False, investme
     elif action in ("sell_spxl_below_200sma", "buy_spxl_above_200sma"):
         return daily_trade_sma(api, "SPXL", env=env)
     elif action == "index_alert":
-        return check_unified_index_alert(request, env=env)
+        if not alert_payload:
+            return ("index_alert braucht mindestens --index_symbol. Beispiel: "
+                    "--action index_alert --source eodhd "
+                    "--index_symbol IUSQ.XETRA --sma_period 255")
+        # jsonify() braucht einen App-Kontext. In der Cloud Function liefert
+        # den der Request selbst, in der CLI gibt es keinen.
+        with app.app_context():
+            response, code = check_unified_index_alert(
+                _LocalRequest(alert_payload), env=env)
+            return {"http_status": code, **response.get_json()}
     elif action == "monthly_dual_momentum":
         return monthly_dual_momentum_strategy(api, force_execute=force_execute, skip_order_wait=True, env=env)
     elif action == "monthly_buy_regime_sso":
@@ -6295,8 +6617,41 @@ if __name__ == "__main__":
         type=float,
         default=None,
     )
+    # index_alert-Parameter
+    parser.add_argument("--index_symbol", default=None,
+                        help="index_alert: Symbol, z.B. IUSQ.XETRA oder SPY")
+    parser.add_argument("--index_name", default=None,
+                        help="index_alert: Klartextname fuer die Telegram-Nachricht")
+    parser.add_argument("--alert_type", default="sma_crossing",
+                        choices=["sma_crossing", "ath_drop"])
+    parser.add_argument("--source", default="alpaca", choices=["alpaca", "eodhd"])
+    parser.add_argument("--run_role", default="decisive",
+                        choices=["advisory", "decisive", "reconcile"],
+                        help="index_alert, nur bei --source eodhd")
+    parser.add_argument("--sma_period", type=int, default=200)
+    parser.add_argument("--noise_threshold", type=float, default=1.0)
+    parser.add_argument("--threshold_percent", type=float, default=30.0)
+    parser.add_argument("--currency_symbol", default=None,
+                        help="Default: Euro-Zeichen bei --source eodhd, sonst $")
     args = parser.parse_args()
 
+    alert_payload = None
+    if args.index_symbol:
+        alert_payload = {
+            "index_symbol": args.index_symbol,
+            "index_name": args.index_name or args.index_symbol,
+            "alert_type": args.alert_type,
+            "source": args.source,
+            "run_role": args.run_role,
+            "sma_period": args.sma_period,
+            "noise_threshold": args.noise_threshold,
+            "threshold_percent": args.threshold_percent,
+            "currency_symbol": args.currency_symbol
+                               or ("\u20ac" if args.source == "eodhd" else "$"),
+        }
+
     # Run the function locally
-    result = run_local(action=args.action, env=args.env, force_execute=args.force, investment_amount=args.investment_amount)
+    result = run_local(action=args.action, env=args.env, force_execute=args.force,
+                       investment_amount=args.investment_amount,
+                       alert_payload=alert_payload)
     print(f"\nResult: {result}\n")

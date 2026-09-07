@@ -1,0 +1,4 @@
+# Nur lokal. NIEMALS nach requirements.txt uebernehmen - cloudbuild.yaml
+# kopiert requirements.txt in jedes fn-light-Image (15 Functions), und jede
+# Zeile dort kostet Platz in der Artifact Registry.
+pytest>=8.0
