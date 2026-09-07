@@ -570,35 +570,21 @@ steps:
       - 'deploy-audit'
 
   # Cloud Scheduler Job for URTH 255-day SMA crossing alert
-  - name: 'gcr.io/cloud-builders/gcloud'
-    entrypoint: 'bash'
-    args:
-      - '-c'
-      - |
-        gcloud scheduler jobs update http urth_255sma_alert \
-          --schedule='15 9-15 * * 1-5' \
-          --uri='https://europe-west3-trading-436516.cloudfunctions.net/index_alert' \
-          --http-method='POST' \
-          --time-zone='America/New_York' \
-          --location='europe-west3' \
-          --oidc-service-account-email='1098661711782-compute@developer.gserviceaccount.com' \
-          --message-body='{"index_symbol": "URTH", "index_name": "iShares MSCI World ETF", "alert_type": "sma_crossing", "sma_period": 255, "noise_threshold": 1.0}' \
-        || gcloud scheduler jobs create http urth_255sma_alert \
-          --schedule='15 9-15 * * 1-5' \
-          --uri='https://europe-west3-trading-436516.cloudfunctions.net/index_alert' \
-          --http-method='POST' \
-          --time-zone='America/New_York' \
-          --location='europe-west3' \
-          --oidc-service-account-email='1098661711782-compute@developer.gserviceaccount.com' \
-          --message-body='{"index_symbol": "URTH", "index_name": "iShares MSCI World ETF", "alert_type": "sma_crossing", "sma_period": 255, "noise_threshold": 1.0}'
-    waitFor:
-      - 'deploy-aaa'
-      - 'deploy-f4'
-      - 'deploy-quarterly-f4'
-      - 'deploy-index-alert'
-      - 'deploy-audit'
+  # ─────────────────────────────────────────────────────────────────────────
+  # RETIRED 2026-09-07: urth_255sma_alert
+  #
+  # Ersetzt durch world_eur_sma_* am Ende dieser Wave. Der alte Alert mass URTH
+  # in USD zu New Yorker Zeiten, die Handelsentscheidung faellt aber in EUR an
+  # der XETRA um 17:30 CET - zwei verschiedene Zeitscheiben fuer dieselbe
+  # Entscheidung.
+  #
+  # ACHTUNG: cloudbuild kennt nur create/update. Das Entfernen dieses Blocks
+  # loescht den Job NICHT. Einmalig manuell noetig:
+  #   gcloud scheduler jobs delete urth_255sma_alert --location=europe-west3
+  #
+  # msci_drop_alert bleibt bestehen - anderer alert_type (ATH-Drop/Kreditsignal).
+  # ─────────────────────────────────────────────────────────────────────────
 
-  # Cloud Scheduler Job for SPY 200-day SMA crossing alert
   - name: 'gcr.io/cloud-builders/gcloud'
     entrypoint: 'bash'
     args:
@@ -725,6 +711,195 @@ steps:
             --location='europe-west3' \
             --oidc-service-account-email='1098661711782-compute@developer.gserviceaccount.com'
         fi
+    waitFor:
+      - 'deploy-aaa'
+      - 'deploy-f4'
+      - 'deploy-quarterly-f4'
+      - 'deploy-index-alert'
+      - 'deploy-audit'
+
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # EUR-SMA-Alerts auf der XETRA-Zeitscheibe (2026-09-07)
+  #
+  # Ersetzen urth_255sma_alert. Gegatet werden die beiden gehebelten
+  # Euro-Produkte (2x ACWI LU3386643970, 2x World) - das Signal laeuft aber auf
+  # dem UNGEHEBELTEN 1x-Tracker, so rechnet auch die Studie.
+  #
+  # Zeitzone Europe/Berlin, NICHT America/New_York wie die aelteren Alerts: der
+  # Anker ist der XETRA-Schluss um 17:30, und die Sommerzeitumstellungen der
+  # beiden Zonen sind nicht deckungsgleich.
+  #
+  # Drei Rollen pro Symbol:
+  #   advisory  0 15-17  Vorwarnung, schreibt bewusst keinen State
+  #   decisive  20 17    Handelsalarm, 10 Min vor Handelsschluss
+  #   reconcile 45 17    Abgleich auf den echten Schluss + taeglicher Lebendtest
+  #
+  # Kein neuer Deploy-Schritt: index_alert nimmt den neuen Pfad ueber den
+  # source-Parameter, die Function-Liste bleibt unveraendert.
+  # ─────────────────────────────────────────────────────────────────────────
+
+  - name: 'gcr.io/cloud-builders/gcloud'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        gcloud scheduler jobs update http acwi_eur_sma_advisory \
+          --schedule='0 15-17 * * 1-5' \
+          --uri='https://europe-west3-trading-436516.cloudfunctions.net/index_alert' \
+          --http-method='POST' \
+          --time-zone='Europe/Berlin' \
+          --location='europe-west3' \
+          --oidc-service-account-email='1098661711782-compute@developer.gserviceaccount.com' \
+          --message-body='{"index_symbol": "IUSQ.XETRA", "index_name": "MSCI ACWI (EUR)", "alert_type": "sma_crossing", "source": "eodhd", "run_role": "advisory", "sma_period": 255, "noise_threshold": 1.0, "currency_symbol": "€"}' \
+        || gcloud scheduler jobs create http acwi_eur_sma_advisory \
+          --schedule='0 15-17 * * 1-5' \
+          --uri='https://europe-west3-trading-436516.cloudfunctions.net/index_alert' \
+          --http-method='POST' \
+          --time-zone='Europe/Berlin' \
+          --location='europe-west3' \
+          --oidc-service-account-email='1098661711782-compute@developer.gserviceaccount.com' \
+          --message-body='{"index_symbol": "IUSQ.XETRA", "index_name": "MSCI ACWI (EUR)", "alert_type": "sma_crossing", "source": "eodhd", "run_role": "advisory", "sma_period": 255, "noise_threshold": 1.0, "currency_symbol": "€"}'
+    waitFor:
+      - 'deploy-aaa'
+      - 'deploy-f4'
+      - 'deploy-quarterly-f4'
+      - 'deploy-index-alert'
+      - 'deploy-audit'
+
+  - name: 'gcr.io/cloud-builders/gcloud'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        gcloud scheduler jobs update http acwi_eur_sma_decisive \
+          --schedule='20 17 * * 1-5' \
+          --uri='https://europe-west3-trading-436516.cloudfunctions.net/index_alert' \
+          --http-method='POST' \
+          --time-zone='Europe/Berlin' \
+          --location='europe-west3' \
+          --oidc-service-account-email='1098661711782-compute@developer.gserviceaccount.com' \
+          --message-body='{"index_symbol": "IUSQ.XETRA", "index_name": "MSCI ACWI (EUR)", "alert_type": "sma_crossing", "source": "eodhd", "run_role": "decisive", "sma_period": 255, "noise_threshold": 1.0, "currency_symbol": "€"}' \
+        || gcloud scheduler jobs create http acwi_eur_sma_decisive \
+          --schedule='20 17 * * 1-5' \
+          --uri='https://europe-west3-trading-436516.cloudfunctions.net/index_alert' \
+          --http-method='POST' \
+          --time-zone='Europe/Berlin' \
+          --location='europe-west3' \
+          --oidc-service-account-email='1098661711782-compute@developer.gserviceaccount.com' \
+          --message-body='{"index_symbol": "IUSQ.XETRA", "index_name": "MSCI ACWI (EUR)", "alert_type": "sma_crossing", "source": "eodhd", "run_role": "decisive", "sma_period": 255, "noise_threshold": 1.0, "currency_symbol": "€"}'
+    waitFor:
+      - 'deploy-aaa'
+      - 'deploy-f4'
+      - 'deploy-quarterly-f4'
+      - 'deploy-index-alert'
+      - 'deploy-audit'
+
+  - name: 'gcr.io/cloud-builders/gcloud'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        gcloud scheduler jobs update http acwi_eur_sma_reconcile \
+          --schedule='45 17 * * 1-5' \
+          --uri='https://europe-west3-trading-436516.cloudfunctions.net/index_alert' \
+          --http-method='POST' \
+          --time-zone='Europe/Berlin' \
+          --location='europe-west3' \
+          --oidc-service-account-email='1098661711782-compute@developer.gserviceaccount.com' \
+          --message-body='{"index_symbol": "IUSQ.XETRA", "index_name": "MSCI ACWI (EUR)", "alert_type": "sma_crossing", "source": "eodhd", "run_role": "reconcile", "sma_period": 255, "noise_threshold": 1.0, "currency_symbol": "€"}' \
+        || gcloud scheduler jobs create http acwi_eur_sma_reconcile \
+          --schedule='45 17 * * 1-5' \
+          --uri='https://europe-west3-trading-436516.cloudfunctions.net/index_alert' \
+          --http-method='POST' \
+          --time-zone='Europe/Berlin' \
+          --location='europe-west3' \
+          --oidc-service-account-email='1098661711782-compute@developer.gserviceaccount.com' \
+          --message-body='{"index_symbol": "IUSQ.XETRA", "index_name": "MSCI ACWI (EUR)", "alert_type": "sma_crossing", "source": "eodhd", "run_role": "reconcile", "sma_period": 255, "noise_threshold": 1.0, "currency_symbol": "€"}'
+    waitFor:
+      - 'deploy-aaa'
+      - 'deploy-f4'
+      - 'deploy-quarterly-f4'
+      - 'deploy-index-alert'
+      - 'deploy-audit'
+
+  - name: 'gcr.io/cloud-builders/gcloud'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        gcloud scheduler jobs update http world_eur_sma_advisory \
+          --schedule='0 15-17 * * 1-5' \
+          --uri='https://europe-west3-trading-436516.cloudfunctions.net/index_alert' \
+          --http-method='POST' \
+          --time-zone='Europe/Berlin' \
+          --location='europe-west3' \
+          --oidc-service-account-email='1098661711782-compute@developer.gserviceaccount.com' \
+          --message-body='{"index_symbol": "EUNL.XETRA", "index_name": "MSCI World (EUR)", "alert_type": "sma_crossing", "source": "eodhd", "run_role": "advisory", "sma_period": 250, "noise_threshold": 1.0, "currency_symbol": "€"}' \
+        || gcloud scheduler jobs create http world_eur_sma_advisory \
+          --schedule='0 15-17 * * 1-5' \
+          --uri='https://europe-west3-trading-436516.cloudfunctions.net/index_alert' \
+          --http-method='POST' \
+          --time-zone='Europe/Berlin' \
+          --location='europe-west3' \
+          --oidc-service-account-email='1098661711782-compute@developer.gserviceaccount.com' \
+          --message-body='{"index_symbol": "EUNL.XETRA", "index_name": "MSCI World (EUR)", "alert_type": "sma_crossing", "source": "eodhd", "run_role": "advisory", "sma_period": 250, "noise_threshold": 1.0, "currency_symbol": "€"}'
+    waitFor:
+      - 'deploy-aaa'
+      - 'deploy-f4'
+      - 'deploy-quarterly-f4'
+      - 'deploy-index-alert'
+      - 'deploy-audit'
+
+  - name: 'gcr.io/cloud-builders/gcloud'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        gcloud scheduler jobs update http world_eur_sma_decisive \
+          --schedule='20 17 * * 1-5' \
+          --uri='https://europe-west3-trading-436516.cloudfunctions.net/index_alert' \
+          --http-method='POST' \
+          --time-zone='Europe/Berlin' \
+          --location='europe-west3' \
+          --oidc-service-account-email='1098661711782-compute@developer.gserviceaccount.com' \
+          --message-body='{"index_symbol": "EUNL.XETRA", "index_name": "MSCI World (EUR)", "alert_type": "sma_crossing", "source": "eodhd", "run_role": "decisive", "sma_period": 250, "noise_threshold": 1.0, "currency_symbol": "€"}' \
+        || gcloud scheduler jobs create http world_eur_sma_decisive \
+          --schedule='20 17 * * 1-5' \
+          --uri='https://europe-west3-trading-436516.cloudfunctions.net/index_alert' \
+          --http-method='POST' \
+          --time-zone='Europe/Berlin' \
+          --location='europe-west3' \
+          --oidc-service-account-email='1098661711782-compute@developer.gserviceaccount.com' \
+          --message-body='{"index_symbol": "EUNL.XETRA", "index_name": "MSCI World (EUR)", "alert_type": "sma_crossing", "source": "eodhd", "run_role": "decisive", "sma_period": 250, "noise_threshold": 1.0, "currency_symbol": "€"}'
+    waitFor:
+      - 'deploy-aaa'
+      - 'deploy-f4'
+      - 'deploy-quarterly-f4'
+      - 'deploy-index-alert'
+      - 'deploy-audit'
+
+  - name: 'gcr.io/cloud-builders/gcloud'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        gcloud scheduler jobs update http world_eur_sma_reconcile \
+          --schedule='45 17 * * 1-5' \
+          --uri='https://europe-west3-trading-436516.cloudfunctions.net/index_alert' \
+          --http-method='POST' \
+          --time-zone='Europe/Berlin' \
+          --location='europe-west3' \
+          --oidc-service-account-email='1098661711782-compute@developer.gserviceaccount.com' \
+          --message-body='{"index_symbol": "EUNL.XETRA", "index_name": "MSCI World (EUR)", "alert_type": "sma_crossing", "source": "eodhd", "run_role": "reconcile", "sma_period": 250, "noise_threshold": 1.0, "currency_symbol": "€"}' \
+        || gcloud scheduler jobs create http world_eur_sma_reconcile \
+          --schedule='45 17 * * 1-5' \
+          --uri='https://europe-west3-trading-436516.cloudfunctions.net/index_alert' \
+          --http-method='POST' \
+          --time-zone='Europe/Berlin' \
+          --location='europe-west3' \
+          --oidc-service-account-email='1098661711782-compute@developer.gserviceaccount.com' \
+          --message-body='{"index_symbol": "EUNL.XETRA", "index_name": "MSCI World (EUR)", "alert_type": "sma_crossing", "source": "eodhd", "run_role": "reconcile", "sma_period": 250, "noise_threshold": 1.0, "currency_symbol": "€"}'
     waitFor:
       - 'deploy-aaa'
       - 'deploy-f4'
