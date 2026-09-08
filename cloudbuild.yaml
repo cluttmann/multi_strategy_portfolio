@@ -735,6 +735,16 @@ steps:
   #   decisive  20 17    Handelsalarm, 10 Min vor Handelsschluss
   #   reconcile 45 17    Abgleich auf den echten Schluss + taeglicher Lebendtest
   #
+  # Fenster: ACWI 250d, World 255d. 250d ist fuer den ACWI die gemessene Zahl -
+  # nach deutscher Steuer 13,17 % CAGR / Sharpe 0,402 gegen 12,68 % / 0,379 bei
+  # 255d (acwi_eur_final.json), und ab 1988 ebenfalls das Optimum des langsamen
+  # Plateaus. World behaelt die 255d des ersetzten urth_255sma_alert.
+  #
+  # Nur der ACWI-decisive-Job traegt public_chat_secret: der Crossing-Alert geht
+  # zusaetzlich in einen zweiten Telegram-Kanal (Freunde). Bewusst nur echte
+  # Crossings - Vorwarnungen, reconcile-Korrekturen und Datenfehler bleiben im
+  # privaten Kanal.
+  #
   # Kein neuer Deploy-Schritt: index_alert nimmt den neuen Pfad ueber den
   # source-Parameter, die Function-Liste bleibt unveraendert.
   # ─────────────────────────────────────────────────────────────────────────
@@ -751,7 +761,7 @@ steps:
           --time-zone='Europe/Berlin' \
           --location='europe-west3' \
           --oidc-service-account-email='1098661711782-compute@developer.gserviceaccount.com' \
-          --message-body='{"index_symbol": "IUSQ.XETRA", "index_name": "MSCI ACWI (EUR)", "alert_type": "sma_crossing", "source": "eodhd", "run_role": "advisory", "sma_period": 255, "noise_threshold": 1.0, "currency_symbol": "€"}' \
+          --message-body='{"index_symbol": "IUSQ.XETRA", "index_name": "MSCI ACWI (EUR)", "alert_type": "sma_crossing", "source": "eodhd", "run_role": "advisory", "sma_period": 250, "noise_threshold": 1.0, "currency_symbol": "€"}' \
         || gcloud scheduler jobs create http acwi_eur_sma_advisory \
           --schedule='0 15-17 * * 1-5' \
           --uri='https://europe-west3-trading-436516.cloudfunctions.net/index_alert' \
@@ -759,7 +769,7 @@ steps:
           --time-zone='Europe/Berlin' \
           --location='europe-west3' \
           --oidc-service-account-email='1098661711782-compute@developer.gserviceaccount.com' \
-          --message-body='{"index_symbol": "IUSQ.XETRA", "index_name": "MSCI ACWI (EUR)", "alert_type": "sma_crossing", "source": "eodhd", "run_role": "advisory", "sma_period": 255, "noise_threshold": 1.0, "currency_symbol": "€"}'
+          --message-body='{"index_symbol": "IUSQ.XETRA", "index_name": "MSCI ACWI (EUR)", "alert_type": "sma_crossing", "source": "eodhd", "run_role": "advisory", "sma_period": 250, "noise_threshold": 1.0, "currency_symbol": "€"}'
     waitFor:
       - 'deploy-aaa'
       - 'deploy-f4'
@@ -779,7 +789,7 @@ steps:
           --time-zone='Europe/Berlin' \
           --location='europe-west3' \
           --oidc-service-account-email='1098661711782-compute@developer.gserviceaccount.com' \
-          --message-body='{"index_symbol": "IUSQ.XETRA", "index_name": "MSCI ACWI (EUR)", "alert_type": "sma_crossing", "source": "eodhd", "run_role": "decisive", "sma_period": 255, "noise_threshold": 1.0, "currency_symbol": "€"}' \
+          --message-body='{"index_symbol": "IUSQ.XETRA", "index_name": "MSCI ACWI (EUR)", "alert_type": "sma_crossing", "source": "eodhd", "run_role": "decisive", "sma_period": 250, "noise_threshold": 1.0, "currency_symbol": "€", "public_chat_secret": "TELEGRAM_CHAT_ID_ACWI"}' \
         || gcloud scheduler jobs create http acwi_eur_sma_decisive \
           --schedule='20 17 * * 1-5' \
           --uri='https://europe-west3-trading-436516.cloudfunctions.net/index_alert' \
@@ -787,7 +797,7 @@ steps:
           --time-zone='Europe/Berlin' \
           --location='europe-west3' \
           --oidc-service-account-email='1098661711782-compute@developer.gserviceaccount.com' \
-          --message-body='{"index_symbol": "IUSQ.XETRA", "index_name": "MSCI ACWI (EUR)", "alert_type": "sma_crossing", "source": "eodhd", "run_role": "decisive", "sma_period": 255, "noise_threshold": 1.0, "currency_symbol": "€"}'
+          --message-body='{"index_symbol": "IUSQ.XETRA", "index_name": "MSCI ACWI (EUR)", "alert_type": "sma_crossing", "source": "eodhd", "run_role": "decisive", "sma_period": 250, "noise_threshold": 1.0, "currency_symbol": "€", "public_chat_secret": "TELEGRAM_CHAT_ID_ACWI"}'
     waitFor:
       - 'deploy-aaa'
       - 'deploy-f4'
@@ -807,7 +817,7 @@ steps:
           --time-zone='Europe/Berlin' \
           --location='europe-west3' \
           --oidc-service-account-email='1098661711782-compute@developer.gserviceaccount.com' \
-          --message-body='{"index_symbol": "IUSQ.XETRA", "index_name": "MSCI ACWI (EUR)", "alert_type": "sma_crossing", "source": "eodhd", "run_role": "reconcile", "sma_period": 255, "noise_threshold": 1.0, "currency_symbol": "€"}' \
+          --message-body='{"index_symbol": "IUSQ.XETRA", "index_name": "MSCI ACWI (EUR)", "alert_type": "sma_crossing", "source": "eodhd", "run_role": "reconcile", "sma_period": 250, "noise_threshold": 1.0, "currency_symbol": "€"}' \
         || gcloud scheduler jobs create http acwi_eur_sma_reconcile \
           --schedule='45 17 * * 1-5' \
           --uri='https://europe-west3-trading-436516.cloudfunctions.net/index_alert' \
@@ -815,7 +825,7 @@ steps:
           --time-zone='Europe/Berlin' \
           --location='europe-west3' \
           --oidc-service-account-email='1098661711782-compute@developer.gserviceaccount.com' \
-          --message-body='{"index_symbol": "IUSQ.XETRA", "index_name": "MSCI ACWI (EUR)", "alert_type": "sma_crossing", "source": "eodhd", "run_role": "reconcile", "sma_period": 255, "noise_threshold": 1.0, "currency_symbol": "€"}'
+          --message-body='{"index_symbol": "IUSQ.XETRA", "index_name": "MSCI ACWI (EUR)", "alert_type": "sma_crossing", "source": "eodhd", "run_role": "reconcile", "sma_period": 250, "noise_threshold": 1.0, "currency_symbol": "€"}'
     waitFor:
       - 'deploy-aaa'
       - 'deploy-f4'
@@ -835,7 +845,7 @@ steps:
           --time-zone='Europe/Berlin' \
           --location='europe-west3' \
           --oidc-service-account-email='1098661711782-compute@developer.gserviceaccount.com' \
-          --message-body='{"index_symbol": "EUNL.XETRA", "index_name": "MSCI World (EUR)", "alert_type": "sma_crossing", "source": "eodhd", "run_role": "advisory", "sma_period": 250, "noise_threshold": 1.0, "currency_symbol": "€"}' \
+          --message-body='{"index_symbol": "EUNL.XETRA", "index_name": "MSCI World (EUR)", "alert_type": "sma_crossing", "source": "eodhd", "run_role": "advisory", "sma_period": 255, "noise_threshold": 1.0, "currency_symbol": "€"}' \
         || gcloud scheduler jobs create http world_eur_sma_advisory \
           --schedule='0 15-17 * * 1-5' \
           --uri='https://europe-west3-trading-436516.cloudfunctions.net/index_alert' \
@@ -843,7 +853,7 @@ steps:
           --time-zone='Europe/Berlin' \
           --location='europe-west3' \
           --oidc-service-account-email='1098661711782-compute@developer.gserviceaccount.com' \
-          --message-body='{"index_symbol": "EUNL.XETRA", "index_name": "MSCI World (EUR)", "alert_type": "sma_crossing", "source": "eodhd", "run_role": "advisory", "sma_period": 250, "noise_threshold": 1.0, "currency_symbol": "€"}'
+          --message-body='{"index_symbol": "EUNL.XETRA", "index_name": "MSCI World (EUR)", "alert_type": "sma_crossing", "source": "eodhd", "run_role": "advisory", "sma_period": 255, "noise_threshold": 1.0, "currency_symbol": "€"}'
     waitFor:
       - 'deploy-aaa'
       - 'deploy-f4'
@@ -863,7 +873,7 @@ steps:
           --time-zone='Europe/Berlin' \
           --location='europe-west3' \
           --oidc-service-account-email='1098661711782-compute@developer.gserviceaccount.com' \
-          --message-body='{"index_symbol": "EUNL.XETRA", "index_name": "MSCI World (EUR)", "alert_type": "sma_crossing", "source": "eodhd", "run_role": "decisive", "sma_period": 250, "noise_threshold": 1.0, "currency_symbol": "€"}' \
+          --message-body='{"index_symbol": "EUNL.XETRA", "index_name": "MSCI World (EUR)", "alert_type": "sma_crossing", "source": "eodhd", "run_role": "decisive", "sma_period": 255, "noise_threshold": 1.0, "currency_symbol": "€"}' \
         || gcloud scheduler jobs create http world_eur_sma_decisive \
           --schedule='20 17 * * 1-5' \
           --uri='https://europe-west3-trading-436516.cloudfunctions.net/index_alert' \
@@ -871,7 +881,7 @@ steps:
           --time-zone='Europe/Berlin' \
           --location='europe-west3' \
           --oidc-service-account-email='1098661711782-compute@developer.gserviceaccount.com' \
-          --message-body='{"index_symbol": "EUNL.XETRA", "index_name": "MSCI World (EUR)", "alert_type": "sma_crossing", "source": "eodhd", "run_role": "decisive", "sma_period": 250, "noise_threshold": 1.0, "currency_symbol": "€"}'
+          --message-body='{"index_symbol": "EUNL.XETRA", "index_name": "MSCI World (EUR)", "alert_type": "sma_crossing", "source": "eodhd", "run_role": "decisive", "sma_period": 255, "noise_threshold": 1.0, "currency_symbol": "€"}'
     waitFor:
       - 'deploy-aaa'
       - 'deploy-f4'
@@ -891,7 +901,7 @@ steps:
           --time-zone='Europe/Berlin' \
           --location='europe-west3' \
           --oidc-service-account-email='1098661711782-compute@developer.gserviceaccount.com' \
-          --message-body='{"index_symbol": "EUNL.XETRA", "index_name": "MSCI World (EUR)", "alert_type": "sma_crossing", "source": "eodhd", "run_role": "reconcile", "sma_period": 250, "noise_threshold": 1.0, "currency_symbol": "€"}' \
+          --message-body='{"index_symbol": "EUNL.XETRA", "index_name": "MSCI World (EUR)", "alert_type": "sma_crossing", "source": "eodhd", "run_role": "reconcile", "sma_period": 255, "noise_threshold": 1.0, "currency_symbol": "€"}' \
         || gcloud scheduler jobs create http world_eur_sma_reconcile \
           --schedule='45 17 * * 1-5' \
           --uri='https://europe-west3-trading-436516.cloudfunctions.net/index_alert' \
@@ -899,7 +909,7 @@ steps:
           --time-zone='Europe/Berlin' \
           --location='europe-west3' \
           --oidc-service-account-email='1098661711782-compute@developer.gserviceaccount.com' \
-          --message-body='{"index_symbol": "EUNL.XETRA", "index_name": "MSCI World (EUR)", "alert_type": "sma_crossing", "source": "eodhd", "run_role": "reconcile", "sma_period": 250, "noise_threshold": 1.0, "currency_symbol": "€"}'
+          --message-body='{"index_symbol": "EUNL.XETRA", "index_name": "MSCI World (EUR)", "alert_type": "sma_crossing", "source": "eodhd", "run_role": "reconcile", "sma_period": 255, "noise_threshold": 1.0, "currency_symbol": "€"}'
     waitFor:
       - 'deploy-aaa'
       - 'deploy-f4'

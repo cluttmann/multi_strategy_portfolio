@@ -613,10 +613,13 @@ def set_alpaca_environment(env, use_secret_manager=True):
     return {"API_KEY": API_KEY, "SECRET_KEY": SECRET_KEY, "BASE_URL": base_url}
 
 
-def get_telegram_secrets():
+def get_telegram_secrets(chat_id_secret="TELEGRAM_CHAT_ID"):
+    """Bot-Token plus Ziel-Chat. `chat_id_secret` waehlt den Kanal - derselbe
+    Bot kann in mehrere Chats posten, solange er dort Mitglied bzw. Admin ist.
+    Muster uebernommen von quant/execution/telegram.py (eigener Quant-Kanal)."""
     return (
         get_secret_or_env("TELEGRAM_KEY"),
-        get_secret_or_env("TELEGRAM_CHAT_ID"),
+        get_secret_or_env(chat_id_secret),
     )
 
 
@@ -2975,7 +2978,7 @@ def daily_trade_sma(api, symbol, env="live"):
         return f"Index is not significantly below or above 200-SMA. No {symbol} shares sold or bought"
 
 # Function to send a message via Telegram
-def send_telegram_message(message):
+def send_telegram_message(message, chat_id_secret="TELEGRAM_CHAT_ID"):
     """
     Send a message to Telegram. Handles network errors gracefully.
     
@@ -2986,7 +2989,7 @@ def send_telegram_message(message):
         HTTP status code if successful, None if failed
     """
     try:
-        telegram_key, chat_id = get_telegram_secrets()
+        telegram_key, chat_id = get_telegram_secrets(chat_id_secret)
         url = f"https://api.telegram.org/bot{telegram_key}/sendMessage"
         data = {"chat_id": chat_id, "text": message}
         response = requests.post(url, data=data, timeout=10)
@@ -3457,7 +3460,8 @@ def save_eodhd_sma_state(index_symbol, sma_period, state, price, sma_value,
 
 
 def _handle_eodhd_sma_crossing(index_symbol, index_name, sma_period,
-                               noise_threshold, currency_symbol, run_role, env):
+                               noise_threshold, currency_symbol, run_role, env,
+                               public_chat_secret=None):
     """SMA-Crossing-Alert auf einem EUR-notierten XETRA-Tracker.
 
     Drei Rollen statt der US-Handelszeiten-Logik des Alpaca-Pfads:
@@ -3549,6 +3553,25 @@ def _handle_eodhd_sma_crossing(index_symbol, index_name, sma_period,
     if message:
         send_telegram_message(message)
 
+    # Zusaetzlicher oeffentlicher Kanal: bewusst NUR echte Crossings. Die
+    # stuendlichen Vorwarnungen, die reconcile-Korrekturen und die
+    # Datenfehler-Meldungen sind Betriebsrauschen - in einem Kanal mit
+    # Aussenstehenden machen sie das Signal unlesbar und legen offen, wenn die
+    # Infrastruktur klemmt. Ein Fehler beim oeffentlichen Versand darf den
+    # Hauptalert und das State-Schreiben nie kippen, deshalb gekapselt; er
+    # wird im privaten Kanal gemeldet, statt still zu verschwinden.
+    if public_chat_secret and message and status.startswith("crossover_"):
+        try:
+            if not get_secret_or_env(public_chat_secret):
+                raise EodhdDataError(
+                    f"Secret {public_chat_secret} ist leer oder fehlt")
+            send_telegram_message(message, chat_id_secret=public_chat_secret)
+        except Exception as e:
+            send_telegram_message(
+                f"❗ {index_name}: Crossing-Alert ging NICHT in den "
+                f"oeffentlichen Kanal ({public_chat_secret}): {e}\n"
+                f"Der Alert oben ist gueltig, nur die Weiterleitung fehlt.")
+
     return jsonify({
         "message": message or f"{index_name} ist {current_state} SMA{sma_period}",
         "status": status,
@@ -3594,6 +3617,7 @@ def check_unified_index_alert(request, env=None):
     source = request_json.get("source", "alpaca")             # "alpaca" | "eodhd"
     currency_symbol = request_json.get("currency_symbol", "$")
     run_role = request_json.get("run_role", "decisive")        # nur bei source="eodhd"
+    public_chat_secret = request_json.get("public_chat_secret")  # zweiter Kanal
     
     # Determine environment: from parameter, request JSON, or default to alpaca_environment
     if env is None:
@@ -3623,7 +3647,8 @@ def check_unified_index_alert(request, env=None):
             if source == "eodhd":
                 return _handle_eodhd_sma_crossing(
                     index_symbol, index_name, sma_period, noise_threshold,
-                    currency_symbol, run_role, env)
+                    currency_symbol, run_role, env,
+                    public_chat_secret=public_chat_secret)
 
             # ── Alpaca-Pfad, unveraendert ──────────────────────────────────
             # Handle SMA crossing alerts with crossover detection
@@ -6673,6 +6698,9 @@ if __name__ == "__main__":
     parser.add_argument("--sma_period", type=int, default=200)
     parser.add_argument("--noise_threshold", type=float, default=1.0)
     parser.add_argument("--threshold_percent", type=float, default=30.0)
+    parser.add_argument("--public_chat_secret", default=None,
+                        help="index_alert: Secret-Name eines zweiten Telegram-Kanals, "
+                             "in den nur echte Crossings gehen")
     parser.add_argument("--currency_symbol", default=None,
                         help="Default: Euro-Zeichen bei --source eodhd, sonst $")
     args = parser.parse_args()
@@ -6687,6 +6715,7 @@ if __name__ == "__main__":
             "run_role": args.run_role,
             "sma_period": args.sma_period,
             "noise_threshold": args.noise_threshold,
+            "public_chat_secret": args.public_chat_secret,
             "threshold_percent": args.threshold_percent,
             "currency_symbol": args.currency_symbol
                                or ("\u20ac" if args.source == "eodhd" else "$"),

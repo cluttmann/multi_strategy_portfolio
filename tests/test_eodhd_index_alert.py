@@ -417,3 +417,92 @@ def test_kaputter_kalender_nimmt_handelstag_an(monkeypatch, handler_umgebung):
         raise RuntimeError("Kalender weg")
     monkeypatch.setattr(main.mcal, "get_calendar", kaputt)
     assert main._xetra_trading_day("2026-09-08") is True
+
+
+# ── Zweiter Telegram-Kanal (nur echte Crossings) ───────────────────────────
+
+@pytest.fixture
+def kanal_umgebung(monkeypatch, handler_umgebung):
+    """Erfasst, in welchen Kanal jede Nachricht ging."""
+    versand = []
+    monkeypatch.setattr(main, "send_telegram_message",
+                        lambda m, chat_id_secret="TELEGRAM_CHAT_ID":
+                            versand.append((chat_id_secret, m)))
+    monkeypatch.setattr(main, "get_secret_or_env", lambda name, *a, **k: "-100999")
+    monkeypatch.setattr(main, "_xetra_trading_day", lambda d: True)
+    return versand
+
+
+def _lauf(role, public="TELEGRAM_CHAT_ID_ACWI"):
+    with main.app.app_context():
+        return main._handle_eodhd_sma_crossing(
+            "IUSQ.XETRA", "ACWI", 250, 1.0, "€", role, "paper",
+            public_chat_secret=public)
+
+
+def test_crossing_geht_in_beide_kanaele(monkeypatch, kanal_umgebung):
+    main.save_eodhd_sma_state("IUSQ.XETRA", 250, "above", 110.0, 100.0, env="paper")
+    _setze_live(monkeypatch, 94.0)                      # -6 % => crossover_below
+    resp, _ = _lauf("decisive")
+    assert resp.get_json()["status"] == "crossover_below"
+    ziele = [z for z, _ in kanal_umgebung]
+    assert ziele == ["TELEGRAM_CHAT_ID", "TELEGRAM_CHAT_ID_ACWI"]
+    assert kanal_umgebung[0][1] == kanal_umgebung[1][1]  # identischer Text
+
+
+def test_initialisierung_geht_nur_privat(monkeypatch, kanal_umgebung):
+    """'Alert initialisiert' ist kein Crossing - Freunde sehen das nicht."""
+    _setze_live(monkeypatch, 100.0)
+    resp, _ = _lauf("decisive")
+    assert resp.get_json()["status"] == "initialised"
+    assert [z for z, _ in kanal_umgebung] == ["TELEGRAM_CHAT_ID"]
+
+
+def test_vorwarnung_geht_nur_privat(monkeypatch, kanal_umgebung):
+    main.save_eodhd_sma_state("IUSQ.XETRA", 250, "above", 110.0, 100.0, env="paper")
+    _setze_live(monkeypatch, 100.4)                     # im Band => advisory
+    _lauf("advisory")
+    assert [z for z, _ in kanal_umgebung] == ["TELEGRAM_CHAT_ID"]
+
+
+def test_reconcile_korrektur_geht_nur_privat(monkeypatch, handler_umgebung, kanal_umgebung):
+    hist = handler_umgebung["hist"] + [(TODAY, 100.0)]
+    monkeypatch.setattr(main, "fetch_eodhd_eod_series", lambda *a, **k: list(hist))
+    main.save_eodhd_sma_state("IUSQ.XETRA", 250, "above", 110.0, 100.0, env="paper")
+    resp, _ = _lauf("reconcile")
+    assert resp.get_json()["status"] == "reconciled"
+    assert [z for z, _ in kanal_umgebung] == ["TELEGRAM_CHAT_ID"]
+
+
+def test_ohne_public_secret_nur_privat(monkeypatch, kanal_umgebung):
+    main.save_eodhd_sma_state("IUSQ.XETRA", 250, "above", 110.0, 100.0, env="paper")
+    _setze_live(monkeypatch, 94.0)
+    _lauf("decisive", public=None)
+    assert [z for z, _ in kanal_umgebung] == ["TELEGRAM_CHAT_ID"]
+
+
+def test_fehlendes_public_secret_meldet_sich_privat(monkeypatch, kanal_umgebung):
+    """Kanal nicht erreichbar => Meldung im privaten Kanal, nie stilles Schlucken."""
+    monkeypatch.setattr(main, "get_secret_or_env",
+                        lambda name, *a, **k: None if "ACWI" in name else "-4580039045")
+    main.save_eodhd_sma_state("IUSQ.XETRA", 250, "above", 110.0, 100.0, env="paper")
+    _setze_live(monkeypatch, 94.0)
+    _lauf("decisive")
+    ziele = [z for z, _ in kanal_umgebung]
+    assert ziele == ["TELEGRAM_CHAT_ID", "TELEGRAM_CHAT_ID"]
+    assert "ging NICHT in den" in kanal_umgebung[1][1]
+
+
+def test_state_wird_trotz_kanalfehler_geschrieben(monkeypatch, kanal_umgebung):
+    """Ein kaputter Zweitkanal darf den Hauptalert nicht kippen."""
+    def kaputt(m, chat_id_secret="TELEGRAM_CHAT_ID"):
+        if chat_id_secret != "TELEGRAM_CHAT_ID":
+            raise RuntimeError("Bot ist kein Admin")
+        kanal_umgebung.append((chat_id_secret, m))
+    monkeypatch.setattr(main, "send_telegram_message", kaputt)
+    main.save_eodhd_sma_state("IUSQ.XETRA", 250, "above", 110.0, 100.0, env="paper")
+    _setze_live(monkeypatch, 94.0)
+    resp, code = _lauf("decisive")
+    assert code == 200
+    assert main.get_eodhd_sma_state("IUSQ.XETRA", 250, env="paper") == "below"
+    assert any("ging NICHT in den" in m for _, m in kanal_umgebung)
