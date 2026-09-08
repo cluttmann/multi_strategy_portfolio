@@ -3266,6 +3266,37 @@ def _heute_iso():
     return datetime.date.today().isoformat()
 
 
+def _xetra_trading_day(date_iso):
+    """Handelt die XETRA an diesem Tag? Nutzt den XETR-Kalender aus
+    pandas_market_calendars (schon deployt, keine neue Abhaengigkeit).
+
+    Wird NUR benutzt, um die Schwere einer veralteten Datenlage einzuordnen -
+    nie, um einen Lauf zu ueberspringen. Waere der Kalender falsch und sagte
+    'geschlossen' an einem echten Handelstag, wuerde ein Skip ein echtes Signal
+    verschlucken. Primaerer Waechter bleibt die Frische der Daten selbst.
+    """
+    try:
+        return not mcal.get_calendar("XETR").schedule(
+            start_date=date_iso, end_date=date_iso).empty
+    except Exception as e:
+        # Kalender kaputt => im Zweifel Handelstag annehmen, damit ein echtes
+        # Datenproblem laut wird statt still zu verschwinden.
+        print(f"Warning: XETR-Kalender nicht lesbar ({e}) - nehme Handelstag an")
+        return True
+
+
+def _stale_data(index_name, run_role, was_fehlt, today_iso):
+    """Veraltete Datenlage einordnen: an einem Handelstag ein echter Fehler,
+    an einem Feiertag oder Wochenende ein stiller, korrekter Nichtlauf."""
+    if _xetra_trading_day(today_iso):
+        raise EodhdDataError(
+            f"{was_fehlt} - und {today_iso} ist ein XETRA-Handelstag, "
+            f"also ein echtes Datenproblem")
+    print(f"{index_name} ({run_role}): {was_fehlt}; {today_iso} ist kein "
+          f"XETRA-Handelstag - kein Lauf, kein Alert")
+    return None
+
+
 def _sma_state_from_diff(diff_percent, noise_threshold):
     """Zustand aus dem prozentualen Abstand zur SMA, mit Totband."""
     if diff_percent > noise_threshold:
@@ -3438,15 +3469,26 @@ def _handle_eodhd_sma_crossing(index_symbol, index_name, sma_period,
     hist = fetch_eodhd_eod_series(index_symbol)
 
     if run_role == "reconcile":
+        if not hist or hist[-1][0] != today_iso:
+            neuester = hist[-1][0] if hist else "keiner"
+            _stale_data(index_name, run_role,
+                        f"kein Schlusskurs fuer {today_iso} (neuester: "
+                        f"{neuester})", today_iso)
+            return jsonify({"message": f"{index_name}: kein XETRA-Handelstag",
+                            "status": "no_trading_day",
+                            "run_role": run_role}), 200
         series = _eodhd_close_series(hist, sma_period, today_iso)
         current_price = series[-1]
         price_source = f"XETRA-Schluss {today_iso}"
     elif run_role in ("advisory", "decisive"):
         current_price, live_ts = fetch_eodhd_realtime(index_symbol)
-        if run_role == "decisive" and live_ts.date().isoformat() != today_iso:
-            raise EodhdDataError(
-                f"Live-Kurs stammt vom {live_ts.date()}, nicht von heute "
-                f"({today_iso}) - Feiertag oder haengender Feed?")
+        if live_ts.date().isoformat() != today_iso:
+            _stale_data(index_name, run_role,
+                        f"Live-Kurs stammt vom {live_ts.date()}, nicht von "
+                        f"heute", today_iso)
+            return jsonify({"message": f"{index_name}: kein XETRA-Handelstag",
+                            "status": "no_trading_day",
+                            "run_role": run_role}), 200
         series = _eodhd_sma_series(hist, current_price, sma_period, today_iso)
         price_source = f"live {live_ts:%H:%M} UTC"
     else:

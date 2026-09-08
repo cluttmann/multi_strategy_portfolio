@@ -352,3 +352,68 @@ def test_unbekannte_rolle_wirft(monkeypatch, handler_umgebung):
     with pytest.raises(main.EodhdDataError, match="run_role"):
         main._handle_eodhd_sma_crossing(
             "IUSQ.XETRA", "ACWI", 255, 1.0, "€", "quatsch", "paper")
+
+
+# ── XETRA-Feiertage vs. echte Datenprobleme ────────────────────────────────
+
+def test_xetra_kalender_kennt_handelstage():
+    assert main._xetra_trading_day("2026-09-08") is True     # Dienstag
+    assert main._xetra_trading_day("2026-09-05") is False    # Samstag
+    assert main._xetra_trading_day("2026-01-01") is False    # Neujahr
+
+
+def test_decisive_am_feiertag_schweigt(monkeypatch, handler_umgebung):
+    """Veralteter Kurs an einem Nicht-Handelstag: stiller, korrekter Nichtlauf."""
+    monkeypatch.setattr(main, "_xetra_trading_day", lambda d: False)
+    _setze_live(monkeypatch, 100.0, tag="2026-09-04")
+    with main.app.app_context():
+        resp, code = main._handle_eodhd_sma_crossing(
+            "IUSQ.XETRA", "ACWI", 255, 1.0, "€", "decisive", "paper")
+    assert code == 200
+    assert resp.get_json()["status"] == "no_trading_day"
+    assert handler_umgebung["gesendet"] == []
+    assert main.get_eodhd_sma_state("IUSQ.XETRA", 255, env="paper") is None
+
+
+def test_decisive_am_handelstag_wirft_bei_altem_kurs(monkeypatch, handler_umgebung):
+    """Derselbe veraltete Kurs an einem Handelstag: echtes Datenproblem."""
+    monkeypatch.setattr(main, "_xetra_trading_day", lambda d: True)
+    _setze_live(monkeypatch, 100.0, tag="2026-09-04")
+    with pytest.raises(main.EodhdDataError, match="XETRA-Handelstag"):
+        main._handle_eodhd_sma_crossing(
+            "IUSQ.XETRA", "ACWI", 255, 1.0, "€", "decisive", "paper")
+
+
+def test_advisory_am_feiertag_schweigt(monkeypatch, handler_umgebung):
+    monkeypatch.setattr(main, "_xetra_trading_day", lambda d: False)
+    _setze_live(monkeypatch, 100.4, tag="2026-09-04")   # laege im Band
+    with main.app.app_context():
+        resp, _ = main._handle_eodhd_sma_crossing(
+            "IUSQ.XETRA", "ACWI", 255, 1.0, "€", "advisory", "paper")
+    assert resp.get_json()["status"] == "no_trading_day"
+    assert handler_umgebung["gesendet"] == []
+
+
+def test_reconcile_am_feiertag_schweigt(monkeypatch, handler_umgebung):
+    monkeypatch.setattr(main, "_xetra_trading_day", lambda d: False)
+    with main.app.app_context():
+        resp, _ = main._handle_eodhd_sma_crossing(
+            "IUSQ.XETRA", "ACWI", 255, 1.0, "€", "reconcile", "paper")
+    assert resp.get_json()["status"] == "no_trading_day"
+    assert handler_umgebung["gesendet"] == []
+
+
+def test_reconcile_am_handelstag_wirft_ohne_schluss(monkeypatch, handler_umgebung):
+    monkeypatch.setattr(main, "_xetra_trading_day", lambda d: True)
+    with pytest.raises(main.EodhdDataError, match="XETRA-Handelstag"):
+        main._handle_eodhd_sma_crossing(
+            "IUSQ.XETRA", "ACWI", 255, 1.0, "€", "reconcile", "paper")
+
+
+def test_kaputter_kalender_nimmt_handelstag_an(monkeypatch, handler_umgebung):
+    """Der Kalender darf nie ein echtes Signal verschlucken: faellt er aus,
+    wird ein Datenproblem laut statt still."""
+    def kaputt(*a, **k):
+        raise RuntimeError("Kalender weg")
+    monkeypatch.setattr(main.mcal, "get_calendar", kaputt)
+    assert main._xetra_trading_day("2026-09-08") is True
