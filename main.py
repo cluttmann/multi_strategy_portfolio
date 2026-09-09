@@ -16,19 +16,14 @@ app = Flask(__name__)
 # Strategy allocation percentages for dynamic monthly investment calculation
 # Investment amounts are calculated dynamically each month based on available cash and margin
 strategy_allocations = {
-    # Updated 2026-05-12: Regime World replaced by 7-Asset Rotator (AAA-family adaptive
-    # rotation) and World 40/30/30 (static intl diversifier). Tax-aware caps applied:
-    #   • HFEA / SPXL: capped at 15% (US-equity concentration limit)
-    #   • Regime SSO: capped at 12% (high turnover via SSO↔USFR rotation)
-    #   • 7-Asset Rotator: capped at 15% (highest turnover — monthly 7-asset rotation)
-    #   • World 40/30/30: 18% (lowest turnover — quarterly rebal of 3 fixed assets, intl diversifier)
-    "hfea_allo":          0.15,    # 15% — HFEA UPRO/TMF/KMLM
-    "spxl_allo":          0.15,    # 15% — SPXL SMA trend-gate
-    "nine_sig_allo":      0.05,    # 5%  — 9-Sig TQQQ/AGG
-    "dual_momentum_allo": 0.20,    # 20% — DM 2× best-of-3 (SPUU/QLD/EFO)
-    "regime_sso_allo":    0.12,    # 12% — Regime SSO (7-signal composite)
-    "aaa_allo":           0.15,    # 15% — 7-Asset Rotator (NTSD/SAA/EET/UBT/UST/UGL/DBC top-3 rotation)
-    "f4_allo":            0.18,    # 18% — World 40/30/30 (WLDU+GOLY+TLT intl diversifier)
+    # Updated 2026-09-09: World 40/30/30 retired. The remaining six weights are
+    # the prior targets renormalized after removing F4's 18% allocation.
+    "hfea_allo":          0.1829,  # 18.29% — HFEA UPRO/TMF/KMLM
+    "spxl_allo":          0.1829,  # 18.29% — SPXL SMA trend-gate
+    "nine_sig_allo":      0.0610,  # 6.10%  — 9-Sig TQQQ/AGG
+    "dual_momentum_allo": 0.2439,  # 24.39% — DM 2× best-of-3 (SPUU/QLD/EFO)
+    "regime_sso_allo":    0.1464,  # 14.64% — Regime SSO (7-signal composite)
+    "aaa_allo":           0.1829,  # 18.29% — 7-Asset Rotator
 }
 
 upro_allocation = 0.45
@@ -46,7 +41,6 @@ spxl_sma_holding_fund = "SGOV"  # iShares 0-3 Month Treasury Bond ETF
 # - Dual Momentum: SPUU, QLD, EFO, BND (BND is defensive + vol-target overflow)
 # - Regime SSO: SSO (when in market), USFR (when defensive — floating-rate Treasury)
 # - 7-Asset Rotator (AAA family): NTSD, SAA, EET, UBT, UST, UGL, DBC (top-3 selected monthly), SHV (defensive)
-# - World 40/30/30: WLDU, GOLY, TLT (static 40/30/30, quarterly rebalance)
 
 # Strategy ticker ownership mapping for cost basis recalculation
 STRATEGY_SYMBOLS = {
@@ -56,7 +50,6 @@ STRATEGY_SYMBOLS = {
     "dual_momentum": ["SPUU", "QLD", "EFO", "BND"],
     "regime_sso": ["SSO", "USFR"],
     "aaa": ["NTSD", "SAA", "EET", "UBT", "UST", "UGL", "DBC", "SHV"],
-    "f4": ["WLDU", "GOLY", "TLT"],
 }
 
 alpaca_environment = "live"
@@ -3865,6 +3858,7 @@ def get_all_strategy_values(api):
             "nine_sig": float,
             "dual_momentum": float,
             "regime_sso": float,
+            "aaa": float,
             "total": float
         }
     """
@@ -3923,17 +3917,13 @@ def get_all_strategy_values(api):
         # 7-Asset Rotator: sum of all 7-asset universe + SHV defensive
         aaa_value = sum(positions.get(sym, 0) for sym in STRATEGY_SYMBOLS["aaa"])
 
-        # World 40/30/30: WLDU + GOLY + TLT
-        f4_value = sum(positions.get(sym, 0) for sym in STRATEGY_SYMBOLS["f4"])
-
         total_value = (
             hfea_value +
             spxl_sma_value +
             nine_sig_value +
             dual_momentum_value +
             regime_sso_value +
-            aaa_value +
-            f4_value
+            aaa_value
         )
 
         return {
@@ -3943,7 +3933,6 @@ def get_all_strategy_values(api):
             "dual_momentum": dual_momentum_value,
             "regime_sso": regime_sso_value,
             "aaa": aaa_value,
-            "f4": f4_value,
             "total": total_value
         }
 
@@ -3956,7 +3945,6 @@ def get_all_strategy_values(api):
             "dual_momentum": 0,
             "regime_sso": 0,
             "aaa": 0,
-            "f4": 0,
             "total": 0
         }
 
@@ -3999,7 +3987,6 @@ def calculate_rebalanced_allocations(api, aggressiveness=None):
         "dual_momentum": "dual_momentum_allo",
         "regime_sso": "regime_sso_allo",
         "aaa": "aaa_allo",
-        "f4": "f4_allo",
     }
     
     # Get target percentages from strategy_allocations
