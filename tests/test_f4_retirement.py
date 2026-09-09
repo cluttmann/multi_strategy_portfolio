@@ -170,3 +170,281 @@ def test_cap_investment_calculation_never_exceeds_available_capacity():
 
     assert capped["total_investing"] == pytest.approx(250.0)
     assert capped["strategy_amounts"]["hfea_allo"] == pytest.approx(250.0)
+
+
+def _snapshot(positions=None, pending_orders=None, cash=-400.0):
+    return {
+        "account": {
+            "cash": cash,
+            "equity": 10000.0,
+            "portfolio_value": 10000.0,
+            "maintenance_margin": 3000.0,
+        },
+        "positions": positions or [],
+        "pending_orders": pending_orders or [],
+    }
+
+
+def _f4_position(symbol="WLDU", qty="2", price="20"):
+    return {
+        "symbol": symbol,
+        "qty": qty,
+        "qty_available": qty,
+        "current_price": price,
+    }
+
+
+def test_execute_retirement_rejects_wrong_confirmation():
+    with pytest.raises(ValueError, match="RETIRE_F4_LIVE"):
+        retire_f4_live.execute_retirement({}, confirmation="yes")
+
+
+def test_execute_retirement_rejects_closed_market(monkeypatch):
+    monkeypatch.setattr(retire_f4_live, "get_market_clock", lambda api: {"is_open": False})
+
+    with pytest.raises(RuntimeError, match="market is closed"):
+        retire_f4_live.execute_retirement(
+            {}, confirmation=retire_f4_live.CONFIRMATION_TOKEN
+        )
+
+
+def test_execute_retirement_rejects_existing_open_orders(monkeypatch):
+    monkeypatch.setattr(retire_f4_live, "get_market_clock", lambda api: {"is_open": True})
+    monkeypatch.setattr(
+        retire_f4_live,
+        "capture_snapshot",
+        lambda api: _snapshot(
+            positions=[_f4_position()],
+            pending_orders=[{"id": "open-1", "symbol": "UPRO"}],
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="open order"):
+        retire_f4_live.execute_retirement(
+            {}, confirmation=retire_f4_live.CONFIRMATION_TOKEN
+        )
+
+
+def test_execute_retirement_is_idempotent_when_f4_is_already_gone(monkeypatch):
+    monkeypatch.setattr(retire_f4_live, "get_market_clock", lambda api: {"is_open": True})
+    monkeypatch.setattr(
+        retire_f4_live,
+        "capture_snapshot",
+        lambda api: _snapshot(positions=[_f4_position("UPRO")]),
+    )
+
+    result = retire_f4_live.execute_retirement(
+        {}, confirmation=retire_f4_live.CONFIRMATION_TOKEN
+    )
+
+    assert result["status"] == "already_retired"
+
+
+def test_execute_retirement_stops_when_sell_submission_fails(monkeypatch, tmp_path):
+    monkeypatch.setattr(retire_f4_live, "get_market_clock", lambda api: {"is_open": True})
+    monkeypatch.setattr(
+        retire_f4_live,
+        "capture_snapshot",
+        lambda api: _snapshot(positions=[_f4_position()]),
+    )
+    monkeypatch.setattr(
+        retire_f4_live.bot,
+        "submit_order",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("sell rejected")),
+    )
+    monkeypatch.setattr(
+        retire_f4_live,
+        "execute_strategy_buys",
+        lambda *args, **kwargs: pytest.fail("buys must not run"),
+    )
+
+    with pytest.raises(RuntimeError, match="sell rejected"):
+        retire_f4_live.execute_retirement(
+            {},
+            confirmation=retire_f4_live.CONFIRMATION_TOKEN,
+            audit_path=tmp_path / "audit.json",
+        )
+
+
+def test_execute_retirement_stops_when_f4_residual_remains(monkeypatch, tmp_path):
+    snapshots = iter(
+        [
+            _snapshot(positions=[_f4_position()]),
+            _snapshot(positions=[_f4_position(qty="0.5")]),
+        ]
+    )
+    monkeypatch.setattr(retire_f4_live, "get_market_clock", lambda api: {"is_open": True})
+    monkeypatch.setattr(retire_f4_live, "capture_snapshot", lambda api: next(snapshots))
+    monkeypatch.setattr(
+        retire_f4_live.bot,
+        "submit_order",
+        lambda *args, **kwargs: {"id": "sell-1"},
+    )
+    monkeypatch.setattr(
+        retire_f4_live,
+        "strict_wait_for_fill",
+        lambda *args, **kwargs: {
+            "id": "sell-1",
+            "status": "filled",
+            "filled_qty": "1.5",
+            "filled_avg_price": "20",
+        },
+    )
+
+    with pytest.raises(RuntimeError, match="F4 position remains"):
+        retire_f4_live.execute_retirement(
+            {},
+            confirmation=retire_f4_live.CONFIRMATION_TOKEN,
+            audit_path=tmp_path / "audit.json",
+        )
+
+
+def test_execute_retirement_leaves_proceeds_as_deleveraging_when_budget_is_zero(
+    monkeypatch, tmp_path
+):
+    snapshots = iter(
+        [
+            _snapshot(positions=[_f4_position()]),
+            _snapshot(),
+            _snapshot(),
+        ]
+    )
+    monkeypatch.setattr(retire_f4_live, "get_market_clock", lambda api: {"is_open": True})
+    monkeypatch.setattr(retire_f4_live, "capture_snapshot", lambda api: next(snapshots))
+    monkeypatch.setattr(
+        retire_f4_live.bot,
+        "submit_order",
+        lambda *args, **kwargs: {"id": "sell-1"},
+    )
+    monkeypatch.setattr(
+        retire_f4_live,
+        "strict_wait_for_fill",
+        lambda *args, **kwargs: {
+            "id": "sell-1",
+            "status": "filled",
+            "filled_qty": "2",
+            "filled_avg_price": "20",
+        },
+    )
+    monkeypatch.setattr(retire_f4_live, "mark_f4_retired", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        retire_f4_live.bot,
+        "check_margin_conditions",
+        lambda api, env: {
+            "allowed": False,
+            "target_margin": 0.0,
+            "gate_results": {},
+            "metrics": {"cash": -360.0, "equity": 10000.0},
+            "errors": [],
+        },
+    )
+    monkeypatch.setattr(
+        retire_f4_live.bot,
+        "calculate_monthly_investments",
+        lambda api, margin_result, env: {
+            "total_available": 0.0,
+            "margin_approved": 0.0,
+            "total_investing": 0.0,
+            "strategy_amounts": {key: 0.0 for key in main.strategy_allocations},
+        },
+    )
+    monkeypatch.setattr(
+        retire_f4_live,
+        "execute_strategy_buys",
+        lambda *args, **kwargs: pytest.fail("buys must not run"),
+    )
+    monkeypatch.setattr(
+        retire_f4_live.bot,
+        "recalculate_all_strategies_cost_basis",
+        lambda *args, **kwargs: {"success": True},
+    )
+    monkeypatch.setattr(retire_f4_live.bot, "send_telegram_message", lambda message: None)
+
+    result = retire_f4_live.execute_retirement(
+        {},
+        confirmation=retire_f4_live.CONFIRMATION_TOKEN,
+        audit_path=tmp_path / "audit.json",
+    )
+
+    assert result["status"] == "sold_without_reallocation"
+    assert result["actual_proceeds"] == pytest.approx(40.0)
+
+
+def test_execute_retirement_caps_buys_and_runs_all_six_strategies(monkeypatch, tmp_path):
+    snapshots = iter(
+        [
+            _snapshot(positions=[_f4_position(qty="10", price="30")]),
+            _snapshot(),
+            _snapshot(),
+        ]
+    )
+    monkeypatch.setattr(retire_f4_live, "get_market_clock", lambda api: {"is_open": True})
+    monkeypatch.setattr(retire_f4_live, "capture_snapshot", lambda api: next(snapshots))
+    monkeypatch.setattr(
+        retire_f4_live.bot,
+        "submit_order",
+        lambda *args, **kwargs: {"id": "sell-1"},
+    )
+    monkeypatch.setattr(
+        retire_f4_live,
+        "strict_wait_for_fill",
+        lambda *args, **kwargs: {
+            "id": "sell-1",
+            "status": "filled",
+            "filled_qty": "10",
+            "filled_avg_price": "30",
+        },
+    )
+    monkeypatch.setattr(retire_f4_live, "mark_f4_retired", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        retire_f4_live.bot,
+        "check_margin_conditions",
+        lambda api, env: {
+            "allowed": True,
+            "target_margin": 0.10,
+            "gate_results": {},
+            "metrics": {"cash": -100.0, "equity": 10000.0},
+            "errors": [],
+        },
+    )
+    monkeypatch.setattr(
+        retire_f4_live.bot,
+        "calculate_monthly_investments",
+        lambda api, margin_result, env: {
+            "total_available": 0.0,
+            "margin_approved": 1000.0,
+            "total_investing": 1000.0,
+            "strategy_amounts": {
+                key: 1000.0 / 6 for key in main.strategy_allocations
+            },
+        },
+    )
+    captured = {}
+
+    def fake_buys(api, investment_calc, margin_result, env, audit, audit_path):
+        captured["calculation"] = investment_calc
+        return ["hfea", "spxl", "nine_sig", "dual_momentum", "regime_sso", "aaa"]
+
+    monkeypatch.setattr(retire_f4_live, "execute_strategy_buys", fake_buys)
+    monkeypatch.setattr(
+        retire_f4_live.bot,
+        "recalculate_all_strategies_cost_basis",
+        lambda *args, **kwargs: {"success": True},
+    )
+    monkeypatch.setattr(retire_f4_live.bot, "send_telegram_message", lambda message: None)
+
+    result = retire_f4_live.execute_retirement(
+        {},
+        confirmation=retire_f4_live.CONFIRMATION_TOKEN,
+        audit_path=tmp_path / "audit.json",
+    )
+
+    assert captured["calculation"]["total_investing"] == pytest.approx(300.0)
+    assert result["strategy_results"] == [
+        "hfea",
+        "spxl",
+        "nine_sig",
+        "dual_momentum",
+        "regime_sso",
+        "aaa",
+    ]
