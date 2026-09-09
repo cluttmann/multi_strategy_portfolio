@@ -10,7 +10,7 @@ steps:
 # from 71 MB to 2.89 GB on 2026-05-10 (commit 282beed) = 45 GB of new images per
 # deploy wave, which is what ran Artifact Registry to 272 GB / €16 per month.
 #
-# fn-light  = requirements.txt minus every line tagged `# ML-ONLY`  (15 functions)
+# fn-light  = requirements.txt minus every line tagged `# ML-ONLY`  (13 functions)
 # fn-heavy  = requirements.txt verbatim                            (daily_regime_check)
 #
 # These trees are written ONCE here and never mutated again. That matters: the
@@ -53,7 +53,7 @@ steps:
       test -s fn-light/main.py
       test -s fn-heavy/main.py
 
-      echo "--- fn-light deps (15 functions) ---"; cat fn-light/requirements.txt
+      echo "--- fn-light deps (13 functions) ---"; cat fn-light/requirements.txt
     waitFor: ['-']
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -61,7 +61,7 @@ steps:
 #
 # Cloud Build has a per-project concurrent-build quota; each `gcloud functions
 # deploy` spawns ITS OWN inner Cloud Build to construct the container image.
-# With 16 functions all set to `waitFor: ['-']`, the inner builds queue up,
+# When 16 functions were all set to `waitFor: ['-']`, the inner builds queued up,
 # and the ones at the back of the queue EXPIRE after ~10 min, failing the
 # whole parent build. Splitting deploys into 4 waves (A, B, C1, C2) caps peak
 # concurrent inner builds at ~6, which fits comfortably under quota. (See Cloud Build

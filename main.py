@@ -6166,7 +6166,7 @@ def monthly_invest_all_strategies(api, force_execute=False, skip_order_wait=Fals
         force_execute: Bypass trading day check for testing
     
     Returns:
-        dict with results from all seven strategies
+        dict with results from all six strategies
     """
     if not force_execute and not should_run_monthly_orchestrator(env=env):
         print("Not first trading day of the month, or this month already has a clean run")

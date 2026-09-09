@@ -1,8 +1,8 @@
 # Investment Strategy with Alpaca and Google Cloud Functions
 
-This project contains a set of Python Cloud Functions for managing a multi-strategy portfolio using Alpaca's trading API. The portfolio is composed of **seven complementary strategies**: **HFEA**, **SPXL SMA**, **9-Sig (Jason Kelly Methodology)**, **Dual Momentum (best-of-3 leveraged rotation)**, **Regime SSO (US regime detector)**, **7-Asset Rotator (AAA-family multi-asset rotation)**, and **World 40/30/30 (international diversifier)**.
+This project contains a set of Python Cloud Functions for managing a multi-strategy portfolio using Alpaca's trading API. The portfolio is composed of **six complementary strategies**: **HFEA**, **SPXL SMA**, **9-Sig (Jason Kelly Methodology)**, **Dual Momentum (best-of-3 leveraged rotation)**, **Regime SSO (US regime detector)**, and **7-Asset Rotator (AAA-family multi-asset rotation)**.
 
-*Earlier compositions also included: RSSB/WTIP (Structural Alpha, discontinued 2026-05-11 — poor performance); Regime World (WLDU/USFR detector, discontinued 2026-05-12 — replaced by the 7-Asset Rotator + World 40/30/30 pair that delivers better risk-adjusted return and broader diversification).*
+*Earlier compositions also included: RSSB/WTIP (discontinued 2026-05-11); Regime World (discontinued 2026-05-12); and World 40/30/30/F4 (discontinued 2026-09-09 after the corrected proxy audit left insufficient long-run evidence and its international-equity role became redundant with the separate Scalable ACWI strategy).*
 
 ## Portfolio Allocation
 
@@ -10,15 +10,23 @@ Current production weights (sum to 100%):
 
 | Strategy | Weight | Role |
 |---|---:|---|
-| HFEA | 15% | Aggressive 3× leveraged buy-and-hold (UPRO/TMF/KMLM) |
-| SPXL SMA | 15% | 3× S&P trend-following with 200-SMA gate |
-| 9-Sig | 5% | Systematic TQQQ/AGG with crash protection (tail-risk sleeve) |
-| Dual Momentum (best-of-3) | 20% | SPUU/QLD/EFO rotation + DD-stop + vol-target |
-| Regime SSO | 12% | 7-signal US regime detector — SSO ↔ USFR rotation |
-| 7-Asset Rotator (AAA family) | 15% | Monthly top-3 momentum rotation over NTSD/SAA/EET/UBT/UST/UGL/DBC, inverse-vol weighted with DD30 + vol25 risk controls |
-| **World 40/30/30** (new 2026-05-12) | **18%** | **Static 40% WLDU + 30% GOLY + 30% TLT — international diversifier with most tax-efficient profile (quarterly rebal, 3 fixed assets)** |
+| HFEA | 18.29% | Aggressive 3× leveraged buy-and-hold (UPRO/TMF/KMLM) |
+| SPXL SMA | 18.29% | 3× S&P trend-following with 200-SMA gate |
+| 9-Sig | 6.10% | Systematic TQQQ/AGG with crash protection (tail-risk sleeve) |
+| Dual Momentum (best-of-3) | 24.39% | SPUU/QLD/EFO rotation + DD-stop + vol-target |
+| Regime SSO | 14.64% | 7-signal US regime detector — SSO ↔ USFR rotation |
+| 7-Asset Rotator (AAA family) | 18.29% | Monthly top-3 momentum rotation over NTSD/SAA/EET/UBT/UST/UGL/DBC, inverse-vol weighted with DD30 + vol25 risk controls |
 
-### Why the 2026-05-12 update
+### Why the 2026-09-09 update
+
+World 40/30/30 was removed after a corrected audit showed that the current GOLY
+strategy has usable live history only from 2025-01-06 and none of the long-run
+proxy families replicated its return level reliably. Its international-equity
+role also duplicates the separately held, leveraged MSCI ACWI strategy in the
+Scalable account. The old 18% weight was redistributed proportionally across
+the six remaining sleeves; no strategy mechanics changed.
+
+### Historical: why the 2026-05-12 update was made
 
 After full Wave 7/8 backtests + Monte Carlo + tax-aware analysis, the portfolio was restructured around four principles:
 
@@ -38,7 +46,7 @@ After full Wave 7/8 backtests + Monte Carlo + tax-aware analysis, the portfolio 
 
 ## Overview of the Strategies
 
-The project is based on seven distinct active investment strategies, each designed to maximize returns by leveraging specific market behaviors and signals. (The numbered sections below cover these seven active strategies plus the discontinued RSSB/WTIP sleeve in section 3, preserved as a historical record.)
+The project is based on six distinct active investment strategies. The numbered sections also preserve discontinued RSSB/WTIP and World 40/30/30 as historical records.
 
 ### 1. Hedgefundie's Excellent Adventure (HFEA) Strategy
 
@@ -343,7 +351,7 @@ Blocks re-entries during aggressive Fed hiking cycles (>50bp in 90 days). Credit
 
 ### 7. 7-Asset Rotator (AAA family) — Adaptive Asset Allocation with capital-efficient + ≤2× sleeves
 
-> **Promoted to production 2026-05-12** (was previously in the candidate tier as "AAA Free 2× + NTSD"). Replaces the discontinued Regime World sleeve, paired with the new World 40/30/30.
+> **Promoted to production 2026-05-12** (was previously in the candidate tier as "AAA Free 2× + NTSD"). Since the F4 retirement on 2026-09-09 it carries an 18.29% target weight.
 
 #### **Strategy Overview:**
 Adaptive Asset Allocation (Butler-Philbrick-Gordillo 2012) applied to a 7-asset universe of capital-efficient and 2× leveraged ETFs. Each month it ranks the universe by 6-month price momentum on the unleveraged signal symbols, picks the top-3 positive-momentum candidates, weights them inverse-vol, then applies a portfolio-level vol-target scale. Excess capacity sits in SHV (T-bills).
@@ -382,11 +390,11 @@ Defensive cash: **SHV** (iShares Short Treasury Bond ETF).
 - Internal momentum-rotation makes it adaptive — outperforms the previous static regime detector in macro regime changes.
 
 #### **Tax-awareness caveat:**
-The 7-asset universe with monthly top-3 rotation generates the highest turnover of any sleeve in the portfolio. **Capped at 15% in production to limit short-term capital-gains tax drag in this taxable account.**
+The 7-asset universe with monthly top-3 rotation generates the highest turnover of any sleeve in the portfolio. Its production target is **18.29%** after the proportional F4 redistribution.
 
-### 8. World 40/30/30 — international diversifier (new 2026-05-12)
+### 8. World 40/30/30 — discontinued 2026-09-09
 
-> **New production sleeve, promoted from Wave 8 research.** Static 40/30/30 blend of WLDU + GOLY + TLT, quarterly rebalance. Zero deployed-ticker overlap. Most tax-efficient sleeve in the portfolio (3 fixed assets, no rotation logic).
+> **Historical strategy.** Promoted on 2026-05-12 and retired on 2026-09-09. The corrected audit found too little actual current-strategy history for reliable long-run conclusions, and a separate leveraged MSCI ACWI strategy made the sleeve's international-equity role redundant. The code, Cloud Functions, and scheduler are no longer active.
 
 #### **Strategy Overview:**
 A simple static blend designed to (1) add genuine international equity exposure that the otherwise US-heavy portfolio lacks, and (2) bundle three uncorrelated diversifiers (gold, managed futures, corporate-bond carry) into a single ticker via GOLY's triple-stack structure.
@@ -394,34 +402,34 @@ A simple static blend designed to (1) add genuine international equity exposure 
 #### **Holdings:**
 | Ticker | Weight | Composition / role |
 |---|---:|---|
-| **WLDU** | 40% | Leverage Shares 2× MSCI World ETP — leveraged international equity (60% US + 40% intl-developed). The portfolio's primary intl-equity anchor; no other deployed sleeve provides clean intl exposure at scale. |
+| **WLDU** | 40% | Leverage Shares 2× MSCI World ETP — leveraged international equity (60% US + 40% intl-developed). |
 | **GOLY** | 30% | Quantify "Stacked Gold + MF + Corp Bonds" ETF — 50% gold + 50% managed futures + 100% corporate bonds = 200% notional in one ticker. Triple-stacked diversifier. |
 | **TLT** | 30% | iShares 20+ Year Treasury — unleveraged duration. Clean macro hedge with no daily-reset decay (unlike HFEA's TMF or AAA's UBT). |
 
 Effective portfolio notional: 0.40×2 + 0.30×2 + 0.30×1 = **1.70**.
 
-#### **Monthly + quarterly mechanics:**
-- **Monthly buys** (`make_monthly_buys_f4`): contributions tilt toward the most underweight leg relative to the 40/30/30 target — drift-correcting without forcing a full rebalance.
-- **Quarterly rebalance** (`quarterly_rebalance_f4`): on the first trading day of each calendar quarter, sells over-weight legs and buys under-weight legs to restore exact 40/30/30.
+#### **Historical monthly + quarterly mechanics:**
+- Monthly contributions tilted toward the most underweight leg relative to the 40/30/30 target.
+- A quarterly rebalance restored exact 40/30/30 weights.
 
 #### **24-Year Backtested Performance (this sleeve standalone):**
 - CAGR: **12.22%** • Sharpe: **0.68** • Max DD: -43.37%
-- Worst year: -27.91% • Lowest volatility of any deployed sleeve (15.12% annualized)
+- Worst year: -27.91% • Estimated volatility: 15.12% annualized
 
 #### **Why it was selected over alternatives:**
 After testing 35+ WLDU-based candidate designs across Waves 5/6/7/8:
-- Strict rules applied: per-ticker leverage ≤ 2×, zero deployed-ticker overlap.
-- **F4 (this design)** delivered the best Sharpe (0.68) of any candidate that fully cleared both rules over the full 24-year backtest window.
+- Strict rules applied at promotion time: per-ticker leverage ≤ 2× and zero ticker overlap with the then-active sleeves.
+- **F4 (this design)** delivered the best modeled Sharpe (0.68) of any candidate that fully cleared both rules over the original synthetic backtest window.
 - Beats simpler 3-asset variants on Sharpe through GOLY's internal diversification (gold + MF + credit in one position).
 
-#### **Production overlap status:**
-- **WLDU, GOLY, TLT — none deployed elsewhere.** This is the cleanest no-overlap sleeve in the portfolio.
-- GOLY internally holds managed futures (same asset class as HFEA's KMLM) but via a different ticker — the user explicitly chose the literal-ticker interpretation of the no-overlap rule.
+#### **Historical overlap status:**
+- WLDU, GOLY, and TLT did not overlap by ticker with the other Alpaca sleeves.
+- GOLY internally held managed futures, the same broad asset class as HFEA's KMLM.
 
-#### **Implementation caveats:**
-- **WLDU**: launched 2026-03-12 (Leverage Shares 2× World ETP). 24-year backtest uses synthetic (2× URTHSIM minus financing minus expense ratio) for pre-2026 periods. Live tracking-error to the synthetic is the largest unhedged uncertainty.
-- **GOLY**: launched 2025-04. Pre-inception synthetic uses the same component formula (50% GLDSIM + 50% DBMFSIM + 100% LQD) — but only 7 months of live data.
-- **DBMF inside GOLY synth**: extended back to 2000-01 via the Testfolio DBMFSIM monthly series (daily-aligned), so the GOLY-synthesised history is honest from 2000+ rather than DBMF's 2019 inception.
+#### **Retirement caveats:**
+- **WLDU** launched 2026-03-12, so almost the entire original long-window model was synthetic.
+- **GOLY** has usable current-strategy returns only from 2025-01-06. Three long-run proxy families achieved useful directional correlation but failed to reproduce the live return level, so they are sensitivity scenarios rather than reconstructed history.
+- The original 24-year figures below are retained as the 2026-05-12 promotion record, not current evidence for an active sleeve.
 
 ## Backtest Results & Robustness
 
@@ -435,28 +443,28 @@ Backtest engine: `research/mega_backtest.py`. Promotion-decision analyses (corre
 
 ### Deterministic Backtest (single historical path)
 
-Per-strategy native-window metrics from the 2026-05-12 unified backtest. Each strategy is evaluated on its longest available data window. **The 9-Sig row (and the dependent aggregate) were refreshed 2026-06-04** after the textbook 60/40 correction — 9-Sig CAGR fell 26.0%→18.7% and Sharpe 0.54→0.35 vs the old (implicitly aggressive) 80/20 implementation; see the 9-Sig section above.
+Historical per-strategy native-window metrics from the 2026-05-12 production composition. Each strategy is evaluated on its longest available data window. **The 9-Sig row (and the dependent aggregate) were refreshed 2026-06-04** after the textbook 60/40 correction — 9-Sig CAGR fell 26.0%→18.7% and Sharpe 0.54→0.35 vs the old (implicitly aggressive) 80/20 implementation; see the 9-Sig section above.
 
 | Strategy | Weight | Native window | CAGR | Vol | Sharpe | Max DD | Worst Yr |
 |---|---:|---|---:|---:|---:|---:|---:|
 | 7-Asset Rotator (AAA family) | 15% | 2006-2026 (20y) | **15.97%** | 18.88% | **0.74** | -28.65% | -15.04% |
 | Regime SSO | 12% | 1990-2026 (36y) | 13.49% | 17.00% | 0.68 | **-23.72%** | **-7.05%** |
-| **World 40/30/30** (new) | **18%** | 2002-2026 (24y) | 12.22% | **15.12%** | **0.68** | -43.37% | -27.91% |
+| **World 40/30/30** (retired) | **18%** | 2002-2026 (24y synthetic model) | 12.22% | **15.12%** | **0.68** | -43.37% | -27.91% |
 | DM 2× best-of-3 | 20% | 1987-2026 (39y) | **17.49%** | 23.65% | 0.66 | -39.20% | -26.34% |
 | HFEA | 15% | 1988-2026 (38y) | 18.53% | 28.93% | 0.57 | -65.50% | -41.74% |
 | 9-Sig | 5% | 1987-2026 (39y) | 18.65% | 48.05% | 0.35 | -98.42% | -80.19% |
 | SPXL SMA | 15% | 1970-2026 (56y) | 17.77% | 34.86% | 0.45 | -56.19% | -41.01% |
-| **AGGREGATE (deployed, partial-coverage)** | **100%** | 1970-2026 (56y) | **17.83%** | 25.24% | **0.63** | -48.66% | -40.35% |
+| **AGGREGATE (2026-05-12 composition, partial-coverage)** | **100%** | 1970-2026 (56y) | **17.83%** | 25.24% | **0.63** | -48.66% | -40.35% |
 | 100% SPY (benchmark) | — | 1970-2026 (56y) | 11.02% | 17.26% | 0.52 | -55.19% | -36.79% |
 | 100% URTH MSCI World (benchmark) | — | 1970-2026 (56y) | 9.88% | 15.59% | 0.51 | -57.82% | -40.72% |
 
-The aggregate is computed with **partial coverage**: at any date, only deployed strategies with available history contribute (weights renormalize). Earliest aggregate data point is 1970-01-02 using SPXL SMA only (the sole strategy with history back to 1970); DM 2× joins from 1987 and Regime SSO from 1990, and the full 7-sleeve aggregate is available from ~2006 onward.
+That historical aggregate uses **partial coverage**: at any date, only strategies with available history contribute (weights renormalize). Earliest aggregate data point is 1970-01-02 using SPXL SMA only; DM 2× joins from 1987 and Regime SSO from 1990, and the full seven-sleeve 2026-05-12 composition is available from ~2006 onward.
 
 **Key observations:**
 - **Aggregate Sharpe 0.63 over 56 years** is strong despite the long window catching the 1973-74 oil shock, 1980 Volcker recession, 2000-02 dot-com bear, 2008 GFC, 2022 inflation, etc.
 - vs SPY: **+6.8pp CAGR, +0.11 Sharpe**, comparable tail risk
 - vs MSCI World: **+7.9pp CAGR, +0.12 Sharpe**, comparable tail risk
-- $1 → $10,500+ (deployed aggregate) vs $370 (SPY) vs $205 (MSCI World) over 56 years
+- $1 → $10,500+ (historical seven-sleeve aggregate) vs $370 (SPY) vs $205 (MSCI World) over 56 years
 
 ### Distribution & tail-risk statistics (2026-05-12 additions)
 
@@ -471,7 +479,7 @@ Added with the final shortlist evaluation: skew, excess kurtosis (Fisher), month
 | HFEA | -0.19 | 1.54 | -11.4% | -15.9% | -57.9% | -57.0% | -49.0% | 1209 (4.8y) |
 | 9-Sig | +0.03 | 1.55 | -18.4% | -28.1% | -87.5% | -96.7% | -92.6% | 4973 (19.7y) |
 | SPXL SMA | +0.16 | 1.21 | -14.1% | -19.6% | -48.6% | -55.5% | -41.2% | 1710 (6.8y) |
-| AGGREGATE (deployed) | +0.46 | 3.90 | -9.7% | -14.6% | -43.3% | -38.7% | -30.3% | 950 (3.8y) |
+| AGGREGATE (2026-05-12 composition) | +0.46 | 3.90 | -9.7% | -14.6% | -43.3% | -38.7% | -30.3% | 950 (3.8y) |
 
 ⭐ = best-in-class. **The 7-Asset Rotator has never had a losing 3-year period and has never had a losing 5-year period in 20 years.**
 
@@ -483,7 +491,7 @@ Per-strategy bootstrap on each strategy's native window — Politis-Romano stati
 
 | Strategy | vs SPY (CAGR) | vs SPY (Sharpe) | vs SPY (MaxDD) | vs URTH (CAGR) | vs URTH (Sharpe) |
 |---|---:|---:|---:|---:|---:|
-| **AGGREGATE (deployed)** | **99.7%** | **76.9%** | 17.6% | **99.9%** | **78.3%** |
+| **AGGREGATE (2026-05-12 composition)** | **99.7%** | **76.9%** | 17.6% | **99.9%** | **78.3%** |
 | 7-Asset Rotator | 84.8% | 82.2% | **87.9%** | 94.2% | 91.8% |
 | Regime SSO | 77.1% | 79.3% | **87.0%** | 92.6% | 89.5% |
 | HFEA | 99.1% | 65.5% | 2.3% | 100.0% | 91.7% |
@@ -500,7 +508,7 @@ Per-strategy bootstrap on each strategy's native window — Politis-Romano stati
 
 ### Portfolio what-if for World 40/30/30 (final-step promotion check)
 
-Tested injecting World 40/30/30 at 7% allocation into the deployed aggregate (deployed weights renormalized):
+Historical promotion test: World 40/30/30 was injected at 7% into the then-current aggregate with the other weights renormalized.
 
 | Metric | Pre | Post | Δ |
 |---|---:|---:|---:|
@@ -508,12 +516,12 @@ Tested injecting World 40/30/30 at 7% allocation into the deployed aggregate (de
 | CAGR | 18.65% | 18.09% | -0.56pp |
 | MaxDD | -48.66% | -48.18% | -0.48pp (slightly tighter) |
 
-The marginal impact is small at 7% but real and directionally favorable on all three metrics. At the final **18% allocation**, the diversification effect is materially larger and dominates the slight CAGR drag.
+At promotion time, the modeled marginal impact looked small but directionally favorable. The later proxy audit did not provide enough real-history evidence to treat that synthetic result as confirmation.
 
 ### Honest Caveats
 
-- **WLDU is brand new** (live since 2026-03-12). The 24-year World 40/30/30 backtest is ~99% synthetic for the WLDU leg (2×URTHSIM minus financing minus expense ratio). Live tracking-error to the synthetic is the largest unhedged uncertainty for the new sleeve.
-- **GOLY launched 2025-04** with only ~7 months of live data. The pre-inception synthetic uses the same component formula as the prospectus, but production execution may diverge slightly.
+- **WLDU is brand new** (live since 2026-03-12). The original long-window World 40/30/30 model is therefore overwhelmingly synthetic for that leg.
+- **GOLY's actual current-strategy history starts 2025-01-06.** Pre-period proxy scenarios are not a reliable reconstruction and must not be joined to the live series as if they were the same strategy.
 - **DBMFSIM (extended back to 2000-01)** is a Testfolio simulation of the iMGP DBi DBMF Index — it differs from live DBMF by ~2-3pp annualized in our spot-checks.
 - Bootstrap can't simulate regimes that don't appear in the 1970-2026 sample (e.g., a 1930s-style depression).
 - Whole-share / fractional constraints aren't modeled.
@@ -534,7 +542,7 @@ The marginal impact is small at 7% but real and directionally favorable on all t
 
 - **7-Asset Rotator (AAA)**: Adaptive Asset Allocation over seven capital-efficient / 2× sleeves (NTSD/SAA/EET/UBT/UST/UGL/DBC), holding the momentum top-3 with inverse-vol weighting, a 25% annualized vol target, and a 30% trailing-peak drawdown stop to SHV cash. Highest Sharpe (0.74) of any deployed sleeve; never had a losing 3-year period in 20 years.
 
-- **World 40/30/30 (F4)**: Static 40% WLDU (2× MSCI World) + 30% GOLY (gold + managed-futures + corporate-bond triple stack) + 30% TLT, quarterly rebalance. Lowest volatility (15.12% annualized) and lowest turnover of any deployed sleeve — the portfolio's clean international-equity diversifier.
+- **World 40/30/30 (F4, retired)**: Historical static 40% WLDU + 30% GOLY + 30% TLT sleeve. Retired 2026-09-09; no production orders or scheduler remain.
 
 ### **Investment Horizon:**
 - **HFEA Strategy**: Best suited for long-term investors who can afford to leave their investments untouched for several years, allowing the compounding effect to play out.
@@ -547,7 +555,7 @@ The marginal impact is small at 7% but real and directionally favorable on all t
 
 - **Regime SSO**: Designed as a slow, defensive-tilted sleeve. The 7-signal composite is intentionally noise-resistant — long flat or sideways markets won't trigger rotations. For investors who want signal-driven downside protection rather than buy-and-hold leverage.
 
-- **7-Asset Rotator / World 40/30/30**: Long-term sleeves rebalanced on a monthly (AAA rotation) and quarterly (F4 static blend) cadence respectively. AAA adapts to whichever asset classes are trending; F4 is a set-and-forget diversifier — together they span the tactical and strategic ends of the horizon spectrum.
+- **7-Asset Rotator**: Long-term tactical sleeve that adapts monthly to whichever asset classes are trending.
 
 ### **Key Assumptions:**
 - **HFEA Strategy**: Assumes that the diversification benefits of combining equities, bonds, and managed futures will persist, and that over time, the leveraged returns will outweigh the increased volatility. The strategy also assumes that KMLM's trend-following approach will provide crisis alpha and reduce drawdowns during major market dislocations.
@@ -560,25 +568,24 @@ The marginal impact is small at 7% but real and directionally favorable on all t
 
 - **Regime SSO**: Assumes that composite multi-signal regime detection is more robust than any single indicator (200-SMA, VIX, etc.) and that combining slow (15-day score persistence) with fast (3-day extreme score) exit logic balances false-alarm avoidance with crash protection. The Fed hike filter assumes the monetary-policy environment is a meaningful regime modifier.
 
-- **7-Asset Rotator / World 40/30/30**: Assume that cross-asset momentum persists over ~6-month horizons (AAA) and that stacking uncorrelated return streams — international equity, gold, managed futures, and duration — improves risk-adjusted return without explicit market timing (F4).
+- **7-Asset Rotator**: Assumes that cross-asset momentum persists over roughly six-month horizons and inverse-volatility weighting remains useful across regimes.
 
 ## Conclusion
 
-All seven deployed strategies offer unique ways to enhance returns, with complementary risks. HFEA pursues maximum growth through balanced leverage. SPXL SMA captures market gains while avoiding sustained downturns via the 200-SMA. 9-Sig systematizes TQQQ/AGG growth with built-in crash protection. Dual Momentum rotates among three 2× sleeves with DD-stop + vol-target. Regime SSO uses a 7-signal composite to gate entry to 2× S&P. The **7-Asset Rotator** brings adaptive multi-asset rotation (the highest-Sharpe sleeve, never with a losing 3-year period). The **World 40/30/30** provides clean international diversification with the lowest turnover and lowest volatility of any deployed sleeve.
+The six deployed strategies combine leveraged growth, trend-following, systematic rebalancing, multi-asset momentum, and signal-driven risk control. HFEA pursues growth through balanced leverage. SPXL SMA gates 3× equity exposure with its 200-SMA. 9-Sig systematizes TQQQ/AGG growth. Dual Momentum rotates among three 2× sleeves with DD-stop and vol-target. Regime SSO gates entry to 2× S&P. The **7-Asset Rotator** adds adaptive multi-asset rotation.
 
-Together, the seven strategies provide a comprehensive blend of aggressive US growth, trend-following, systematic rebalancing, multi-asset momentum, signal-driven risk management, adaptive rotation, and international diversification:
+Together, the six strategies provide a blend of aggressive US growth, trend-following, systematic rebalancing, multi-asset momentum, signal-driven risk management, and adaptive rotation:
 
-- **HFEA (15%)**: Three-asset leveraged portfolio (UPRO 45% / TMF 25% / KMLM 30%) — aggressive US-equity workhorse
-- **SPXL SMA (15%)**: 3× S&P trend-follower with 200-day SMA gate
-- **9-Sig (5%)**: Systematic TQQQ/AGG growth with crash protection — tail-risk sleeve, kept small
-- **Dual Momentum (20%)**: Best-of-3 rotation (SPUU/QLD/EFO) + DD-stop + vol-target — strong risk/return at ≤2× leverage
-- **Regime SSO (12%)**: 7-signal US regime detector — SSO ↔ USFR
-- **7-Asset Rotator (15%)**: Adaptive monthly top-3 momentum rotation over NTSD/SAA/EET/UBT/UST/UGL/DBC, inverse-vol weighted, DD30 + vol25 — highest Sharpe of any deployed sleeve
-- **World 40/30/30 (18%)**: Static 40% WLDU + 30% GOLY + 30% TLT, quarterly rebalance — international diversifier, most tax-efficient sleeve, zero deployed-ticker overlap
+- **HFEA (18.29%)**: Three-asset leveraged portfolio (UPRO 45% / TMF 25% / KMLM 30%)
+- **SPXL SMA (18.29%)**: 3× S&P trend-follower with 200-day SMA gate
+- **9-Sig (6.10%)**: Systematic TQQQ/AGG growth with crash protection
+- **Dual Momentum (24.39%)**: Best-of-3 rotation (SPUU/QLD/EFO) + DD-stop + vol-target
+- **Regime SSO (14.64%)**: 7-signal US regime detector — SSO ↔ USFR
+- **7-Asset Rotator (18.29%)**: Adaptive monthly top-3 momentum rotation over NTSD/SAA/EET/UBT/UST/UGL/DBC
 
-> *Historical context: RSSB/WTIP (10%) was discontinued 2026-05-11 after poor risk-adjusted performance. Regime World (22.22%) was discontinued 2026-05-12 in favor of the 7-Asset Rotator (broader asset-class diversification with monthly adaptation) + World 40/30/30 (clean intl + tax-efficient static blend) pair.*
+> *Historical context: RSSB/WTIP was discontinued 2026-05-11, Regime World on 2026-05-12, and World 40/30/30 on 2026-09-09. The F4 research record remains above, but it is no longer part of production.*
 
-Each strategy has been selected based on historical backtests, robustness testing (Monte Carlo stationary block bootstrap, 2000 simulated paths per strategy on its native window), promotion-decision analyses (correlation, portfolio what-if, regime splits, rolling Sharpe, tail-risk stats), and current market research. The diversification across seven different approaches produces an aggregate Sharpe of **0.63 over 56 years** with $1 → $10,500+ vs SPY's $370. **The aggregate portfolio beats SPY on CAGR in 99.7% of simulated paths and beats MSCI World on Sharpe in 78.3%** — the strongest portfolio-construction evidence the data supports.
+Strategy selection uses historical backtests, robustness testing, promotion analyses, and current evidence. The headline aggregate statistics above describe the historical 2026-05-12 seven-sleeve composition and must not be presented as a backtest of the current six-sleeve allocation until the research registry is refreshed.
 
 ## Index Alert System
 
@@ -625,18 +632,17 @@ Consider a loan with a duration of 6 to 8 years (50k to 100k) at around 4.5% int
   - **Dual Momentum strategy**: Best-of-3 rotation across SPUU/QLD/EFO with DD-stop and vol-target
   - **Regime SSO**: 7-signal composite regime detector — SSO ↔ USFR rotation
   - **7-Asset Rotator (AAA family)** *(new 2026-05-12)*: Monthly top-3 momentum rotation over NTSD/SAA/EET/UBT/UST/UGL/DBC with inverse-vol weighting, DD30 stop, vol25 target, and SHV defensive cash
-  - **World 40/30/30** *(new 2026-05-12)*: Static 40% WLDU + 30% GOLY + 30% TLT with monthly drift-correcting buys + quarterly full rebalance
   - **Unified index alert system**: Monitors multiple indices for ATH drops and SMA crossings
-  - **Firestore integration**: Persistent storage for strategy balances, 9-Sig quarterly data, Dual Momentum + 7-Asset Rotator position tracking, regime score history, World 40/30/30 quarterly rebal idempotency markers, and unified market data cache
+  - **Firestore integration**: Persistent storage for strategy balances, 9-Sig quarterly data, Dual Momentum + 7-Asset Rotator position tracking, regime score history, and unified market data cache. The `f4` document remains as a retired historical record.
   - **Alpaca integration**: All market data fetched from Alpaca IEX feed (no yfinance dependency)
-- `research/mega_backtest.py`: Unified research backtest engine — covers all 7 deployed strategies + extensive historic strategy universe; includes Monte Carlo robustness, promotion-decision analyses (correlation / what-if / regime splits / rolling Sharpe / tail risk), and HTML report generation
+- `research/mega_backtest.py`: Unified research backtest engine — covers active and historical strategies; includes Monte Carlo robustness, promotion-decision analyses, and HTML report generation
 - `research/extended_data.py`: Tiered data layer — splices Testfolio SIM data (SPYSIM/EFASIM/URTHSIM/NTSDSIM/TLTSIM/IEFSIM/QQQSIM/BNDSIM/GLDSIM/SLVSIM/KMLMSIM/DBMFSIM) with real Alpaca + EODHD feeds for backtests
 - `requirements.txt`: Python dependencies including pandas, Google Cloud libraries, and Flask.
 - `cloudbuild.yaml`: Google Cloud Build configuration for deploying Cloud Functions and Cloud Scheduler jobs.
 - `README.md`: Comprehensive documentation of all strategies and setup instructions.
 
 ### **Cloud Functions Deployed:**
-- `monthly_invest_all`: **Orchestrator function (RECOMMENDED)** — runs all seven monthly strategies with coordinated budget calculations
+- `monthly_invest_all`: **Orchestrator function (RECOMMENDED)** — runs all six monthly strategies with coordinated budget calculations
 - `monthly_buy_hfea`: HFEA monthly investment function (individual execution)
 - `rebalance_hfea`: HFEA quarterly rebalancing function
 - `monthly_buy_spxl`: SPXL SMA monthly investment function (individual execution)
@@ -647,30 +653,28 @@ Consider a loan with a duration of 6 to 8 years (50k to 100k) at around 4.5% int
 - `monthly_buy_regime_sso`: Regime SSO monthly buy
 - `daily_regime_check`: Regime SSO daily score check
 - **`monthly_buy_aaa`** *(new 2026-05-12)*: 7-Asset Rotator monthly execution (momentum scoring → top-3 inverse-vol → vol-target scale → DD30 check)
-- **`monthly_buy_f4`** *(new 2026-05-12)*: World 40/30/30 monthly drift-correcting buys toward 40/30/30 target
-- **`quarterly_rebalance_f4`** *(new 2026-05-12)*: World 40/30/30 quarterly rebalance to exact 40/30/30 with Firestore idempotency marker
 - `index_alert`: Unified index alert system
 - `backfill_regime_scores`: One-shot manual seeder for Regime SSO composite-score history
 - `audit_monthly_run`: Day-8 watchdog that verifies the monthly orchestrator actually ran
 
-*(16 Cloud Functions total.)*
+*(14 Cloud Functions total.)*
 
 ### **Cloud Scheduler Jobs:**
 
-*(11 scheduled jobs total.)*
+*(15 scheduled jobs total: six portfolio jobs plus nine index-alert schedules.)*
 
-- **Monthly orchestrator**: First trading day of each month at 12:00 PM ET (`monthly_invest_all` — runs all seven monthly strategies with coordinated budgets)
-- **Quarterly functions**: First trading day of each quarter (`rebalance_hfea` at 2:00 PM ET, `quarterly_nine_sig_signal` at 1:00 PM ET, **`quarterly_rebalance_f4`** at 3:00 PM ET)
+- **Monthly orchestrator**: First trading day of each month at 12:00 PM ET (`monthly_invest_all` — runs all six monthly strategies with coordinated budgets)
+- **Quarterly functions**: First trading day of each quarter (`rebalance_hfea` at 2:00 PM ET and `quarterly_nine_sig_signal` at 1:00 PM ET)
 - **Monthly-run watchdog**: 2:00 PM ET on the 8th of each month (`audit_monthly_run`) — alerts via Telegram if the orchestrator failed to run in the day-1-7 window
-- **Index alerts**: Hourly during trading hours (9:15 AM - 3:15 PM for SMA alerts, 9:30 AM - 3:30 PM for ATH drop alerts) — four jobs: `sp500_drop`, `msci_drop`, `urth_255sma`, `spy_200sma`
+- **Index alerts**: Three Alpaca/USD schedules plus six EODHD/XETRA schedules for ACWI and World (`advisory`, `decisive`, `reconcile`)
 - **Daily SMA functions**: 3:56 PM ET on weekdays (`daily_trade_spxl_200sma`)
 - **Daily regime checks**: After-close on weekdays (`daily_regime_check` at 16:30 ET)
 
-**Note**: Individual monthly functions are deployed but not scheduled. They remain available for manual execution and debugging purposes. The `monthly_invest_all` orchestrator is used for production to ensure coordinated budget allocation and prevent over-spending. The AAA and F4 monthly buys are driven **in-process** by the orchestrator (no per-strategy scheduler by design); only `quarterly_rebalance_f4` — which the orchestrator does not cover — has its own dedicated Cloud Scheduler (3:00 PM ET, first trading days of each calendar quarter), with a Firestore idempotency marker (`quarterly-runs-{env}/f4-{quarter}`) so repeat fires are safe.
+**Note**: Individual monthly functions are deployed but not scheduled. They remain available for manual execution and debugging. The `monthly_invest_all` orchestrator is used for production to ensure coordinated budget allocation and prevent over-spending. F4 functions and its quarterly scheduler are deleted idempotently by Cloud Build.
 
 ## Monthly Investment Orchestrator
 
-The `monthly_invest_all` orchestrator is a coordinated execution system that manages all **seven** monthly investment strategies (HFEA, SPXL SMA, 9-Sig, Dual Momentum, Regime SSO, 7-Asset Rotator, and World 40/30/30) in a single unified process.
+The `monthly_invest_all` orchestrator manages all **six** monthly investment strategies (HFEA, SPXL SMA, 9-Sig, Dual Momentum, Regime SSO, and 7-Asset Rotator) in a single unified process.
 
 ### **Why Use an Orchestrator?**
 
@@ -688,13 +692,12 @@ The orchestrator (`monthly_invest_all_strategies()` function):
 
 1. **Calculates budgets once**: Checks margin conditions and calculates total available buying power a single time
 2. **Distributes precisely**: Splits the total amount according to strategy allocations:
-   - HFEA: 15%
-   - SPXL SMA: 15%
-   - 9-Sig: 5%
-   - Dual Momentum: 20%
-   - Regime SSO: 12%
-   - 7-Asset Rotator: 15%
-   - World 40/30/30: 18%
+   - HFEA: 18.29%
+   - SPXL SMA: 18.29%
+   - 9-Sig: 6.10%
+   - Dual Momentum: 24.39%
+   - Regime SSO: 14.64%
+   - 7-Asset Rotator: 18.29%
 3. **Passes pre-calculated amounts**: Each strategy receives its exact budget and margin conditions as parameters
 4. **Prevents over-spending**: Since budgets are pre-calculated, there's no risk of multiple strategies competing for the same funds
 
@@ -718,7 +721,7 @@ The individual functions remain deployed for manual testing and debugging but sh
 
 ## Margin-Aware Investment Logic
 
-The system includes intelligent margin control applied via the monthly orchestrator, which runs a **single** margin check and shares the result across all seven monthly investment strategies (HFEA, SPXL SMA, 9-Sig, Dual Momentum, Regime SSO, 7-Asset Rotator, and World 40/30/30). This feature enables controlled use of leverage (up to +10%) only when market conditions are favorable and borrowing costs are reasonable.
+The system includes intelligent margin control applied via the monthly orchestrator, which runs a **single** margin check and shares the result across all six monthly investment strategies. This feature enables controlled use of leverage (up to +10%) only when market conditions are favorable and borrowing costs are reasonable.
 
 ### **Core Principles**
 
@@ -834,23 +837,23 @@ margin_control_config = {
 **Dynamic Monthly Investment:**
 - Investment amounts are calculated dynamically each month based on available cash and margin conditions
 - Total available = Account cash − Reserved amounts (for bearish strategies) + Approved margin (up to +10% of equity)
-- **Split across 7 strategies:** HFEA 15%, SPXL SMA 15%, 9-Sig 5%, Dual Momentum 20%, Regime SSO 12%, 7-Asset Rotator 15%, World 40/30/30 18%
+- **Split across 6 strategies:** HFEA 18.29%, SPXL SMA 18.29%, 9-Sig 6.10%, Dual Momentum 24.39%, Regime SSO 14.64%, 7-Asset Rotator 18.29%
 - All-or-Nothing approach: Invest full calculated amount or skip entirely
 
 **HFEA Strategy:**
-- Portfolio allocation: **15%** of total monthly investment
+- Portfolio allocation: **18.29%** of total monthly investment
 - Asset allocation: UPRO 45%, TMF 25%, KMLM 30%
 - Rebalancing: Quarterly with 0.5% fee margin
 - Investment approach: Underweight-based proportional allocation
 
 **SPXL SMA Strategy:**
-- Portfolio allocation: **15%** of total monthly investment
+- Portfolio allocation: **18.29%** of total monthly investment
 - SMA period: 200 days
 - Margin band: 1% (to avoid whipsaws)
 - Tracked index: S&P 500 (SPY ETF as proxy)
 
 **9-Sig Strategy:**
-- Portfolio allocation: **5%** of total monthly investment
+- Portfolio allocation: **6.10%** of total monthly investment
 - Target allocation: TQQQ 60%, AGG 40% (Kelly canonical)
 - Quarterly growth target: 9%
 - Monthly contributions: 100% to AGG (bonds)
@@ -860,7 +863,7 @@ margin_control_config = {
 - Bond rebalancing threshold: 30% (triggers rebalancing when AGG exceeds this)
 
 **Dual Momentum Strategy (best-of-3):**
-- Portfolio allocation: **20%** of total monthly investment
+- Portfolio allocation: **24.39%** of total monthly investment
 - Asset universe: SPUU (2× S&P 500), QLD (2× Nasdaq), EFO (2× MSCI EAFE), BND (defensive)
 - Momentum signal: blended 6m+12m skip-1m on SPY/QQQ/EFA
 - DD-stop: 30% trailing-peak NAV
@@ -868,13 +871,13 @@ margin_control_config = {
 - Rebalancing frequency: Monthly (first trading day)
 
 **Regime SSO Strategy:**
-- Portfolio allocation: **12%** of total monthly investment
+- Portfolio allocation: **14.64%** of total monthly investment
 - 7-signal composite (price trend / breadth / VIX / ADX / credit / news / canary) + Fed-hike filter
 - Holds SSO (2× S&P) when risk-on, USFR (floating-rate Treasury) when risk-off
 - Designed to fire ~1.4 rotations per year — slow and noise-resistant
 
 **7-Asset Rotator (AAA family) — new 2026-05-12:**
-- Portfolio allocation: **15%** of total monthly investment (capped — highest-turnover sleeve)
+- Portfolio allocation: **18.29%** of total monthly investment
 - Universe: 7 capital-efficient / 2× ETFs — NTSD (signal SPY), SAA (IWM), EET (EEM), UBT (TLT), UST (IEF), UGL (GLD), DBC (DBC)
 - Defensive cash: SHV
 - Selection: monthly top-3 by 6m momentum on signal symbols
@@ -883,13 +886,9 @@ margin_control_config = {
 - DD-30 stop: trailing-peak NAV breach → all to SHV, reset peak
 - Tolerance: $5 minimum trade size
 
-**World 40/30/30 — new 2026-05-12:**
-- Portfolio allocation: **18%** of total monthly investment (largest single sleeve)
-- Fixed targets: WLDU 40% / GOLY 30% / TLT 30%
-- Monthly buys: drift-correcting (tilt new contribution toward underweight legs)
-- Quarterly rebal: bring positions back to exact 40/30/30 on first trading day of each calendar quarter
-- Tolerance: $5 minimum trade size, 5pp drift threshold for early rebal
-- Tax-efficiency: 3 fixed tickers, no rotation — lowest turnover sleeve in portfolio
+**World 40/30/30 — retired 2026-09-09:**
+- No active allocation, monthly buy, quarterly rebalance, Cloud Function, or scheduler.
+- The historical Firestore document is retained for auditability.
 
 **Alert System:**
 - ATH drop threshold: 30% for S&P 500 and MSCI World
@@ -899,11 +898,11 @@ margin_control_config = {
 
 ### **Data Storage:**
 - **Firestore Collections:**
-  - `strategy-balances-live` / `strategy-balances-paper`: Tracks invested amounts and position details for each strategy (HFEA, SPXL SMA, 9-Sig, Dual Momentum, Regime SSO, 7-Asset Rotator, World 40/30/30)
+  - `strategy-balances-live` / `strategy-balances-paper`: Tracks invested amounts and position details for active strategies; the retired `f4` document is preserved as history
   - `nine-sig-quarters`: Historical quarterly data for 9-Sig signal calculations
   - `nine-sig-monthly-contributions`: Tracks actual monthly 9-Sig contributions for accurate quarterly signal calculation
   - `regime-scores`: Daily Regime SSO composite scores and signal history (`regime-world-scores` is a historical collection only — Regime World retired 2026-05-12)
-  - `quarterly-runs-live` / `quarterly-runs-paper`: Idempotency markers for quarterly functions (`hfea-{quarter}`, `nine_sig-{quarter}`, **`f4-{quarter}`** *new*)
+  - `quarterly-runs-live` / `quarterly-runs-paper`: Idempotency markers for active quarterly functions (`hfea-{quarter}`, `nine_sig-{quarter}`); old F4 markers are historical
   - `monthly-runs-live` / `monthly-runs-paper`: Idempotency markers for the monthly orchestrator
   - `market-data`: Unified collection caching market prices, SMA values (200-day, 255-day), crossing states, and alert timestamps (5-minute cache expiry) — single source of truth for all market data
 
@@ -913,8 +912,8 @@ margin_control_config = {
 **7-Asset Rotator Tracking** (`strategy-balances-live/aaa`) *— new*:
   - `total_invested`, `peak_nav`, `current_positions` (shares per ticker), `current_values` (dollar per ticker), `last_momentum_check` (scores per signal, top-3 picks, inverse-vol weights, vol-target scale, DD-triggered flag, drawdown reading)
 
-**World 40/30/30 Tracking** (`strategy-balances-live/f4`) *— new*:
-  - `total_invested`, `peak_nav`, `current_positions` (shares per WLDU/GOLY/TLT), `current_values` (dollar per leg), `last_buy_date`, `last_rebal_date`
+**Retired World 40/30/30 record** (`strategy-balances-live/f4`):
+  - Preserves historical investment fields and adds `retired`, `retired_at`, `retirement_proceeds`, and zeroed current positions after liquidation
 
 ### **Trading Platform:**
 - **Alpaca API**: Live and paper trading environments supported
@@ -948,7 +947,7 @@ pip install -r requirements.txt
 The script supports local execution for testing strategies before deploying to Google Cloud:
 
 ```bash
-# RECOMMENDED - Monthly Orchestrator (runs all seven monthly strategies with coordinated budgets)
+# RECOMMENDED - Monthly Orchestrator (runs all six monthly strategies with coordinated budgets)
 python3 main.py --action monthly_invest_all --env paper --force
 
 # Individual Strategy Testing (for debugging specific strategies)
@@ -975,14 +974,13 @@ python3 main.py --action daily_regime_check --env paper
 # 7-Asset Rotator (AAA family) — new 2026-05-12
 python3 main.py --action monthly_buy_aaa --env paper --force
 
-# World 40/30/30 — new 2026-05-12
-python3 main.py --action monthly_buy_f4 --env paper --force
-python3 main.py --action quarterly_rebalance_f4 --env paper --force
+# One-time F4 retirement preview (read-only against the broker)
+python3 scripts/retire_f4_live.py --env live --dry-run
 ```
 
 **Why use the orchestrator (`monthly_invest_all`)?**
 - Calculates budgets once and distributes them to all strategies
-- Ensures exact percentage splits (15% HFEA, 15% SPXL SMA, 5% 9-Sig, 20% Dual Momentum, 12% Regime SSO, 15% 7-Asset Rotator, 18% World 40/30/30)
+- Ensures exact six-strategy targets with contribution tilts toward underweight sleeves
 - Prevents over-spending by coordinating margin and cash allocation
 - Recommended for production use to maintain portfolio balance
 
@@ -1087,6 +1085,19 @@ The portfolio was restructured on **2026-05-12**. This section is preserved as a
 - [x] **Cloud Scheduler** — `quarterly_rebalance_f4` given its own scheduler (3:00 PM ET, first trading days of each calendar quarter). `monthly_buy_aaa` / `monthly_buy_f4` are orchestrator-driven in-process, so they intentionally have **no** per-strategy scheduler.
 - [x] **Deployed** — via the Cloud Build trigger on push to `main` (not a manual `gcloud builds submit`).
 - [x] **First orchestrator run monitored** — all 7 strategies fired successfully via the consolidated Telegram summary.
+
+## 2026-09-09 F4 Retirement
+
+- `strategy_allocations` now contains six normalized targets summing to 100%.
+- The monthly orchestrator, audit, HTTP routes, and generic CLI contain no F4 execution path.
+- Generic `--force` execution is rejected for `--env live`.
+- Cloud Build deploys the six-strategy version and idempotently deletes
+  `monthly_buy_f4`, `quarterly_rebalance_f4`, and its scheduler.
+- `scripts/retire_f4_live.py` provides the one-time read-only dry-run and a
+  confirmation-gated live execution with strict sell-fill checks, a fresh
+  post-sale margin gate, an actual-proceeds cap, and a JSON audit trail.
+- The historical F4 Firestore document is retained and marked retired after
+  successful liquidation; it is not deleted.
 
 ## Contributing
 
