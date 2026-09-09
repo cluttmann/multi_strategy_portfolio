@@ -1,4 +1,5 @@
 import sys
+import inspect
 from pathlib import Path
 
 import pytest
@@ -448,3 +449,45 @@ def test_execute_retirement_caps_buys_and_runs_all_six_strategies(monkeypatch, t
         "regime_sso",
         "aaa",
     ]
+
+
+def test_f4_has_no_production_function_or_http_route():
+    assert not hasattr(main, "make_monthly_buys_f4")
+    assert not hasattr(main, "quarterly_rebalance_f4")
+    assert not hasattr(main, "monthly_buy_f4")
+    assert not hasattr(main, "quarterly_rebalance_f4_route")
+    routes = {rule.rule for rule in main.app.url_map.iter_rules()}
+    assert "/monthly_buy_f4" not in routes
+    assert "/quarterly_rebalance_f4" not in routes
+
+
+def test_monthly_orchestrator_and_audit_exclude_f4():
+    orchestrator_source = inspect.getsource(main.monthly_invest_all_strategies)
+    audit_source = inspect.getsource(main.audit_monthly_run)
+    dashboard_source = inspect.getsource(main.print_allocation_dashboard)
+
+    assert "f4" not in orchestrator_source.lower()
+    assert "f4" not in audit_source.lower()
+    assert "f4" not in dashboard_source.lower()
+
+
+def test_live_force_is_rejected():
+    with pytest.raises(ValueError, match="paper only"):
+        main.validate_force_environment("live", True)
+
+    main.validate_force_environment("paper", True)
+    main.validate_force_environment("live", False)
+
+
+def test_cloudbuild_retires_f4_services_instead_of_deploying_them():
+    cloudbuild = (
+        Path(__file__).resolve().parent.parent / "cloudbuild.yaml"
+    ).read_text(encoding="utf-8")
+
+    assert "id: 'deploy-f4'" not in cloudbuild
+    assert "id: 'deploy-quarterly-f4'" not in cloudbuild
+    assert "jobs update http quarterly_rebalance_f4" not in cloudbuild
+    assert "jobs create http quarterly_rebalance_f4" not in cloudbuild
+    assert "gcloud functions delete monthly_buy_f4" in cloudbuild
+    assert "gcloud functions delete quarterly_rebalance_f4" in cloudbuild
+    assert "gcloud scheduler jobs delete quarterly_rebalance_f4" in cloudbuild

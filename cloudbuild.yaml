@@ -301,11 +301,7 @@ steps:
   # Cloud Scheduler job have been deleted from GCP (cleanup completed 2026-05-17).
 
 # ─────────────────────────────────────────────────────────────────────────────
-# WAVE C1 — 3 of the final 5 function deploys (start after Wave B completes).
-# Wave C used to deploy 5 in parallel, but build 5c2935ff (2026-05-17T16:22)
-# proved that 5 simultaneous inner Cloud Builds is at/over this project's
-# concurrency quota — one of the 5 sat queued for 8 min and EXPIRED. So the
-# final 5 are now split into Wave C1 (3 deploys) and Wave C2 (2 deploys).
+# WAVE C1 — final strategy deploy after Wave B completes.
 # ─────────────────────────────────────────────────────────────────────────────
 
   # Step 12: Deploy monthly_buy_aaa (7-Asset Rotator — momentum rotation across NTSD/SAA/EET/UBT/UST/UGL/DBC).
@@ -322,55 +318,6 @@ steps:
     - --runtime=python310
     - --timeout=540s
     - --entry-point=monthly_buy_aaa
-    - --memory=512MB
-    - --set-env-vars=GOOGLE_CLOUD_PROJECT=1098661711782,GOOGLE_CLOUD_PROJECT_ID=trading-436516
-    waitFor:
-      - 'deploy-dm'
-      - 'deploy-nine-sig-quarterly'
-      - 'deploy-spxl-200sma'
-      - 'deploy-regime-check'
-      - 'deploy-regime-sso'
-      - 'deploy-regime-backfill'
-
-  # Step 13: Deploy monthly_buy_f4 (World 40/30/30 — drift-correcting monthly buys toward WLDU/GOLY/TLT).
-  # Called in-process by the monthly_invest_all orchestrator; deployed individually for manual/debug use.
-  - name: 'gcr.io/cloud-builders/gcloud'
-    id: 'deploy-f4'
-    args:
-    - functions
-    - deploy
-    - monthly_buy_f4
-    - --source=fn-light
-    - --trigger-http
-    - --region=europe-west3
-    - --runtime=python310
-    - --timeout=540s
-    - --entry-point=monthly_buy_f4
-    - --memory=512MB
-    - --set-env-vars=GOOGLE_CLOUD_PROJECT=1098661711782,GOOGLE_CLOUD_PROJECT_ID=trading-436516
-    waitFor:
-      - 'deploy-dm'
-      - 'deploy-nine-sig-quarterly'
-      - 'deploy-spxl-200sma'
-      - 'deploy-regime-check'
-      - 'deploy-regime-sso'
-      - 'deploy-regime-backfill'
-
-  # Step 14: Deploy quarterly_rebalance_f4 (full F4 rebalance to exact 40/30/30 weights).
-  # NOT called by the monthly orchestrator — needs its own Cloud Scheduler (see scheduler section).
-  # Firestore idempotency marker (`quarterly-runs-{env}/f4-{quarter}`) makes repeated calls safe.
-  - name: 'gcr.io/cloud-builders/gcloud'
-    id: 'deploy-quarterly-f4'
-    args:
-    - functions
-    - deploy
-    - quarterly_rebalance_f4
-    - --source=fn-light
-    - --trigger-http
-    - --region=europe-west3
-    - --runtime=python310
-    - --timeout=540s
-    - --entry-point=quarterly_rebalance_f4_route
     - --memory=512MB
     - --set-env-vars=GOOGLE_CLOUD_PROJECT=1098661711782,GOOGLE_CLOUD_PROJECT_ID=trading-436516
     waitFor:
@@ -402,8 +349,6 @@ steps:
     - --set-env-vars=GOOGLE_CLOUD_PROJECT=1098661711782,GOOGLE_CLOUD_PROJECT_ID=trading-436516
     waitFor:
       - 'deploy-aaa'
-      - 'deploy-f4'
-      - 'deploy-quarterly-f4'
 
   # Step 16: Deploy the audit_monthly_run watchdog (verifies the monthly orchestrator actually ran)
   - name: 'gcr.io/cloud-builders/gcloud'
@@ -422,8 +367,6 @@ steps:
     - --set-env-vars=GOOGLE_CLOUD_PROJECT=1098661711782,GOOGLE_CLOUD_PROJECT_ID=trading-436516
     waitFor:
       - 'deploy-aaa'
-      - 'deploy-f4'
-      - 'deploy-quarterly-f4'
 
 # ─────────────────────────────────────────────────────────────────────────────
 # WAVE D — Cloud Scheduler (re)creation. Schedulers don't trigger inner Cloud
@@ -432,7 +375,7 @@ steps:
 # that hasn't been deployed yet.
 # ─────────────────────────────────────────────────────────────────────────────
 
-  # Cloud Scheduler job for 'monthly_invest_all' ORCHESTRATOR (runs all 7 monthly strategies)
+  # Cloud Scheduler job for 'monthly_invest_all' ORCHESTRATOR (runs all 6 monthly strategies)
   - name: 'gcr.io/cloud-builders/gcloud'
     entrypoint: 'bash'
     args:
@@ -454,8 +397,6 @@ steps:
           --oidc-service-account-email='1098661711782-compute@developer.gserviceaccount.com'
     waitFor:
       - 'deploy-aaa'
-      - 'deploy-f4'
-      - 'deploy-quarterly-f4'
       - 'deploy-index-alert'
       - 'deploy-audit'
 
@@ -472,8 +413,6 @@ steps:
     ]
     waitFor:
       - 'deploy-aaa'
-      - 'deploy-f4'
-      - 'deploy-quarterly-f4'
       - 'deploy-index-alert'
       - 'deploy-audit'
 
@@ -481,7 +420,7 @@ steps:
   # discontinued. The existing GCP scheduler job has been deleted (cleanup completed 2026-05-17).
 
   # NOTE: monthly_buy_spxl, monthly_nine_sig_contributions, monthly_buy_hfea, monthly_dual_momentum,
-  # monthly_buy_aaa, and monthly_buy_f4 schedulers are intentionally absent — they have all been
+  # and monthly_buy_aaa schedulers are intentionally absent — they have all been
   # REPLACED by the monthly_invest_all orchestrator for coordinated budget management.
   # The individual functions are deployed for manual/debugging use but never directly scheduled.
 
@@ -498,8 +437,6 @@ steps:
     ]
     waitFor:
       - 'deploy-aaa'
-      - 'deploy-f4'
-      - 'deploy-quarterly-f4'
       - 'deploy-index-alert'
       - 'deploy-audit'
 
@@ -516,8 +453,6 @@ steps:
     ]
     waitFor:
       - 'deploy-aaa'
-      - 'deploy-f4'
-      - 'deploy-quarterly-f4'
       - 'deploy-index-alert'
       - 'deploy-audit'
 
@@ -545,8 +480,6 @@ steps:
           --message-body='{"index_symbol": "SPY", "index_name": "S&P 500 (SPY)", "alert_type": "ath_drop", "threshold_percent": 30.0}'
     waitFor:
       - 'deploy-aaa'
-      - 'deploy-f4'
-      - 'deploy-quarterly-f4'
       - 'deploy-index-alert'
       - 'deploy-audit'
 
@@ -564,8 +497,6 @@ steps:
     ]
     waitFor:
       - 'deploy-aaa'
-      - 'deploy-f4'
-      - 'deploy-quarterly-f4'
       - 'deploy-index-alert'
       - 'deploy-audit'
 
@@ -608,8 +539,6 @@ steps:
           --message-body='{"index_symbol": "SPY", "index_name": "S&P 500 (SPY)", "alert_type": "sma_crossing", "sma_period": 200, "noise_threshold": 1.0}'
     waitFor:
       - 'deploy-aaa'
-      - 'deploy-f4'
-      - 'deploy-quarterly-f4'
       - 'deploy-index-alert'
       - 'deploy-audit'
 
@@ -640,8 +569,6 @@ steps:
         fi
     waitFor:
       - 'deploy-aaa'
-      - 'deploy-f4'
-      - 'deploy-quarterly-f4'
       - 'deploy-index-alert'
       - 'deploy-audit'
 
@@ -674,47 +601,28 @@ steps:
         fi
     waitFor:
       - 'deploy-aaa'
-      - 'deploy-f4'
-      - 'deploy-quarterly-f4'
       - 'deploy-index-alert'
       - 'deploy-audit'
 
   # Cloud Scheduler 'daily_regime_world_check' removed 2026-05-12 — Regime World strategy
   # discontinued. The existing GCP scheduler job has been deleted (cleanup completed 2026-05-17).
 
-  # Cloud Scheduler for the F4 (World 40/30/30) quarterly rebalance.
-  # Fires day 1-7 of Jan/Apr/Jul/Oct at 15:00 ET — after the monthly orchestrator (12:00 ET),
-  # 9-Sig signal (13:00 ET), and HFEA quarterly rebalance (14:00 ET) so capital from any
-  # in-process F4 monthly drift-buy is settled before the full rebalance to exact 40/30/30.
-  # The function has its own Firestore idempotency marker (`quarterly-runs-{env}/f4-{quarter}`),
-  # so even if Cloud Scheduler retries or fires multiple days in a row, only the first call
-  # in a given quarter does work.
+  # F4 retired 2026-09-09. Keep this cleanup idempotent so every later build
+  # confirms the two obsolete Functions and quarterly scheduler stay absent.
   - name: 'gcr.io/cloud-builders/gcloud'
+    id: 'retire-f4-services'
     entrypoint: 'bash'
     args:
       - '-c'
       - |
-        if gcloud scheduler jobs describe quarterly_rebalance_f4 --location=europe-west3 >/dev/null 2>&1; then
-          gcloud scheduler jobs update http quarterly_rebalance_f4 \
-            --schedule='0 15 1-7 1,4,7,10 *' \
-            --uri='https://europe-west3-trading-436516.cloudfunctions.net/quarterly_rebalance_f4' \
-            --http-method='POST' \
-            --time-zone='America/New_York' \
-            --location='europe-west3' \
-            --oidc-service-account-email='1098661711782-compute@developer.gserviceaccount.com'
-        else
-          gcloud scheduler jobs create http quarterly_rebalance_f4 \
-            --schedule='0 15 1-7 1,4,7,10 *' \
-            --uri='https://europe-west3-trading-436516.cloudfunctions.net/quarterly_rebalance_f4' \
-            --http-method='POST' \
-            --time-zone='America/New_York' \
-            --location='europe-west3' \
-            --oidc-service-account-email='1098661711782-compute@developer.gserviceaccount.com'
-        fi
+        gcloud scheduler jobs delete quarterly_rebalance_f4 \
+          --location=europe-west3 --quiet 2>/dev/null || true
+        gcloud functions delete monthly_buy_f4 \
+          --region=europe-west3 --quiet 2>/dev/null || true
+        gcloud functions delete quarterly_rebalance_f4 \
+          --region=europe-west3 --quiet 2>/dev/null || true
     waitFor:
       - 'deploy-aaa'
-      - 'deploy-f4'
-      - 'deploy-quarterly-f4'
       - 'deploy-index-alert'
       - 'deploy-audit'
 
@@ -772,8 +680,6 @@ steps:
           --message-body='{"index_symbol": "IUSQ.XETRA", "index_name": "MSCI ACWI (EUR)", "alert_type": "sma_crossing", "source": "eodhd", "run_role": "advisory", "sma_period": 250, "noise_threshold": 1.0, "currency_symbol": "€"}'
     waitFor:
       - 'deploy-aaa'
-      - 'deploy-f4'
-      - 'deploy-quarterly-f4'
       - 'deploy-index-alert'
       - 'deploy-audit'
 
@@ -800,8 +706,6 @@ steps:
           --message-body='{"index_symbol": "IUSQ.XETRA", "index_name": "MSCI ACWI (EUR)", "alert_type": "sma_crossing", "source": "eodhd", "run_role": "decisive", "sma_period": 250, "noise_threshold": 1.0, "currency_symbol": "€", "public_chat_secret": "TELEGRAM_CHAT_ID_ACWI"}'
     waitFor:
       - 'deploy-aaa'
-      - 'deploy-f4'
-      - 'deploy-quarterly-f4'
       - 'deploy-index-alert'
       - 'deploy-audit'
 
@@ -828,8 +732,6 @@ steps:
           --message-body='{"index_symbol": "IUSQ.XETRA", "index_name": "MSCI ACWI (EUR)", "alert_type": "sma_crossing", "source": "eodhd", "run_role": "reconcile", "sma_period": 250, "noise_threshold": 1.0, "currency_symbol": "€"}'
     waitFor:
       - 'deploy-aaa'
-      - 'deploy-f4'
-      - 'deploy-quarterly-f4'
       - 'deploy-index-alert'
       - 'deploy-audit'
 
@@ -856,8 +758,6 @@ steps:
           --message-body='{"index_symbol": "EUNL.XETRA", "index_name": "MSCI World (EUR)", "alert_type": "sma_crossing", "source": "eodhd", "run_role": "advisory", "sma_period": 255, "noise_threshold": 1.0, "currency_symbol": "€"}'
     waitFor:
       - 'deploy-aaa'
-      - 'deploy-f4'
-      - 'deploy-quarterly-f4'
       - 'deploy-index-alert'
       - 'deploy-audit'
 
@@ -884,8 +784,6 @@ steps:
           --message-body='{"index_symbol": "EUNL.XETRA", "index_name": "MSCI World (EUR)", "alert_type": "sma_crossing", "source": "eodhd", "run_role": "decisive", "sma_period": 255, "noise_threshold": 1.0, "currency_symbol": "€"}'
     waitFor:
       - 'deploy-aaa'
-      - 'deploy-f4'
-      - 'deploy-quarterly-f4'
       - 'deploy-index-alert'
       - 'deploy-audit'
 
@@ -912,8 +810,6 @@ steps:
           --message-body='{"index_symbol": "EUNL.XETRA", "index_name": "MSCI World (EUR)", "alert_type": "sma_crossing", "source": "eodhd", "run_role": "reconcile", "sma_period": 255, "noise_threshold": 1.0, "currency_symbol": "€"}'
     waitFor:
       - 'deploy-aaa'
-      - 'deploy-f4'
-      - 'deploy-quarterly-f4'
       - 'deploy-index-alert'
       - 'deploy-audit'
 

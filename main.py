@@ -108,24 +108,6 @@ aaa_config = {
     "tolerance_amount": 5.0,              # Skip trades < $5
 }
 
-# ─── F4 strategy configuration ──────────────────────────────────────────
-# Static 3-asset blend, quarterly drift-rebalance. Most tax-efficient sleeve
-# (3 fixed tickers, no rotation). WLDU = 2× MSCI World (intl-tilted equity);
-# GOLY = 200%-notional triple-stack (50% gold + 50% MF + 100% corp bonds);
-# TLT = unleveraged long Treasury (clean duration, no daily-reset decay).
-f4_config = {
-    "strategy_key": "f4",
-    "alloc_key": "f4_allo",
-    "display_name": "World 40/30/30",
-    "targets": {
-        "WLDU": 0.40,
-        "GOLY": 0.30,
-        "TLT":  0.30,
-    },
-    "tolerance_amount": 5.0,              # Skip trades < $5
-    "rebal_drift_threshold": 0.05,        # Trigger early rebal if any leg drifts ≥5pp from target
-}
-
 # Dual Momentum Strategy configuration — best-of-3 multi-asset with DD-stop + vol-target.
 # Candidates are (signal_symbol, position_symbol). Strategy picks the candidate with the
 # strongest blended-momentum score each month. Position size is scaled by
@@ -4191,7 +4173,6 @@ def print_allocation_dashboard(rebalance_result, contribution_amount=None):
         "dual_momentum": "Dual Momentum",
         "regime_sso": "Regime SSO",
         "aaa": "7-Asset Rotator",
-        "f4": "World 40/30/30",
     }
     
     current_values = rebalance_result["current_values"]
@@ -5571,21 +5552,12 @@ def make_monthly_buys_regime(api, cfg=None, force_execute=False, investment_calc
     return f"{name} bought {qty:.4f} {target}"
 
 
-# ════════════════════════════════════════════════════════════════════
-# World 40/30/30 (F4) STRATEGY — WLDU+GOLY+TLT static 40/30/30 blend
-# Quarterly rebalance, monthly contributions tilted to underweight legs.
-# Promoted 2026-05-12 from Wave 8 research. Most tax-efficient sleeve
-# (3 fixed tickers, no rotation logic).
-# ════════════════════════════════════════════════════════════════════
-
 # Non-fractionable tickers on Alpaca — must be traded in whole shares.
 # These are typically newer or smaller ETFs that Alpaca hasn't added to
 # its fractional list yet. Submitting a fractional order errors with
-# Alpaca code 40310000. The F4 + 7-Asset Rotator functions check this
-# set when sizing orders and floor to integer for these tickers.
+# Alpaca code 40310000. The 7-Asset Rotator checks this set when sizing
+# orders and floors to integer for these tickers.
 NON_FRACTIONABLE_TICKERS = {
-    "WLDU",   # Leverage Shares 2× World ETP (confirmed via paper test 2026-05-12)
-    "GOLY",   # Quantify Gold + MF + Corp Bonds — newer ETF (Q2 2025), likely non-fractionable
     "NTSD",   # WisdomTree US Plus Intl — may be non-fractionable, defensive listing
     # Add more here as discovered. To check: try a fractional order and watch
     # for `code: 40310000` in the error response.
@@ -5615,7 +5587,7 @@ def _size_sell_order(symbol: str, shares_to_sell: float) -> float:
     return shares_to_sell
 
 
-def get_f4_position_value(api):
+def _retired_get_f4_position_value(api):
     """Get current F4 portfolio value and per-symbol breakdown."""
     try:
         positions = list_positions(api)
@@ -5635,13 +5607,14 @@ def get_f4_position_value(api):
         return {"total_value": 0.0, "by_symbol": {sym: {"value": 0.0, "shares": 0.0} for sym in STRATEGY_SYMBOLS["f4"]}}
 
 
-def make_monthly_buys_f4(api, force_execute=False, investment_calc=None,
-                          margin_result=None, skip_order_wait=False, env="live"):
+def _retired_make_monthly_buys_f4(api, force_execute=False, investment_calc=None,
+                                   margin_result=None, skip_order_wait=False, env="live"):
     """
     F4 monthly buy: deploy this month's allocation toward the most-underweight
     legs of WLDU/GOLY/TLT relative to the 40/30/30 target. Drift-correcting —
     full rebalance is handled separately by quarterly_rebalance_f4().
     """
+    raise RuntimeError("F4 retired on 2026-09-09")
     if not force_execute and not check_trading_day(mode="monthly"):
         return "Not first trading day of the month"
     if force_execute:
@@ -5762,11 +5735,12 @@ def make_monthly_buys_f4(api, force_execute=False, investment_calc=None,
     return f"F4 monthly buys complete. Value ${final_total:,.2f}, return {strategy_return:.2%}"
 
 
-def quarterly_rebalance_f4(api, force_execute=False, env="live"):
+def _retired_quarterly_rebalance_f4(api, force_execute=False, env="live"):
     """
     F4 quarterly rebalance: bring WLDU/GOLY/TLT positions back to exact 40/30/30.
     Run idempotently on the 1st-7th trading day of each calendar quarter.
     """
+    raise RuntimeError("F4 retired on 2026-09-09")
     if quarterly_run_complete(f4_config["strategy_key"], env=env) and not force_execute:
         return f"F4 quarterly rebalance already complete for {current_quarter_id()}"
     if not force_execute and not check_trading_day(mode="quarterly"):
@@ -6182,7 +6156,7 @@ def wait_for_order_fill(api, order_id, timeout=300, poll_interval=5):
 
 def monthly_invest_all_strategies(api, force_execute=False, skip_order_wait=False, env="live"):
     """
-    Orchestrator function that runs all seven monthly investment strategies.
+    Orchestrator function that runs all six monthly investment strategies.
     Calculates budgets ONCE and distributes them to ensure exact percentage splits.
     
     This prevents the problem of each function independently calculating and over-spending.
@@ -6243,7 +6217,6 @@ def monthly_invest_all_strategies(api, force_execute=False, skip_order_wait=Fals
     print(f"  Dual Momentum ({get_pct('dual_momentum_allo'):.1f}%): ${strategy_amounts['dual_momentum_allo']:.2f}")
     print(f"  Regime SSO ({get_pct('regime_sso_allo'):.1f}%): ${strategy_amounts['regime_sso_allo']:.2f}")
     print(f"  7-Asset Rotator ({get_pct('aaa_allo'):.1f}%): ${strategy_amounts['aaa_allo']:.2f}")
-    print(f"  World 40/30/30 ({get_pct('f4_allo'):.1f}%): ${strategy_amounts['f4_allo']:.2f}")
     
     # Send one shared account status message to Telegram before executing strategies
     metrics = margin_result.get("metrics", {})
@@ -6283,17 +6256,15 @@ def monthly_invest_all_strategies(api, force_execute=False, skip_order_wait=Fals
     account_msg += f"Equity: {_usd('equity')} | Portfolio: {_usd('portfolio_value')}\n"
     account_msg += f"Investing: ${total_investing:,.2f}\n\n"
     
-    # Per-strategy budget breakdown (allocations updated 2026-05-12 — F4 promoted,
-    # Regime World retired, 7-Asset Rotator promoted with tax-aware caps).
+    # Per-strategy budget breakdown (allocations updated 2026-09-09).
     account_msg += "Budget per strategy:\n"
     for label, key in [
-        ("HFEA 15%", "hfea_allo"),
-        ("SPXL SMA 15%", "spxl_allo"),
-        ("9-Sig 5%", "nine_sig_allo"),
-        ("Dual Momentum 20%", "dual_momentum_allo"),
-        ("Regime SSO 12%", "regime_sso_allo"),
-        ("7-Asset Rotator 15%", "aaa_allo"),
-        ("World 40/30/30 18%", "f4_allo"),
+        ("HFEA 18.29%", "hfea_allo"),
+        ("SPXL SMA 18.29%", "spxl_allo"),
+        ("9-Sig 6.10%", "nine_sig_allo"),
+        ("Dual Momentum 24.39%", "dual_momentum_allo"),
+        ("Regime SSO 14.64%", "regime_sso_allo"),
+        ("7-Asset Rotator 18.29%", "aaa_allo"),
     ]:
         account_msg += f"  • {label}: ${strategy_amounts[key]:,.2f}\n"
     
@@ -6319,7 +6290,6 @@ def monthly_invest_all_strategies(api, force_execute=False, skip_order_wait=Fals
     _run("dual_momentum", "Dual Momentum", lambda: monthly_dual_momentum_strategy(api, force_execute, investment_calc, margin_result, skip_order_wait, env))
     _run("regime_sso", "Regime SSO", lambda: make_monthly_buys_regime(api, cfg=regime_sso_config, force_execute=force_execute, investment_calc=investment_calc, margin_result=margin_result, skip_order_wait=skip_order_wait, env=env))
     _run("aaa", "7-Asset Rotator", lambda: make_monthly_buys_aaa(api, force_execute=force_execute, investment_calc=investment_calc, margin_result=margin_result, skip_order_wait=skip_order_wait, env=env))
-    _run("f4", "World 40/30/30", lambda: make_monthly_buys_f4(api, force_execute=force_execute, investment_calc=investment_calc, margin_result=margin_result, skip_order_wait=skip_order_wait, env=env))
 
     print("\n=== All Monthly Strategies Complete ===")
 
@@ -6332,7 +6302,6 @@ def monthly_invest_all_strategies(api, force_execute=False, skip_order_wait=Fals
         "dual_momentum": "Dual Momentum",
         "regime_sso": "Regime SSO",
         "aaa": "7-Asset Rotator",
-        "f4": "World 40/30/30",
     }
     for key, label in label_map.items():
         outcome = results.get(key, "(no result)")
@@ -6355,7 +6324,7 @@ def monthly_invest_all_strategies(api, force_execute=False, skip_order_wait=Fals
 
 def monthly_invest_all(request):
     """
-    Orchestrator endpoint that runs all seven monthly strategies in one coordinated execution.
+    Orchestrator endpoint that runs all six monthly strategies in one coordinated execution.
     Recommended for production use to ensure exact budget splits and avoid over-spending.
     """
     api = set_alpaca_environment(env=alpaca_environment)
@@ -6454,20 +6423,6 @@ def monthly_buy_aaa(request):
     return make_monthly_buys_aaa(api, env=alpaca_environment)
 
 
-@app.route("/monthly_buy_f4", methods=["POST"])
-def monthly_buy_f4(request):
-    """F4 (WLDU+GOLY+TLT) — monthly drift-correcting buys toward 40/30/30 target."""
-    api = set_alpaca_environment(env=alpaca_environment)
-    return make_monthly_buys_f4(api, env=alpaca_environment)
-
-
-@app.route("/quarterly_rebalance_f4", methods=["POST"])
-def quarterly_rebalance_f4_route(request):
-    """F4 quarterly rebalance — bring positions back to exact 40/30/30 weights."""
-    api = set_alpaca_environment(env=alpaca_environment)
-    return quarterly_rebalance_f4(api, env=alpaca_environment)
-
-
 @app.route("/index_alert", methods=["POST"])
 def index_alert(request):
     return check_unified_index_alert(request, env=alpaca_environment)
@@ -6521,7 +6476,6 @@ def audit_monthly_run(api, env="live", lookback_days=14):
         "Dual Momentum": ["SPUU", "QLD", "EFO", "BND"],
         "Regime SSO": [regime_sso_config["risk_asset"], regime_sso_config["safe_asset"]],
         "7-Asset Rotator": STRATEGY_SYMBOLS["aaa"],
-        "World 40/30/30": STRATEGY_SYMBOLS["f4"],
     }
 
     strategy_activity = {label: [] for label in expected_symbols}
@@ -6577,8 +6531,14 @@ class _LocalRequest:
         return self._payload
 
 
+def validate_force_environment(env, force_execute):
+    if force_execute and env != "paper":
+        raise ValueError("--force is paper only and cannot be used with live trading")
+
+
 def run_local(action, env="paper", request="test", force_execute=False,
               investment_amount=None, alert_payload=None):
+    validate_force_environment(env, force_execute)
     api = set_alpaca_environment(env=env, use_secret_manager=False)
     if action == "monthly_invest_all":
         return monthly_invest_all_strategies(api, force_execute=force_execute, skip_order_wait=True, env=env)
@@ -6613,10 +6573,6 @@ def run_local(action, env="paper", request="test", force_execute=False,
         return daily_regime_check(api, cfg=regime_sso_config, env=env)
     elif action == "monthly_buy_aaa":
         return make_monthly_buys_aaa(api, force_execute=force_execute, skip_order_wait=True, env=env)
-    elif action == "monthly_buy_f4":
-        return make_monthly_buys_f4(api, force_execute=force_execute, skip_order_wait=True, env=env)
-    elif action == "quarterly_rebalance_f4":
-        return quarterly_rebalance_f4(api, force_execute=force_execute, env=env)
     elif action == "backfill_regime_sso_scores":
         return backfill_regime_scores(api, cfg=regime_sso_config, days=30, env=env)
     else:
@@ -6643,12 +6599,10 @@ if __name__ == "__main__":
             "monthly_buy_regime_sso",
             "daily_regime_check",
             "monthly_buy_aaa",
-            "monthly_buy_f4",
-            "quarterly_rebalance_f4",
             "backfill_regime_sso_scores",
         ],
         required=True,
-        help="Action to perform: 'monthly_invest_all' runs all seven monthly strategies with coordinated budgets (recommended)",
+        help="Action to perform: 'monthly_invest_all' runs all six monthly strategies with coordinated budgets (recommended)",
     )
     parser.add_argument(
         "--env",
