@@ -3442,7 +3442,7 @@ def _handle_eodhd_sma_crossing(index_symbol, index_name, sma_period,
     Drei Rollen statt der US-Handelszeiten-Logik des Alpaca-Pfads:
       advisory  - Vorwarnung 15:00-17:00, schreibt bewusst KEINEN State
       decisive  - Handelsalarm 17:20, schreibt den State
-      reconcile - Abgleich 17:45 auf den echten Schluss, korrigiert den State
+      reconcile - Abgleich 21:00 nach EODHD-Publikation auf den echten Schluss, korrigiert den State
     """
     today_iso = _heute_iso()
     hist = fetch_eodhd_eod_series(index_symbol)

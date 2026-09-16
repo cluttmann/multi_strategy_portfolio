@@ -641,7 +641,9 @@ steps:
   # Drei Rollen pro Symbol:
   #   advisory  0 15-17  Vorwarnung, schreibt bewusst keinen State
   #   decisive  20 17    Handelsalarm, 10 Min vor Handelsschluss
-  #   reconcile 45 17    Abgleich auf den echten Schluss + taeglicher Lebendtest
+  #   reconcile 0 21     Abgleich auf den echten Schluss + taeglicher Lebendtest
+  # EODHD publiziert EOD-Daten 2-3h nach Boersenschluss; 21:00 Berlin gibt Puffer.
+  # Quelle: https://eodhd.com/financial-apis/api-for-historical-data-and-volumes
   #
   # Fenster: ACWI 250d, World 255d. 250d ist fuer den ACWI die gemessene Zahl -
   # nach deutscher Steuer 13,17 % CAGR / Sharpe 0,402 gegen 12,68 % / 0,379 bei
@@ -715,7 +717,7 @@ steps:
       - '-c'
       - |
         gcloud scheduler jobs update http acwi_eur_sma_reconcile \
-          --schedule='45 17 * * 1-5' \
+          --schedule='0 21 * * 1-5' \
           --uri='https://europe-west3-trading-436516.cloudfunctions.net/index_alert' \
           --http-method='POST' \
           --time-zone='Europe/Berlin' \
@@ -723,7 +725,7 @@ steps:
           --oidc-service-account-email='1098661711782-compute@developer.gserviceaccount.com' \
           --message-body='{"index_symbol": "IUSQ.XETRA", "index_name": "MSCI ACWI (EUR)", "alert_type": "sma_crossing", "source": "eodhd", "run_role": "reconcile", "sma_period": 250, "noise_threshold": 1.0, "currency_symbol": "€"}' \
         || gcloud scheduler jobs create http acwi_eur_sma_reconcile \
-          --schedule='45 17 * * 1-5' \
+          --schedule='0 21 * * 1-5' \
           --uri='https://europe-west3-trading-436516.cloudfunctions.net/index_alert' \
           --http-method='POST' \
           --time-zone='Europe/Berlin' \
@@ -793,7 +795,7 @@ steps:
       - '-c'
       - |
         gcloud scheduler jobs update http world_eur_sma_reconcile \
-          --schedule='45 17 * * 1-5' \
+          --schedule='0 21 * * 1-5' \
           --uri='https://europe-west3-trading-436516.cloudfunctions.net/index_alert' \
           --http-method='POST' \
           --time-zone='Europe/Berlin' \
@@ -801,7 +803,7 @@ steps:
           --oidc-service-account-email='1098661711782-compute@developer.gserviceaccount.com' \
           --message-body='{"index_symbol": "EUNL.XETRA", "index_name": "MSCI World (EUR)", "alert_type": "sma_crossing", "source": "eodhd", "run_role": "reconcile", "sma_period": 255, "noise_threshold": 1.0, "currency_symbol": "€"}' \
         || gcloud scheduler jobs create http world_eur_sma_reconcile \
-          --schedule='45 17 * * 1-5' \
+          --schedule='0 21 * * 1-5' \
           --uri='https://europe-west3-trading-436516.cloudfunctions.net/index_alert' \
           --http-method='POST' \
           --time-zone='Europe/Berlin' \
