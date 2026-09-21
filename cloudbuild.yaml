@@ -121,23 +121,6 @@ steps:
 
   # Step 4: Deploy the monthly_nine_sig_contributions Function
   - name: 'gcr.io/cloud-builders/gcloud'
-    id: 'deploy-nine-sig-monthly'
-    args:
-    - functions
-    - deploy
-    - monthly_nine_sig_contributions
-    - --source=fn-light
-    - --trigger-http
-    - --region=europe-west3
-    - --runtime=python310
-    - --timeout=540s
-    - --entry-point=monthly_nine_sig_contributions
-    - --memory=512MB
-    - --set-env-vars=GOOGLE_CLOUD_PROJECT=1098661711782,GOOGLE_CLOUD_PROJECT_ID=trading-436516
-    waitFor: ['prep-sources']
-
-  # Step 5: Deploy the monthly_invest_all ORCHESTRATOR (runs all 7 monthly strategies)
-  - name: 'gcr.io/cloud-builders/gcloud'
     id: 'deploy-orchestrator'
     args:
     - functions
@@ -176,7 +159,6 @@ steps:
       - 'deploy-hfea'
       - 'deploy-rebalance-hfea'
       - 'deploy-spxl'
-      - 'deploy-nine-sig-monthly'
       - 'deploy-orchestrator'
 
   # Steps 4e + 4f (monthly_buy_rssb_wtip + rebalance_rssb_wtip) removed 2026-05-12 —
@@ -184,28 +166,6 @@ steps:
   # and the Cloud Scheduler job will be deleted from GCP separately (see ops cleanup).
 
   # Step 7: Deploy the quarterly_nine_sig_signal Function
-  - name: 'gcr.io/cloud-builders/gcloud'
-    id: 'deploy-nine-sig-quarterly'
-    args:
-    - functions
-    - deploy
-    - quarterly_nine_sig_signal
-    - --source=fn-light
-    - --trigger-http
-    - --region=europe-west3
-    - --runtime=python310
-    - --timeout=540s
-    - --entry-point=quarterly_nine_sig_signal
-    - --memory=512MB
-    - --set-env-vars=GOOGLE_CLOUD_PROJECT=1098661711782,GOOGLE_CLOUD_PROJECT_ID=trading-436516
-    waitFor:
-      - 'deploy-hfea'
-      - 'deploy-rebalance-hfea'
-      - 'deploy-spxl'
-      - 'deploy-nine-sig-monthly'
-      - 'deploy-orchestrator'
-
-  # Step 8: Deploy the daily_trade_spxl_200sma Function
   - name: 'gcr.io/cloud-builders/gcloud'
     id: 'deploy-spxl-200sma'
     args:
@@ -224,88 +184,11 @@ steps:
       - 'deploy-hfea'
       - 'deploy-rebalance-hfea'
       - 'deploy-spxl'
-      - 'deploy-nine-sig-monthly'
       - 'deploy-orchestrator'
 
   # Step 9: Deploy daily_regime_check (SSO/USFR regime detector daily run).
   # Memory bumped to 2GB to fit FinBERT (~440MB at runtime) plus the 500-stock
   # market breadth scan in a single invocation.
-  - name: 'gcr.io/cloud-builders/gcloud'
-    id: 'deploy-regime-check'
-    args:
-    - functions
-    - deploy
-    - daily_regime_check
-    - --source=fn-heavy      # the ONLY function that needs torch/transformers
-    - --trigger-http
-    - --region=europe-west3
-    - --runtime=python310
-    - --timeout=540s
-    - --entry-point=daily_regime_check_route
-    - --memory=2048MB
-    - --set-env-vars=GOOGLE_CLOUD_PROJECT=1098661711782,GOOGLE_CLOUD_PROJECT_ID=trading-436516
-    waitFor:
-      - 'deploy-hfea'
-      - 'deploy-rebalance-hfea'
-      - 'deploy-spxl'
-      - 'deploy-nine-sig-monthly'
-      - 'deploy-orchestrator'
-
-  # Step 10: Deploy monthly_buy_regime_sso (regime detector monthly contribution)
-  - name: 'gcr.io/cloud-builders/gcloud'
-    id: 'deploy-regime-sso'
-    args:
-    - functions
-    - deploy
-    - monthly_buy_regime_sso
-    - --source=fn-light
-    - --trigger-http
-    - --region=europe-west3
-    - --runtime=python310
-    - --timeout=540s
-    - --entry-point=monthly_buy_regime_sso
-    - --memory=512MB
-    - --set-env-vars=GOOGLE_CLOUD_PROJECT=1098661711782,GOOGLE_CLOUD_PROJECT_ID=trading-436516
-    waitFor:
-      - 'deploy-hfea'
-      - 'deploy-rebalance-hfea'
-      - 'deploy-spxl'
-      - 'deploy-nine-sig-monthly'
-      - 'deploy-orchestrator'
-
-  # Step 11: Deploy backfill_regime_scores (one-shot history seeder, manually triggered)
-  - name: 'gcr.io/cloud-builders/gcloud'
-    id: 'deploy-regime-backfill'
-    args:
-    - functions
-    - deploy
-    - backfill_regime_scores
-    - --source=fn-light
-    - --trigger-http
-    - --region=europe-west3
-    - --runtime=python310
-    - --timeout=540s
-    - --entry-point=backfill_regime_scores_route
-    - --memory=1024MB
-    - --set-env-vars=GOOGLE_CLOUD_PROJECT=1098661711782,GOOGLE_CLOUD_PROJECT_ID=trading-436516
-    waitFor:
-      - 'deploy-hfea'
-      - 'deploy-rebalance-hfea'
-      - 'deploy-spxl'
-      - 'deploy-nine-sig-monthly'
-      - 'deploy-orchestrator'
-
-  # Steps 5e + 5f + 5g (daily_regime_world_check + monthly_buy_regime_world + backfill_regime_world_scores)
-  # removed 2026-05-12 — Regime World strategy discontinued, replaced by World 40/30/30 (F4) +
-  # 7-Asset Rotator (AAA). The deployed Cloud Functions and the daily_regime_world_check
-  # Cloud Scheduler job have been deleted from GCP (cleanup completed 2026-05-17).
-
-# ─────────────────────────────────────────────────────────────────────────────
-# WAVE C1 — final strategy deploy after Wave B completes.
-# ─────────────────────────────────────────────────────────────────────────────
-
-  # Step 12: Deploy monthly_buy_aaa (7-Asset Rotator — momentum rotation across NTSD/SAA/EET/UBT/UST/UGL/DBC).
-  # Called in-process by the monthly_invest_all orchestrator; deployed individually for manual/debug use.
   - name: 'gcr.io/cloud-builders/gcloud'
     id: 'deploy-aaa'
     args:
@@ -322,11 +205,7 @@ steps:
     - --set-env-vars=GOOGLE_CLOUD_PROJECT=1098661711782,GOOGLE_CLOUD_PROJECT_ID=trading-436516
     waitFor:
       - 'deploy-dm'
-      - 'deploy-nine-sig-quarterly'
       - 'deploy-spxl-200sma'
-      - 'deploy-regime-check'
-      - 'deploy-regime-sso'
-      - 'deploy-regime-backfill'
 
 # ─────────────────────────────────────────────────────────────────────────────
 # WAVE C2 — final 2 function deploys (start after Wave C1 completes).
@@ -423,22 +302,6 @@ steps:
   # and monthly_buy_aaa schedulers are intentionally absent — they have all been
   # REPLACED by the monthly_invest_all orchestrator for coordinated budget management.
   # The individual functions are deployed for manual/debugging use but never directly scheduled.
-
-  # Cloud Scheduler job for 'quarterly_nine_sig_signal' function
-  - name: 'gcr.io/cloud-builders/gcloud'
-    args: [
-      'scheduler', 'jobs', 'update', 'http', 'quarterly_nine_sig_signal',
-      '--schedule', '0 13 1-7 1,4,7,10 *',
-      '--uri', 'https://europe-west3-trading-436516.cloudfunctions.net/quarterly_nine_sig_signal',
-      '--http-method', 'POST',
-      '--time-zone', 'America/New_York',
-      '--location', 'europe-west3',
-      '--oidc-service-account-email', '1098661711782-compute@developer.gserviceaccount.com'
-    ]
-    waitFor:
-      - 'deploy-aaa'
-      - 'deploy-index-alert'
-      - 'deploy-audit'
 
   # Cloud Scheduler job for 'daily_trade_spxl_200sma' function
   - name: 'gcr.io/cloud-builders/gcloud'
@@ -572,40 +435,30 @@ steps:
       - 'deploy-index-alert'
       - 'deploy-audit'
 
-  # Cloud Scheduler for the daily regime detection check (SSO/USFR).
-  # Runs every weekday at 4:30 PM ET — 30 min after market close so end-of-day
-  # data is settled. Trades execute next morning if a rotation triggers.
+  # Cloud Scheduler 'daily_regime_world_check' removed 2026-05-12 — Regime World strategy
+  # discontinued. The existing GCP scheduler job has been deleted (cleanup completed 2026-05-17).
+
+  # Regime SSO und 9-Sig retired 2026-09-21. Bereinigung bleibt idempotent, damit
+  # jeder spaetere Build bestaetigt, dass Functions und Scheduler abwesend bleiben.
+  # Reihenfolge: erst die Scheduler loeschen (sonst feuern sie gegen eine tote
+  # Function), dann die Functions.
   - name: 'gcr.io/cloud-builders/gcloud'
+    id: 'retire-regime-ninesig-services'
     entrypoint: 'bash'
     args:
       - '-c'
       - |
-        if gcloud scheduler jobs describe daily_regime_check --location=europe-west3 >/dev/null 2>&1; then
-          gcloud scheduler jobs update http daily_regime_check \
-            --schedule='30 16 * * 1-5' \
-            --uri='https://europe-west3-trading-436516.cloudfunctions.net/daily_regime_check' \
-            --http-method='POST' \
-            --time-zone='America/New_York' \
-            --location='europe-west3' \
-            --oidc-service-account-email='1098661711782-compute@developer.gserviceaccount.com' \
-            --attempt-deadline='300s'
-        else
-          gcloud scheduler jobs create http daily_regime_check \
-            --schedule='30 16 * * 1-5' \
-            --uri='https://europe-west3-trading-436516.cloudfunctions.net/daily_regime_check' \
-            --http-method='POST' \
-            --time-zone='America/New_York' \
-            --location='europe-west3' \
-            --oidc-service-account-email='1098661711782-compute@developer.gserviceaccount.com' \
-            --attempt-deadline='300s'
-        fi
+        for JOB in quarterly_nine_sig_signal daily_regime_check; do
+          gcloud scheduler jobs delete $$JOB --location=europe-west3 --quiet 2>/dev/null || true
+        done
+        for FN in monthly_nine_sig_contributions quarterly_nine_sig_signal \
+                  daily_regime_check monthly_buy_regime_sso backfill_regime_scores; do
+          gcloud functions delete $$FN --region=europe-west3 --quiet 2>/dev/null || true
+        done
     waitFor:
       - 'deploy-aaa'
       - 'deploy-index-alert'
       - 'deploy-audit'
-
-  # Cloud Scheduler 'daily_regime_world_check' removed 2026-05-12 — Regime World strategy
-  # discontinued. The existing GCP scheduler job has been deleted (cleanup completed 2026-05-17).
 
   # F4 retired 2026-09-09. Keep this cleanup idempotent so every later build
   # confirms the two obsolete Functions and quarterly scheduler stay absent.

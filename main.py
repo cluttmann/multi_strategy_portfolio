@@ -16,14 +16,22 @@ app = Flask(__name__)
 # Strategy allocation percentages for dynamic monthly investment calculation
 # Investment amounts are calculated dynamically each month based on available cash and margin
 strategy_allocations = {
-    # Updated 2026-09-09: World 40/30/30 retired. The remaining six weights are
-    # the prior targets renormalized after removing F4's 18% allocation.
-    "hfea_allo":          0.1829,  # 18.29% — HFEA UPRO/TMF/KMLM
-    "spxl_allo":          0.1829,  # 18.29% — SPXL SMA trend-gate
-    "nine_sig_allo":      0.0610,  # 6.10%  — 9-Sig TQQQ/AGG
-    "dual_momentum_allo": 0.2439,  # 24.39% — DM 2× best-of-3 (SPUU/QLD/EFO)
-    "regime_sso_allo":    0.1464,  # 14.64% — Regime SSO (7-signal composite)
-    "aaa_allo":           0.1829,  # 18.29% — 7-Asset Rotator
+    # Updated 2026-09-21: Regime SSO and 9-Sig retired, live positions (SSO,
+    # TQQQ, AGG) liquidated the same day and the proceeds moved into AAA.
+    #
+    # The new weights are NOT a renormalization of the old ones. A faithful
+    # 25-year replay of every sleeve — with each one's real rules, so DD-30
+    # stops, 6m momentum, daily SMA gates and per-position leverage — put AAA
+    # at Sharpe 0.87 and HFEA/SPXL at 0.45/0.44. Capital follows that ranking.
+    #
+    # Note these govern the MONTHLY CONTRIBUTION SPLIT, not standing weights.
+    # As of 2026-09-21 the book itself sits at HFEA 38%, SPXL 35%, AAA 15%,
+    # DM 12% — the 3x sleeves ran away over the years and were never trimmed.
+    # Bringing the book to these targets is a separate, planned rebalancing.
+    "hfea_allo":          0.125,   # 12.5% — HFEA UPRO/TMF/KMLM
+    "spxl_allo":          0.125,   # 12.5% — SPXL SMA trend-gate
+    "dual_momentum_allo": 0.25,    # 25%   — DM 2× best-of-3 (SPUU/QLD/EFO)
+    "aaa_allo":           0.50,    # 50%   — 7-Asset Rotator
 }
 
 upro_allocation = 0.45
@@ -37,18 +45,14 @@ spxl_sma_holding_fund = "SGOV"  # iShares 0-3 Month Treasury Bond ETF
 # Each strategy has clear ticker ownership for simplified margin calculations and position tracking:
 # - HFEA: UPRO, TMF, KMLM
 # - SPXL SMA: SPXL, SGOV (SGOV is holding fund when bearish)
-# - 9-Sig: TQQQ, AGG
 # - Dual Momentum: SPUU, QLD, EFO, BND (BND is defensive + vol-target overflow)
-# - Regime SSO: SSO (when in market), USFR (when defensive — floating-rate Treasury)
 # - 7-Asset Rotator (AAA family): NTSD, SAA, EET, UBT, UST, UGL, DBC (top-3 selected monthly), SHV (defensive)
 
 # Strategy ticker ownership mapping for cost basis recalculation
 STRATEGY_SYMBOLS = {
     "hfea": ["UPRO", "TMF", "KMLM"],
     "spxl_sma": ["SPXL", "SGOV"],
-    "nine_sig": ["TQQQ", "AGG"],
     "dual_momentum": ["SPUU", "QLD", "EFO", "BND"],
-    "regime_sso": ["SSO", "USFR"],
     "aaa": ["NTSD", "SAA", "EET", "UBT", "UST", "UGL", "DBC", "SHV"],
 }
 
@@ -3837,9 +3841,7 @@ def get_all_strategy_values(api):
         dict: {
             "hfea": float,
             "spxl_sma": float,
-            "nine_sig": float,
             "dual_momentum": float,
-            "regime_sso": float,
             "aaa": float,
             "total": float
         }
@@ -3861,12 +3863,6 @@ def get_all_strategy_values(api):
             positions.get(spxl_sma_holding_fund, 0)
         )
         
-        # 9-Sig: TQQQ, AGG
-        nine_sig_value = (
-            positions.get("TQQQ", 0) +
-            positions.get("AGG", 0)
-        )
-        
         # Dual Momentum: SPUU, QLD, EFO, BND (BND shared as defensive)
         dual_momentum_value = (
             positions.get("SPUU", 0) +
@@ -3875,45 +3871,20 @@ def get_all_strategy_values(api):
             positions.get("BND", 0)
         )
         
-        # Regime sleeves: tracked via per-strategy Firestore state so the
-        # shared safe asset (USFR) never collides across strategies.
-        def _regime_value(cfg):
-            state = regime_state(cfg=cfg, env="live")
-            risk_qty = state.get("risk_shares", 0) or 0
-            safe_qty = state.get("safe_shares", 0) or 0
-            v = 0.0
-            if risk_qty > 0:
-                try:
-                    v += risk_qty * float(get_latest_trade(api, cfg["risk_asset"]))
-                except Exception:
-                    pass
-            if safe_qty > 0:
-                try:
-                    v += safe_qty * float(get_latest_trade(api, cfg["safe_asset"]))
-                except Exception:
-                    pass
-            return v
-
-        regime_sso_value = _regime_value(regime_sso_config)
-
         # 7-Asset Rotator: sum of all 7-asset universe + SHV defensive
         aaa_value = sum(positions.get(sym, 0) for sym in STRATEGY_SYMBOLS["aaa"])
 
         total_value = (
             hfea_value +
             spxl_sma_value +
-            nine_sig_value +
             dual_momentum_value +
-            regime_sso_value +
             aaa_value
         )
 
         return {
             "hfea": hfea_value,
             "spxl_sma": spxl_sma_value,
-            "nine_sig": nine_sig_value,
             "dual_momentum": dual_momentum_value,
-            "regime_sso": regime_sso_value,
             "aaa": aaa_value,
             "total": total_value
         }
@@ -3923,9 +3894,7 @@ def get_all_strategy_values(api):
         return {
             "hfea": 0,
             "spxl_sma": 0,
-            "nine_sig": 0,
             "dual_momentum": 0,
-            "regime_sso": 0,
             "aaa": 0,
             "total": 0
         }
@@ -3965,9 +3934,9 @@ def calculate_rebalanced_allocations(api, aggressiveness=None):
     strategy_to_allo_key = {
         "hfea": "hfea_allo",
         "spxl_sma": "spxl_allo",
-        "nine_sig": "nine_sig_allo",
+
         "dual_momentum": "dual_momentum_allo",
-        "regime_sso": "regime_sso_allo",
+
         "aaa": "aaa_allo",
     }
     
@@ -4169,9 +4138,9 @@ def print_allocation_dashboard(rebalance_result, contribution_amount=None):
     strategy_display_names = {
         "hfea": "HFEA",
         "spxl_sma": "SPXL SMA",
-        "nine_sig": "9-Sig",
+
         "dual_momentum": "Dual Momentum",
-        "regime_sso": "Regime SSO",
+
         "aaa": "7-Asset Rotator",
     }
     
@@ -6156,7 +6125,7 @@ def wait_for_order_fill(api, order_id, timeout=300, poll_interval=5):
 
 def monthly_invest_all_strategies(api, force_execute=False, skip_order_wait=False, env="live"):
     """
-    Orchestrator function that runs all six monthly investment strategies.
+    Orchestrator function that runs all four monthly investment strategies.
     Calculates budgets ONCE and distributes them to ensure exact percentage splits.
     
     This prevents the problem of each function independently calculating and over-spending.
@@ -6166,7 +6135,7 @@ def monthly_invest_all_strategies(api, force_execute=False, skip_order_wait=Fals
         force_execute: Bypass trading day check for testing
     
     Returns:
-        dict with results from all six strategies
+        dict with results from all four strategies
     """
     if not force_execute and not should_run_monthly_orchestrator(env=env):
         print("Not first trading day of the month, or this month already has a clean run")
@@ -6213,9 +6182,7 @@ def monthly_invest_all_strategies(api, force_execute=False, skip_order_wait=Fals
     print(f"Total investing power: ${total_investing:.2f}")
     print(f"  HFEA ({get_pct('hfea_allo'):.1f}%): ${strategy_amounts['hfea_allo']:.2f}")
     print(f"  SPXL ({get_pct('spxl_allo'):.1f}%): ${strategy_amounts['spxl_allo']:.2f}")
-    print(f"  9-Sig ({get_pct('nine_sig_allo'):.1f}%): ${strategy_amounts['nine_sig_allo']:.2f}")
     print(f"  Dual Momentum ({get_pct('dual_momentum_allo'):.1f}%): ${strategy_amounts['dual_momentum_allo']:.2f}")
-    print(f"  Regime SSO ({get_pct('regime_sso_allo'):.1f}%): ${strategy_amounts['regime_sso_allo']:.2f}")
     print(f"  7-Asset Rotator ({get_pct('aaa_allo'):.1f}%): ${strategy_amounts['aaa_allo']:.2f}")
     
     # Send one shared account status message to Telegram before executing strategies
@@ -6256,16 +6223,13 @@ def monthly_invest_all_strategies(api, force_execute=False, skip_order_wait=Fals
     account_msg += f"Equity: {_usd('equity')} | Portfolio: {_usd('portfolio_value')}\n"
     account_msg += f"Investing: ${total_investing:,.2f}\n\n"
     
-    # Per-strategy budget breakdown (allocations updated 2026-09-09).
+    # Per-strategy budget breakdown. Labels aus strategy_allocations abgeleitet,
+    # damit sie bei der naechsten Gewichtsaenderung nicht wieder auseinanderlaufen.
     account_msg += "Budget per strategy:\n"
-    for label, key in [
-        ("HFEA 18.29%", "hfea_allo"),
-        ("SPXL SMA 18.29%", "spxl_allo"),
-        ("9-Sig 6.10%", "nine_sig_allo"),
-        ("Dual Momentum 24.39%", "dual_momentum_allo"),
-        ("Regime SSO 14.64%", "regime_sso_allo"),
-        ("7-Asset Rotator 18.29%", "aaa_allo"),
-    ]:
+    _labels = {"hfea_allo": "HFEA", "spxl_allo": "SPXL SMA",
+               "dual_momentum_allo": "Dual Momentum", "aaa_allo": "7-Asset Rotator"}
+    for key, weight in strategy_allocations.items():
+        label = f"{_labels.get(key, key)} {weight * 100:.1f}%"
         account_msg += f"  • {label}: ${strategy_amounts[key]:,.2f}\n"
     
     send_telegram_message(account_msg)
@@ -6286,9 +6250,7 @@ def monthly_invest_all_strategies(api, force_execute=False, skip_order_wait=Fals
 
     _run("hfea", "HFEA", lambda: make_monthly_buys(api, force_execute, investment_calc, margin_result, skip_order_wait, env))
     _run("spxl", "SPXL SMA", lambda: monthly_buying_sma(api, "SPXL", force_execute, investment_calc, margin_result, skip_order_wait, env))
-    _run("nine_sig", "9-Sig", lambda: make_monthly_nine_sig_contributions(api, force_execute, investment_calc, margin_result, skip_order_wait, env))
     _run("dual_momentum", "Dual Momentum", lambda: monthly_dual_momentum_strategy(api, force_execute, investment_calc, margin_result, skip_order_wait, env))
-    _run("regime_sso", "Regime SSO", lambda: make_monthly_buys_regime(api, cfg=regime_sso_config, force_execute=force_execute, investment_calc=investment_calc, margin_result=margin_result, skip_order_wait=skip_order_wait, env=env))
     _run("aaa", "7-Asset Rotator", lambda: make_monthly_buys_aaa(api, force_execute=force_execute, investment_calc=investment_calc, margin_result=margin_result, skip_order_wait=skip_order_wait, env=env))
 
     print("\n=== All Monthly Strategies Complete ===")
@@ -6298,9 +6260,7 @@ def monthly_invest_all_strategies(api, force_execute=False, skip_order_wait=Fals
     label_map = {
         "hfea": "HFEA",
         "spxl": "SPXL SMA",
-        "nine_sig": "9-Sig",
         "dual_momentum": "Dual Momentum",
-        "regime_sso": "Regime SSO",
         "aaa": "7-Asset Rotator",
     }
     for key, label in label_map.items():
@@ -6324,7 +6284,7 @@ def monthly_invest_all_strategies(api, force_execute=False, skip_order_wait=Fals
 
 def monthly_invest_all(request):
     """
-    Orchestrator endpoint that runs all six monthly strategies in one coordinated execution.
+    Orchestrator endpoint that runs all four monthly strategies in one coordinated execution.
     Recommended for production use to ensure exact budget splits and avoid over-spending.
     """
     api = set_alpaca_environment(env=alpaca_environment)
@@ -6346,18 +6306,6 @@ def rebalance_hfea(request):
         env=alpaca_environment
     )  # or 'paper' based on your needs
     return rebalance_portfolio(api)
-
-
-@app.route("/monthly_nine_sig_contributions", methods=["POST"])
-def monthly_nine_sig_contributions(request):
-    api = set_alpaca_environment(env=alpaca_environment)
-    return make_monthly_nine_sig_contributions(api, env=alpaca_environment)
-
-
-@app.route("/quarterly_nine_sig_signal", methods=["POST"])
-def quarterly_nine_sig_signal(request):
-    api = set_alpaca_environment(env=alpaca_environment)
-    return execute_quarterly_nine_sig_signal(api, env=alpaca_environment)
 
 
 @app.route("/monthly_buy_spxl", methods=["POST"])
@@ -6397,23 +6345,25 @@ def monthly_dual_momentum(request):
         return jsonify({"error": error_message}), 500
 
 
-@app.route("/daily_regime_check", methods=["POST"])
-def daily_regime_check_route(request):
-    api = set_alpaca_environment(env=alpaca_environment)
-    return daily_regime_check(api, cfg=regime_sso_config, env=alpaca_environment)
-
-
-@app.route("/monthly_buy_regime_sso", methods=["POST"])
-def monthly_buy_regime_sso(request):
-    api = set_alpaca_environment(env=alpaca_environment)
-    return make_monthly_buys_regime(api, cfg=regime_sso_config, env=alpaca_environment)
-
-
-@app.route("/backfill_regime_scores", methods=["POST"])
-def backfill_regime_scores_route(request):
-    """One-shot endpoint: backfill ~30 trading days of historical regime_sso scores."""
-    api = set_alpaca_environment(env=alpaca_environment)
-    return backfill_regime_scores(api, cfg=regime_sso_config, days=30, env=alpaca_environment)
+# ─────────────────────────────────────────────────────────────────────────
+# RETIRED 2026-09-21: Regime SSO und 9-Sig
+#
+# Beide Sleeves am 21.09.2026 aufgeloest. Grund: US-/Tech-Konzentration und
+# schwache risikoadjustierte Ergebnisse. Ein originalgetreuer 25-Jahre-Replay
+# aller Sleeves (mit DD-30-Stops, 6m-Momentum, taeglichen SMA-Gates und
+# positionsgenauem Hebel) ergab Sharpe 0,50 fuer Regime SSO und 0,47 fuer
+# 9-Sig, gegen 0,87 fuer den AAA-Rotator.
+#
+# Live-Positionen SSO, TQQQ und AGG wurden am selben Tag verkauft
+# (Erloes 1.159,06 USD) und in AAA umgeschichtet. Die 20,74% Zielallokation
+# gingen an die verbleibenden vier Sleeves, siehe strategy_allocations.
+#
+# Die internen Funktionen (make_monthly_buys_regime, compute_regime_score,
+# execute_quarterly_nine_sig_signal und weitere) stehen noch als toter Code
+# in dieser Datei und werden in einem eigenen Schritt entfernt. Sie werden
+# von keinem Pfad mehr aufgerufen: weder vom Orchestrator noch ueber eine
+# HTTP-Route. Ohne Route kann cloudbuild sie nicht mehr deployen.
+# ─────────────────────────────────────────────────────────────────────────
 
 
 @app.route("/monthly_buy_aaa", methods=["POST"])
@@ -6470,11 +6420,9 @@ def audit_monthly_run(api, env="live", lookback_days=14):
         recent_orders = []
 
     expected_symbols = {
-        "HFEA": ["UPRO", "TMF", "KMLM"],
-        "SPXL SMA": ["SPXL", "SGOV"],
-        "9-Sig": ["TQQQ", "AGG"],
-        "Dual Momentum": ["SPUU", "QLD", "EFO", "BND"],
-        "Regime SSO": [regime_sso_config["risk_asset"], regime_sso_config["safe_asset"]],
+        "HFEA": STRATEGY_SYMBOLS["hfea"],
+        "SPXL SMA": STRATEGY_SYMBOLS["spxl_sma"],
+        "Dual Momentum": STRATEGY_SYMBOLS["dual_momentum"],
         "7-Asset Rotator": STRATEGY_SYMBOLS["aaa"],
     }
 
@@ -6602,7 +6550,7 @@ if __name__ == "__main__":
             "backfill_regime_sso_scores",
         ],
         required=True,
-        help="Action to perform: 'monthly_invest_all' runs all six monthly strategies with coordinated budgets (recommended)",
+        help="Action to perform: 'monthly_invest_all' runs all four monthly strategies with coordinated budgets (recommended)",
     )
     parser.add_argument(
         "--env",
