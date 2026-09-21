@@ -1,4 +1,9 @@
-"""Safely retire the former F4 sleeve from Alpaca and reallocate its proceeds."""
+"""HISTORISCH — F4-Retirement vom 09.09.2026, bereits ausgefuehrt.
+
+Am 21.09.2026 angepasst: Regime SSO und 9-Sig wurden stillgelegt, ihre Aufrufe
+sind hier entfernt. Das Skript bleibt als Vorlage fuer kuenftige Aufloesungen
+erhalten (Bestaetigungstoken, Marktzeit-Check, Snapshot, Residual-Pruefung).
+Safely retire the former F4 sleeve from Alpaca and reallocate its proceeds."""
 
 import argparse
 import datetime
@@ -175,27 +180,9 @@ def _strategy_runners(api, investment_calc, margin_result, env):
             ),
         ),
         (
-            "nine_sig",
-            lambda: bot.make_monthly_nine_sig_contributions(
-                api, True, investment_calc, margin_result, False, env
-            ),
-        ),
-        (
             "dual_momentum",
             lambda: bot.monthly_dual_momentum_strategy(
                 api, True, investment_calc, margin_result, False, env
-            ),
-        ),
-        (
-            "regime_sso",
-            lambda: bot.make_monthly_buys_regime(
-                api,
-                cfg=bot.regime_sso_config,
-                force_execute=True,
-                investment_calc=investment_calc,
-                margin_result=margin_result,
-                skip_order_wait=False,
-                env=env,
             ),
         ),
         (

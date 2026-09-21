@@ -1,59 +1,43 @@
 steps:
 
 # ─────────────────────────────────────────────────────────────────────────────
-# WAVE 0 — build two immutable source trees before any deploy runs.
+# WAVE 0 — eine unveraenderliche Quellkopie, bevor ein Deploy laeuft.
 #
-# `torch` + `transformers` (FinBERT) are reachable ONLY from daily_regime_check:
-# compute_regime_score is called at exactly one site inside it, the monthly regime
-# buy only reads persisted state via regime_state(), and backfill_regime_scores
-# skips the news signal by design. Shipping them in all 16 images took every image
-# from 71 MB to 2.89 GB on 2026-05-10 (commit 282beed) = 45 GB of new images per
-# deploy wave, which is what ran Artifact Registry to 272 GB / €16 per month.
+# Bis 2026-09-21 gab es hier zwei Baeume: einen schweren mit torch/transformers
+# fuer daily_regime_check und einen leichten ohne. Mit dem Regime-SSO-Retirement
+# ist FinBERT aus main.py verschwunden, also faellt die Zweiteilung weg.
 #
-# fn-light  = requirements.txt minus every line tagged `# ML-ONLY`  (13 functions)
-# fn-heavy  = requirements.txt verbatim                            (daily_regime_check)
+# Die Historie dazu bleibt als Warnung stehen: torch in ALLE Images zu schieben
+# trieb jedes Image von 71 MB auf 2,89 GB (Commit 282beed, 2026-05-10), also
+# 45 GB neue Images je Deploy-Welle — das war die Ursache der 272 GB / 16 EUR
+# im Artifact Registry. Kommt je wieder eine schwere Abhaengigkeit dazu, muss
+# der zweistufige Baum zurueck, bevor sie in requirements.txt landet.
 #
-# These trees are written ONCE here and never mutated again. That matters: the
-# deploy waves below run up to 6 steps CONCURRENTLY against the same /workspace,
-# so rewriting a shared requirements.txt between steps would be a race in which a
-# light deploy could pick up the heavy file.
+# Der Baum wird hier EINMAL geschrieben und danach nie mutiert. Das ist wichtig:
+# die Deploy-Wellen unten laufen mit bis zu 6 Steps gleichzeitig gegen dasselbe
+# /workspace, ein Umschreiben zwischen den Steps waere ein Rennen.
 # ─────────────────────────────────────────────────────────────────────────────
 
   - name: 'gcr.io/cloud-builders/gcloud'
     id: 'prep-sources'
     entrypoint: 'bash'
     args:
-    - -c
-    - |
-      set -euo pipefail
-      rm -rf fn-light fn-heavy
-      mkdir -p fn-light fn-heavy
+      - '-c'
+      - |
+        set -euo pipefail
+        rm -rf fn-light
+        mkdir -p fn-light
 
-      # main.py has no local module imports, so main.py + requirements.txt is a
-      # complete deployable tree for every entry point.
-      cp main.py fn-light/main.py
-      cp main.py fn-heavy/main.py
-      cp requirements.txt fn-heavy/requirements.txt
-      # Strip only *dependency* lines carrying the tag — a leading '#' means the
-      # line is documentation and must survive, or fn-light ends up with orphaned
-      # comment fragments from the tag's own explanation block.
-      grep -vE '^[^#].*# ML-ONLY' requirements.txt > fn-light/requirements.txt
+        # main.py hat keine lokalen Modulimporte, main.py + requirements.txt
+        # ist daher eine vollstaendige Quelle.
+        cp main.py fn-light/main.py
+        cp requirements.txt fn-light/requirements.txt
+        : > fn-light/.gcloudignore
 
-      # Explicit empty ignore files: gcloud resolves .gcloudignore relative to the
-      # source dir, and these trees must not inherit any repo-root exclusions.
-      : > fn-light/.gcloudignore
-      : > fn-heavy/.gcloudignore
-
-      # Fail the build loudly rather than silently shipping the wrong deps.
-      test -s fn-light/requirements.txt
-      test -s fn-heavy/requirements.txt
-      ! grep -qE '^(torch|transformers)' fn-light/requirements.txt
-      grep -qE '^transformers' fn-heavy/requirements.txt
-      grep -qE '^torch' fn-heavy/requirements.txt
-      test -s fn-light/main.py
-      test -s fn-heavy/main.py
-
-      echo "--- fn-light deps (13 functions) ---"; cat fn-light/requirements.txt
+        # Absichern, dass keine schwere Abhaengigkeit zurueckgekommen ist.
+        test -s fn-light/requirements.txt
+        test -s fn-light/main.py
+        ! grep -qE '^(torch|transformers)' fn-light/requirements.txt
     waitFor: ['-']
 
 # ─────────────────────────────────────────────────────────────────────────────
