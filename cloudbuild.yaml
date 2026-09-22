@@ -41,7 +41,7 @@ steps:
     waitFor: ['-']
 
 # ─────────────────────────────────────────────────────────────────────────────
-# WAVE A — first 5 function deploys (run in parallel, no dependency).
+# WAVE A — orchestrator deploy (no dependency).
 #
 # Cloud Build has a per-project concurrent-build quota; each `gcloud functions
 # deploy` spawns ITS OWN inner Cloud Build to construct the container image.
@@ -52,58 +52,10 @@ steps:
 # failure 2026-05-17T15:35Z that triggered this refactor.)
 # ─────────────────────────────────────────────────────────────────────────────
 
-  # Step 1: Deploy the monthly_buy_hfea Function
-  - name: 'gcr.io/cloud-builders/gcloud'
-    id: 'deploy-hfea'
-    args:
-    - functions
-    - deploy
-    - monthly_buy_hfea
-    - --source=fn-light
-    - --trigger-http
-    - --region=europe-west3
-    - --runtime=python310
-    - --timeout=540s
-    - --entry-point=monthly_buy_hfea
-    - --memory=512MB
-    - --set-env-vars=GOOGLE_CLOUD_PROJECT=1098661711782,GOOGLE_CLOUD_PROJECT_ID=trading-436516
-    waitFor: ['prep-sources']
 
-  # Step 2: Deploy the rebalance_hfea Function
-  - name: 'gcr.io/cloud-builders/gcloud'
-    id: 'deploy-rebalance-hfea'
-    args:
-    - functions
-    - deploy
-    - rebalance_hfea
-    - --source=fn-light
-    - --trigger-http
-    - --region=europe-west3
-    - --runtime=python310
-    - --timeout=540s
-    - --entry-point=rebalance_hfea
-    - --memory=512MB
-    - --set-env-vars=GOOGLE_CLOUD_PROJECT=1098661711782,GOOGLE_CLOUD_PROJECT_ID=trading-436516
-    waitFor: ['prep-sources']
 
-  # Step 3: Deploy the monthly_buy_spxl Function
-  - name: 'gcr.io/cloud-builders/gcloud'
-    id: 'deploy-spxl'
-    args:
-    - functions
-    - deploy
-    - monthly_buy_spxl
-    - --source=fn-light
-    - --trigger-http
-    - --region=europe-west3
-    - --runtime=python310
-    - --timeout=540s
-    - --entry-point=monthly_buy_spxl
-    - --memory=512MB
-    - --set-env-vars=GOOGLE_CLOUD_PROJECT=1098661711782,GOOGLE_CLOUD_PROJECT_ID=trading-436516
-    waitFor: ['prep-sources']
 
-  # Step 4: Deploy the monthly_nine_sig_contributions Function
+  # Deploy the monthly_invest_all orchestrator
   - name: 'gcr.io/cloud-builders/gcloud'
     id: 'deploy-orchestrator'
     args:
@@ -121,7 +73,7 @@ steps:
     waitFor: ['prep-sources']
 
 # ─────────────────────────────────────────────────────────────────────────────
-# WAVE B — next 6 function deploys (start after Wave A completes).
+# WAVE B — Dual Momentum, then the 7-Asset Rotator (after Wave A).
 # ─────────────────────────────────────────────────────────────────────────────
 
   # Step 6: Deploy the monthly_dual_momentum Function
@@ -139,40 +91,14 @@ steps:
     - --entry-point=monthly_dual_momentum
     - --memory=512MB
     - --set-env-vars=GOOGLE_CLOUD_PROJECT=1098661711782,GOOGLE_CLOUD_PROJECT_ID=trading-436516
-    waitFor:
-      - 'deploy-hfea'
-      - 'deploy-rebalance-hfea'
-      - 'deploy-spxl'
-      - 'deploy-orchestrator'
+    waitFor: ['deploy-orchestrator']
 
   # Steps 4e + 4f (monthly_buy_rssb_wtip + rebalance_rssb_wtip) removed 2026-05-12 —
   # RSSB/WTIP strategy discontinued for poor performance. The deployed Cloud Functions
   # and the Cloud Scheduler job will be deleted from GCP separately (see ops cleanup).
 
-  # Step 7: Deploy the quarterly_nine_sig_signal Function
-  - name: 'gcr.io/cloud-builders/gcloud'
-    id: 'deploy-spxl-200sma'
-    args:
-    - functions
-    - deploy
-    - daily_trade_spxl_200sma
-    - --source=fn-light
-    - --trigger-http
-    - --region=europe-west3
-    - --runtime=python310
-    - --timeout=540s
-    - --entry-point=daily_trade_spxl_200sma
-    - --memory=512MB
-    - --set-env-vars=GOOGLE_CLOUD_PROJECT=1098661711782,GOOGLE_CLOUD_PROJECT_ID=trading-436516
-    waitFor:
-      - 'deploy-hfea'
-      - 'deploy-rebalance-hfea'
-      - 'deploy-spxl'
-      - 'deploy-orchestrator'
 
-  # Step 9: Deploy daily_regime_check (SSO/USFR regime detector daily run).
-  # Memory bumped to 2GB to fit FinBERT (~440MB at runtime) plus the 500-stock
-  # market breadth scan in a single invocation.
+  # Deploy the monthly_buy_aaa Function (7-Asset Rotator)
   - name: 'gcr.io/cloud-builders/gcloud'
     id: 'deploy-aaa'
     args:
@@ -187,9 +113,7 @@ steps:
     - --entry-point=monthly_buy_aaa
     - --memory=512MB
     - --set-env-vars=GOOGLE_CLOUD_PROJECT=1098661711782,GOOGLE_CLOUD_PROJECT_ID=trading-436516
-    waitFor:
-      - 'deploy-dm'
-      - 'deploy-spxl-200sma'
+    waitFor: ['deploy-dm']
 
 # ─────────────────────────────────────────────────────────────────────────────
 # WAVE C2 — final 2 function deploys (start after Wave C1 completes).
@@ -263,45 +187,12 @@ steps:
       - 'deploy-index-alert'
       - 'deploy-audit'
 
-  # Cloud Scheduler job for 'rebalance_hfea' function
-  - name: 'gcr.io/cloud-builders/gcloud'
-    args: [
-      'scheduler', 'jobs', 'update', 'http', 'rebalance_hfea',
-      '--schedule', '0 14 1-7 1,4,7,10 *',
-      '--uri', 'https://europe-west3-trading-436516.cloudfunctions.net/rebalance_hfea',
-      '--http-method', 'POST',
-      '--time-zone', 'America/New_York',
-      '--location', 'europe-west3',
-      '--oidc-service-account-email', '1098661711782-compute@developer.gserviceaccount.com'
-    ]
-    waitFor:
-      - 'deploy-aaa'
-      - 'deploy-index-alert'
-      - 'deploy-audit'
-
   # Cloud Scheduler job 'rebalance_rssb_wtip' removed 2026-05-12 — RSSB/WTIP strategy
   # discontinued. The existing GCP scheduler job has been deleted (cleanup completed 2026-05-17).
 
-  # NOTE: monthly_buy_spxl, monthly_nine_sig_contributions, monthly_buy_hfea, monthly_dual_momentum,
-  # and monthly_buy_aaa schedulers are intentionally absent — they have all been
+  # NOTE: monthly_dual_momentum and monthly_buy_aaa schedulers are intentionally absent — they have all been
   # REPLACED by the monthly_invest_all orchestrator for coordinated budget management.
   # The individual functions are deployed for manual/debugging use but never directly scheduled.
-
-  # Cloud Scheduler job for 'daily_trade_spxl_200sma' function
-  - name: 'gcr.io/cloud-builders/gcloud'
-    args: [
-      'scheduler', 'jobs', 'update', 'http', 'daily_trade_spxl_200sma',
-      '--schedule', '56 15 * * 1-5',
-      '--uri', 'https://europe-west3-trading-436516.cloudfunctions.net/daily_trade_spxl_200sma',
-      '--http-method', 'POST',
-      '--time-zone', 'America/New_York',
-      '--location', 'europe-west3',
-      '--oidc-service-account-email', '1098661711782-compute@developer.gserviceaccount.com'
-    ]
-    waitFor:
-      - 'deploy-aaa'
-      - 'deploy-index-alert'
-      - 'deploy-audit'
 
   # Cloud Scheduler Job for S&P 500 ATH Drop Alert
   - name: 'gcr.io/cloud-builders/gcloud'
@@ -421,6 +312,26 @@ steps:
 
   # Cloud Scheduler 'daily_regime_world_check' removed 2026-05-12 — Regime World strategy
   # discontinued. The existing GCP scheduler job has been deleted (cleanup completed 2026-05-17).
+
+  # HFEA und SPXL SMA retired 2026-09-22. Gleiches Muster wie darunter: erst die
+  # Scheduler loeschen, sonst feuert daily_trade_spxl_200sma gegen eine tote
+  # Function; dann die vier Functions.
+  - name: 'gcr.io/cloud-builders/gcloud'
+    id: 'retire-hfea-spxl-services'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        for JOB in rebalance_hfea daily_trade_spxl_200sma; do
+          gcloud scheduler jobs delete $$JOB --location=europe-west3 --quiet 2>/dev/null || true
+        done
+        for FN in monthly_buy_hfea rebalance_hfea monthly_buy_spxl daily_trade_spxl_200sma; do
+          gcloud functions delete $$FN --region=europe-west3 --quiet 2>/dev/null || true
+        done
+    waitFor:
+      - 'deploy-aaa'
+      - 'deploy-index-alert'
+      - 'deploy-audit'
 
   # Regime SSO und 9-Sig retired 2026-09-21. Bereinigung bleibt idempotent, damit
   # jeder spaetere Build bestaetigt, dass Functions und Scheduler abwesend bleiben.

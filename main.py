@@ -16,22 +16,23 @@ app = Flask(__name__)
 # Strategy allocation percentages for dynamic monthly investment calculation
 # Investment amounts are calculated dynamically each month based on available cash and margin
 strategy_allocations = {
-    # Updated 2026-09-21: Regime SSO and 9-Sig retired, live positions (SSO,
-    # TQQQ, AGG) liquidated the same day and the proceeds moved into AAA.
+    # Updated 2026-09-22: HFEA and SPXL SMA retired, live positions (UPRO, TMF,
+    # KMLM, SPXL) liquidated the same day for $10,704.51, which also cleared a
+    # $1,336 margin debit. After German tax, with financing spreads calibrated
+    # against the real ETFs' own track records, the two sat at Sharpe 0.41 and
+    # 0.44 — HFEA beat plain SPY by 0.05 — and HFEA fell further than the
+    # rotators in every crisis tested (Dotcom, GFC, Covid, 2022, 2025).
     #
-    # The new weights are NOT a renormalization of the old ones. A faithful
-    # 25-year replay of every sleeve — with each one's real rules, so DD-30
-    # stops, 6m momentum, daily SMA gates and per-position leverage — put AAA
-    # at Sharpe 0.87 and HFEA/SPXL at 0.45/0.44. Capital follows that ranking.
+    # INTERIM weights: the two survivors keep their 1:2 ratio from 2026-09-21.
+    # The freed capital is earmarked for new sleeves still being researched.
+    # Until those exist, calculate_monthly_investments() sweeps ALL account
+    # cash into these two on the next monthly run — parked cash does not stay
+    # parked.
     #
-    # Note these govern the MONTHLY CONTRIBUTION SPLIT, not standing weights.
-    # As of 2026-09-21 the book itself sits at HFEA 38%, SPXL 35%, AAA 15%,
-    # DM 12% — the 3x sleeves ran away over the years and were never trimmed.
-    # Bringing the book to these targets is a separate, planned rebalancing.
-    "hfea_allo":          0.125,   # 12.5% — HFEA UPRO/TMF/KMLM
-    "spxl_allo":          0.125,   # 12.5% — SPXL SMA trend-gate
-    "dual_momentum_allo": 0.25,    # 25%   — DM 2× best-of-3 (SPUU/QLD/EFO)
-    "aaa_allo":           0.50,    # 50%   — 7-Asset Rotator
+    # Earlier: Regime SSO and 9-Sig retired 2026-09-21 (Sharpe 0.50 / 0.47 in a
+    # faithful 25-year replay).
+    "dual_momentum_allo": 1 / 3,   # 33.3% — DM 2× best-of-3 (SPUU/QLD/EFO)
+    "aaa_allo":           2 / 3,   # 66.7% — 7-Asset Rotator
 }
 
 upro_allocation = 0.45
@@ -43,15 +44,11 @@ spxl_sma_holding_fund = "SGOV"  # iShares 0-3 Month Treasury Bond ETF
 
 # Strategy Ticker Ownership
 # Each strategy has clear ticker ownership for simplified margin calculations and position tracking:
-# - HFEA: UPRO, TMF, KMLM
-# - SPXL SMA: SPXL, SGOV (SGOV is holding fund when bearish)
 # - Dual Momentum: SPUU, QLD, EFO, BND (BND is defensive + vol-target overflow)
 # - 7-Asset Rotator (AAA family): NTSD, SAA, EET, UBT, UST, UGL, DBC (top-3 selected monthly), SHV (defensive)
 
 # Strategy ticker ownership mapping for cost basis recalculation
 STRATEGY_SYMBOLS = {
-    "hfea": ["UPRO", "TMF", "KMLM"],
-    "spxl_sma": ["SPXL", "SGOV"],
     "dual_momentum": ["SPUU", "QLD", "EFO", "BND"],
     "aaa": ["NTSD", "SAA", "EET", "UBT", "UST", "UGL", "DBC", "SHV"],
 }
@@ -3155,8 +3152,6 @@ def get_all_strategy_values(api):
     
     Returns:
         dict: {
-            "hfea": float,
-            "spxl_sma": float,
             "dual_momentum": float,
             "aaa": float,
             "total": float
@@ -3166,19 +3161,6 @@ def get_all_strategy_values(api):
         # Get all positions once to minimize API calls
         positions = {p["symbol"]: float(p["market_value"]) for p in list_positions(api)}
 
-        # HFEA: UPRO, TMF, KMLM
-        hfea_value = (
-            positions.get("UPRO", 0) +
-            positions.get("TMF", 0) +
-            positions.get("KMLM", 0)
-        )
-
-        # SPXL SMA: SPXL, SGOV (holding fund)
-        spxl_sma_value = (
-            positions.get("SPXL", 0) +
-            positions.get(spxl_sma_holding_fund, 0)
-        )
-        
         # Dual Momentum: SPUU, QLD, EFO, BND (BND shared as defensive)
         dual_momentum_value = (
             positions.get("SPUU", 0) +
@@ -3191,15 +3173,11 @@ def get_all_strategy_values(api):
         aaa_value = sum(positions.get(sym, 0) for sym in STRATEGY_SYMBOLS["aaa"])
 
         total_value = (
-            hfea_value +
-            spxl_sma_value +
             dual_momentum_value +
             aaa_value
         )
 
         return {
-            "hfea": hfea_value,
-            "spxl_sma": spxl_sma_value,
             "dual_momentum": dual_momentum_value,
             "aaa": aaa_value,
             "total": total_value
@@ -3208,8 +3186,6 @@ def get_all_strategy_values(api):
     except Exception as e:
         print(f"Error getting all strategy values: {e}")
         return {
-            "hfea": 0,
-            "spxl_sma": 0,
             "dual_momentum": 0,
             "aaa": 0,
             "total": 0
@@ -3248,9 +3224,6 @@ def calculate_rebalanced_allocations(api, aggressiveness=None):
     
     # Map from strategy name to allocation key in strategy_allocations
     strategy_to_allo_key = {
-        "hfea": "hfea_allo",
-        "spxl_sma": "spxl_allo",
-
         "dual_momentum": "dual_momentum_allo",
 
         "aaa": "aaa_allo",
@@ -3365,7 +3338,13 @@ def calculate_rebalanced_allocations(api, aggressiveness=None):
             for allo_key in strategy_allocations.keys()
         }
     
-    # Apply max_single_strategy_pct cap and redistribute excess
+    # Apply max_single_strategy_pct cap and redistribute excess.
+    # The cap must never sit below a strategy's own target: with four sleeves
+    # every target was under 50%, so it only bit on aggressive tilts. With two
+    # (since 2026-09-22) AAA's 66.7% target would sit permanently at a 50% cap
+    # and the excess would flow to the OVERweight sleeve.
+    caps = {key: max(max_single_pct, strategy_allocations[key])
+            for key in adjusted_allocations_normalized}
     adjusted_allocations = adjusted_allocations_normalized.copy()
     iterations = 0
     max_iterations = 10
@@ -3376,9 +3355,9 @@ def calculate_rebalanced_allocations(api, aggressiveness=None):
         strategies_below_cap = []
 
         for key, val in adjusted_allocations.items():
-            if val > max_single_pct:
-                excess += val - max_single_pct
-                adjusted_allocations[key] = max_single_pct
+            if val > caps[key]:
+                excess += val - caps[key]
+                adjusted_allocations[key] = caps[key]
                 strategies_at_cap.append(key)
             else:
                 strategies_below_cap.append(key)
@@ -3452,9 +3431,6 @@ def print_allocation_dashboard(rebalance_result, contribution_amount=None):
     """
     # Strategy display names for prettier output
     strategy_display_names = {
-        "hfea": "HFEA",
-        "spxl_sma": "SPXL SMA",
-
         "dual_momentum": "Dual Momentum",
 
         "aaa": "7-Asset Rotator",
@@ -3493,7 +3469,7 @@ def print_allocation_dashboard(rebalance_result, contribution_amount=None):
         deviation = deviations.get(strategy, 0)
         
         # Find the adjusted allocation for this strategy
-        allo_key = f"{strategy}_allo" if strategy != "spxl_sma" else "spxl_allo"
+        allo_key = f"{strategy}_allo"
         adjusted_pct = adjusted_allos.get(allo_key, target_pct)
         
         # Format deviation with sign
@@ -4423,7 +4399,7 @@ def wait_for_order_fill(api, order_id, timeout=300, poll_interval=5):
 
 def monthly_invest_all_strategies(api, force_execute=False, skip_order_wait=False, env="live"):
     """
-    Orchestrator function that runs all four monthly investment strategies.
+    Orchestrator function that runs every active monthly investment strategy.
     Calculates budgets ONCE and distributes them to ensure exact percentage splits.
     
     This prevents the problem of each function independently calculating and over-spending.
@@ -4433,7 +4409,7 @@ def monthly_invest_all_strategies(api, force_execute=False, skip_order_wait=Fals
         force_execute: Bypass trading day check for testing
     
     Returns:
-        dict with results from all four strategies
+        dict with results from every active strategy
     """
     if not force_execute and not should_run_monthly_orchestrator(env=env):
         print("Not first trading day of the month, or this month already has a clean run")
@@ -4478,8 +4454,6 @@ def monthly_invest_all_strategies(api, force_execute=False, skip_order_wait=Fals
         return (strategy_amounts[key] / total_investing * 100) if total_investing > 0 else 0
     
     print(f"Total investing power: ${total_investing:.2f}")
-    print(f"  HFEA ({get_pct('hfea_allo'):.1f}%): ${strategy_amounts['hfea_allo']:.2f}")
-    print(f"  SPXL ({get_pct('spxl_allo'):.1f}%): ${strategy_amounts['spxl_allo']:.2f}")
     print(f"  Dual Momentum ({get_pct('dual_momentum_allo'):.1f}%): ${strategy_amounts['dual_momentum_allo']:.2f}")
     print(f"  7-Asset Rotator ({get_pct('aaa_allo'):.1f}%): ${strategy_amounts['aaa_allo']:.2f}")
     
@@ -4524,8 +4498,7 @@ def monthly_invest_all_strategies(api, force_execute=False, skip_order_wait=Fals
     # Per-strategy budget breakdown. Labels aus strategy_allocations abgeleitet,
     # damit sie bei der naechsten Gewichtsaenderung nicht wieder auseinanderlaufen.
     account_msg += "Budget per strategy:\n"
-    _labels = {"hfea_allo": "HFEA", "spxl_allo": "SPXL SMA",
-               "dual_momentum_allo": "Dual Momentum", "aaa_allo": "7-Asset Rotator"}
+    _labels = {"dual_momentum_allo": "Dual Momentum", "aaa_allo": "7-Asset Rotator"}
     for key, weight in strategy_allocations.items():
         label = f"{_labels.get(key, key)} {weight * 100:.1f}%"
         account_msg += f"  • {label}: ${strategy_amounts[key]:,.2f}\n"
@@ -4546,8 +4519,6 @@ def monthly_invest_all_strategies(api, force_execute=False, skip_order_wait=Fals
             print(err)
             results[name] = err
 
-    _run("hfea", "HFEA", lambda: make_monthly_buys(api, force_execute, investment_calc, margin_result, skip_order_wait, env))
-    _run("spxl", "SPXL SMA", lambda: monthly_buying_sma(api, "SPXL", force_execute, investment_calc, margin_result, skip_order_wait, env))
     _run("dual_momentum", "Dual Momentum", lambda: monthly_dual_momentum_strategy(api, force_execute, investment_calc, margin_result, skip_order_wait, env))
     _run("aaa", "7-Asset Rotator", lambda: make_monthly_buys_aaa(api, force_execute=force_execute, investment_calc=investment_calc, margin_result=margin_result, skip_order_wait=skip_order_wait, env=env))
 
@@ -4556,8 +4527,6 @@ def monthly_invest_all_strategies(api, force_execute=False, skip_order_wait=Fals
     # Send a summary so a missing strategy is impossible to overlook
     summary_lines = ["📋 Monthly Orchestrator Summary"]
     label_map = {
-        "hfea": "HFEA",
-        "spxl": "SPXL SMA",
         "dual_momentum": "Dual Momentum",
         "aaa": "7-Asset Rotator",
     }
@@ -4588,42 +4557,6 @@ def monthly_invest_all(request):
     api = set_alpaca_environment(env=alpaca_environment)
     results = monthly_invest_all_strategies(api)
     return jsonify(results), 200
-
-
-@app.route("/monthly_buy_hfea", methods=["POST"])
-def monthly_buy_hfea(request):
-    api = set_alpaca_environment(
-        env=alpaca_environment
-    )  # or 'paper' based on your needs
-    return make_monthly_buys(api, env=alpaca_environment)
-
-
-@app.route("/rebalance_hfea", methods=["POST"])
-def rebalance_hfea(request):
-    api = set_alpaca_environment(
-        env=alpaca_environment
-    )  # or 'paper' based on your needs
-    return rebalance_portfolio(api)
-
-
-@app.route("/monthly_buy_spxl", methods=["POST"])
-def monthly_buy_spxl(request):
-    api = set_alpaca_environment(
-        env=alpaca_environment
-    )  # or 'paper' based on your needs
-    result = monthly_buying_sma(api, "SPXL", env=alpaca_environment)
-    print(result)
-    return result, 200
-
-
-@app.route("/daily_trade_spxl_200sma", methods=["POST"])
-def daily_trade_spxl_200sma(request):
-    api = set_alpaca_environment(
-        env=alpaca_environment
-    )  # or 'paper' based on your needs
-    result = daily_trade_sma(api, "SPXL", env=alpaca_environment)
-    print(result)
-    return result, 200
 
 
 @app.route("/monthly_dual_momentum", methods=["POST"])
@@ -4718,8 +4651,6 @@ def audit_monthly_run(api, env="live", lookback_days=14):
         recent_orders = []
 
     expected_symbols = {
-        "HFEA": STRATEGY_SYMBOLS["hfea"],
-        "SPXL SMA": STRATEGY_SYMBOLS["spxl_sma"],
         "Dual Momentum": STRATEGY_SYMBOLS["dual_momentum"],
         "7-Asset Rotator": STRATEGY_SYMBOLS["aaa"],
     }
@@ -4788,14 +4719,6 @@ def run_local(action, env="paper", request="test", force_execute=False,
     api = set_alpaca_environment(env=env, use_secret_manager=False)
     if action == "monthly_invest_all":
         return monthly_invest_all_strategies(api, force_execute=force_execute, skip_order_wait=True, env=env)
-    elif action == "monthly_buy_hfea":
-        return make_monthly_buys(api, force_execute=force_execute)
-    elif action == "rebalance_hfea":
-        return rebalance_portfolio(api)
-    elif action == "monthly_buy_spxl":
-        return monthly_buying_sma(api, "SPXL", force_execute=force_execute, env=env)
-    elif action in ("sell_spxl_below_200sma", "buy_spxl_above_200sma"):
-        return daily_trade_sma(api, "SPXL", env=env)
     elif action == "index_alert":
         if not alert_payload:
             return ("index_alert braucht mindestens --index_symbol. Beispiel: "
@@ -4823,17 +4746,12 @@ if __name__ == "__main__":
         "--action",
         choices=[
             "monthly_invest_all",
-            "monthly_buy_hfea",
-            "rebalance_hfea",
-            "monthly_buy_spxl",
-            "sell_spxl_below_200sma",
-            "buy_spxl_above_200sma",
             "index_alert",
             "monthly_dual_momentum",
             "monthly_buy_aaa",
         ],
         required=True,
-        help="Action to perform: 'monthly_invest_all' runs all four monthly strategies with coordinated budgets (recommended)",
+        help="Action to perform: 'monthly_invest_all' runs all monthly strategies with coordinated budgets (recommended)",
     )
     parser.add_argument(
         "--env",

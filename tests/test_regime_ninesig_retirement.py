@@ -25,13 +25,12 @@ RETIRED_FUNCTIONS = [
 ]
 
 
-def test_allocations_are_four_sleeves_and_sum_to_one():
-    assert main.strategy_allocations == {
-        "hfea_allo": 0.125,
-        "spxl_allo": 0.125,
-        "dual_momentum_allo": 0.25,
-        "aaa_allo": 0.50,
-    }
+def test_retired_allocations_stay_out_and_weights_sum_to_one():
+    # Die exakten Gewichte stehen in test_hfea_spxl_retirement.py — HFEA und
+    # SPXL gingen einen Tag spaeter. Hier bleibt nur, was dieses Retirement
+    # dauerhaft garantieren muss.
+    assert "nine_sig_allo" not in main.strategy_allocations
+    assert "regime_sso_allo" not in main.strategy_allocations
     assert sum(main.strategy_allocations.values()) == pytest.approx(1.0)
 
 

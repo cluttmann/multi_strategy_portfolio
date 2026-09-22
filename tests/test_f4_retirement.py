@@ -28,7 +28,7 @@ def test_strategy_values_ignore_retired_f4_positions(monkeypatch):
         main,
         "list_positions",
         lambda api: [
-            {"symbol": "UPRO", "market_value": "10"},
+            {"symbol": "SAA", "market_value": "10"},
             {"symbol": "WLDU", "market_value": "100"},
         ],
     )

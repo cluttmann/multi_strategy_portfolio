@@ -168,18 +168,6 @@ def mark_f4_retired(env, sale_fills, actual_proceeds):
 def _strategy_runners(api, investment_calc, margin_result, env):
     return [
         (
-            "hfea",
-            lambda: bot.make_monthly_buys(
-                api, True, investment_calc, margin_result, False, env
-            ),
-        ),
-        (
-            "spxl",
-            lambda: bot.monthly_buying_sma(
-                api, "SPXL", True, investment_calc, margin_result, False, env
-            ),
-        ),
-        (
             "dual_momentum",
             lambda: bot.monthly_dual_momentum_strategy(
                 api, True, investment_calc, margin_result, False, env
