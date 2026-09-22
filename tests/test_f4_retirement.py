@@ -29,7 +29,10 @@ def test_strategy_values_ignore_retired_f4_positions(monkeypatch):
         "list_positions",
         lambda api: [
             {"symbol": "SAA", "market_value": "10"},
-            {"symbol": "WLDU", "market_value": "100"},
+            # GOLY war F4 und gehoert niemandem mehr. WLDU war ebenfalls F4,
+            # ist aber seit 2026-09-23 World-Trends Bein - taugt nicht mehr
+            # als Beispiel einer toten Position.
+            {"symbol": "GOLY", "market_value": "100"},
         ],
     )
 
@@ -43,13 +46,7 @@ def test_contribution_rebalancing_returns_only_active_allocations(monkeypatch):
     monkeypatch.setattr(
         main,
         "get_all_strategy_values",
-        lambda api: {
-            "hfea": 100.0,
-            "spxl_sma": 100.0,
-            "dual_momentum": 100.0,
-            "aaa": 100.0,
-            "total": 400.0,
-        },
+        lambda api: {**{key: 100.0 for key in main.SLEEVES}, "total": 100.0 * len(main.SLEEVES)},
     )
 
     result = main.calculate_rebalanced_allocations({})

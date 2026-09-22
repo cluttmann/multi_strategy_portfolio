@@ -73,22 +73,39 @@ steps:
     waitFor: ['prep-sources']
 
 # ─────────────────────────────────────────────────────────────────────────────
-# WAVE B — Dual Momentum, then the 7-Asset Rotator (after Wave A).
+# WAVE B — Mix8 and World-Trend in parallel, then the 7-Asset Rotator (after Wave A).
 # ─────────────────────────────────────────────────────────────────────────────
 
-  # Step 6: Deploy the monthly_dual_momentum Function
+  # Deploy the monthly_buy_mix8 Function (manual/debug — the orchestrator runs Mix8 in-process)
   - name: 'gcr.io/cloud-builders/gcloud'
-    id: 'deploy-dm'
+    id: 'deploy-mix8'
     args:
     - functions
     - deploy
-    - monthly_dual_momentum
+    - monthly_buy_mix8
     - --source=fn-light
     - --trigger-http
     - --region=europe-west3
     - --runtime=python310
     - --timeout=540s
-    - --entry-point=monthly_dual_momentum
+    - --entry-point=monthly_buy_mix8
+    - --memory=512MB
+    - --set-env-vars=GOOGLE_CLOUD_PROJECT=1098661711782,GOOGLE_CLOUD_PROJECT_ID=trading-436516
+    waitFor: ['deploy-orchestrator']
+
+  # Deploy daily_world_trend (World-Trend daily SMA check, own scheduler below)
+  - name: 'gcr.io/cloud-builders/gcloud'
+    id: 'deploy-world-trend'
+    args:
+    - functions
+    - deploy
+    - daily_world_trend
+    - --source=fn-light
+    - --trigger-http
+    - --region=europe-west3
+    - --runtime=python310
+    - --timeout=540s
+    - --entry-point=daily_world_trend_route
     - --memory=512MB
     - --set-env-vars=GOOGLE_CLOUD_PROJECT=1098661711782,GOOGLE_CLOUD_PROJECT_ID=trading-436516
     waitFor: ['deploy-orchestrator']
@@ -113,7 +130,7 @@ steps:
     - --entry-point=monthly_buy_aaa
     - --memory=512MB
     - --set-env-vars=GOOGLE_CLOUD_PROJECT=1098661711782,GOOGLE_CLOUD_PROJECT_ID=trading-436516
-    waitFor: ['deploy-dm']
+    waitFor: ['deploy-mix8', 'deploy-world-trend']
 
 # ─────────────────────────────────────────────────────────────────────────────
 # WAVE C2 — final 2 function deploys (start after Wave C1 completes).
@@ -190,7 +207,7 @@ steps:
   # Cloud Scheduler job 'rebalance_rssb_wtip' removed 2026-05-12 — RSSB/WTIP strategy
   # discontinued. The existing GCP scheduler job has been deleted (cleanup completed 2026-05-17).
 
-  # NOTE: monthly_dual_momentum and monthly_buy_aaa schedulers are intentionally absent — they have all been
+  # NOTE: monthly_buy_mix8 and monthly_buy_aaa schedulers are intentionally absent — they have all been
   # REPLACED by the monthly_invest_all orchestrator for coordinated budget management.
   # The individual functions are deployed for manual/debugging use but never directly scheduled.
 
@@ -312,6 +329,51 @@ steps:
 
   # Cloud Scheduler 'daily_regime_world_check' removed 2026-05-12 — Regime World strategy
   # discontinued. The existing GCP scheduler job has been deleted (cleanup completed 2026-05-17).
+
+  # World-Trend: taeglicher Signal-Check kurz vor Handelsschluss. Handelt nur bei
+  # Signalwechsel und nur innerhalb der eigenen Positionen. Neuer Job, deshalb
+  # describe -> update, sonst create (ein nacktes update schlaegt beim ersten
+  # Build fehl).
+  - name: 'gcr.io/cloud-builders/gcloud'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        if gcloud scheduler jobs describe daily_world_trend --location=europe-west3 >/dev/null 2>&1; then
+          gcloud scheduler jobs update http daily_world_trend \
+            --schedule='50 15 * * 1-5' \
+            --uri='https://europe-west3-trading-436516.cloudfunctions.net/daily_world_trend' \
+            --http-method='POST' \
+            --time-zone='America/New_York' \
+            --location='europe-west3' \
+            --oidc-service-account-email='1098661711782-compute@developer.gserviceaccount.com'
+        else
+          gcloud scheduler jobs create http daily_world_trend \
+            --schedule='50 15 * * 1-5' \
+            --uri='https://europe-west3-trading-436516.cloudfunctions.net/daily_world_trend' \
+            --http-method='POST' \
+            --time-zone='America/New_York' \
+            --location='europe-west3' \
+            --oidc-service-account-email='1098661711782-compute@developer.gserviceaccount.com'
+        fi
+    waitFor:
+      - 'deploy-aaa'
+      - 'deploy-index-alert'
+      - 'deploy-audit'
+
+  # Dual Momentum retired 2026-09-23 (Mix8 schlug ihn in beiden Fenstern in jeder
+  # Kennzahl und braucht seine QLD/EFO). Kein Scheduler, nur die Function.
+  - name: 'gcr.io/cloud-builders/gcloud'
+    id: 'retire-dual-momentum-services'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        gcloud functions delete monthly_dual_momentum --region=europe-west3 --quiet 2>/dev/null || true
+    waitFor:
+      - 'deploy-aaa'
+      - 'deploy-index-alert'
+      - 'deploy-audit'
 
   # HFEA und SPXL SMA retired 2026-09-22. Gleiches Muster wie darunter: erst die
   # Scheduler loeschen, sonst feuert daily_trade_spxl_200sma gegen eine tote

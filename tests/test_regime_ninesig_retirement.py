@@ -40,7 +40,10 @@ def test_retired_sleeves_own_no_tickers():
     owned = {t for syms in main.STRATEGY_SYMBOLS.values() for t in syms}
     # Die vier freigewordenen Ticker duerfen von keinem Sleeve mehr beansprucht
     # werden, sonst ordnet die Kostenbasis-Rechnung eine tote Position zu.
-    assert owned.isdisjoint({"SSO", "USFR", "TQQQ", "AGG"})
+    assert owned.isdisjoint({"TQQQ", "AGG"})
+    # SSO und USFR wurden am 2026-09-23 bewusst wieder vergeben.
+    assert "SSO" in main.STRATEGY_SYMBOLS["mix8"]
+    assert "USFR" in main.STRATEGY_SYMBOLS["world_trend"]
 
 
 def test_no_http_route_for_retired_functions():

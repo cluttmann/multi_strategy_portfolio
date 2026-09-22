@@ -16,35 +16,47 @@ app = Flask(__name__)
 # Strategy allocation percentages for dynamic monthly investment calculation
 # Investment amounts are calculated dynamically each month based on available cash and margin
 strategy_allocations = {
-    # Updated 2026-09-22: HFEA and SPXL SMA retired, live positions (UPRO, TMF,
-    # KMLM, SPXL) liquidated the same day for $10,704.51, which also cleared a
-    # $1,336 margin debit. After German tax, with financing spreads calibrated
-    # against the real ETFs' own track records, the two sat at Sharpe 0.41 and
-    # 0.44 — HFEA beat plain SPY by 0.05 — and HFEA fell further than the
-    # rotators in every crisis tested (Dotcom, GFC, Covid, 2022, 2025).
+    # Set 2026-09-22 for the one-time reallocation on 2026-09-23. Chosen from a
+    # 66-mix grid (5 % steps, max 50 % per sleeve) on BOTH windows 1994-2026 and
+    # 2000-2026, after German tax, with each rotator backtested on the exact
+    # sizing logic of make_monthly_buys_rotator: 25/25/50 is the only mix in the
+    # top three under both the live sizing and the research sizing. Live-faithful:
+    # 15.3 % / 14.6 % CAGR pre-tax, Sharpe 0.63 / 0.62, worst max DD -23.8 %.
+    # The top of that grid is flat (±0.01 Sharpe); the 50 % cap on Mix8 binds.
     #
-    # INTERIM weights: the two survivors keep their 1:2 ratio from 2026-09-21.
-    # The freed capital is earmarked for new sleeves still being researched.
-    # Until those exist, calculate_monthly_investments() sweeps ALL account
-    # cash into these two on the next monthly run — parked cash does not stay
-    # parked.
+    # Retired: Dual Momentum 2026-09-23 (Mix8 beat it on every metric in both
+    # windows and needs its QLD/EFO), HFEA + SPXL SMA 2026-09-22, Regime SSO +
+    # 9-Sig 2026-09-21.
     #
-    # Earlier: Regime SSO and 9-Sig retired 2026-09-21 (Sharpe 0.50 / 0.47 in a
-    # faithful 25-year replay).
-    "dual_momentum_allo": 1 / 3,   # 33.3% — DM 2× best-of-3 (SPUU/QLD/EFO)
-    "aaa_allo":           2 / 3,   # 66.7% — 7-Asset Rotator
+    # These govern the MONTHLY CONTRIBUTION SPLIT; calculate_monthly_investments()
+    # invests ALL account cash on each monthly run.
+    "aaa_allo":         0.25,   # 7-Asset Rotator
+    "world_trend_allo": 0.25,   # World-Trend (WLDU / UGLD, 150-day SMA)
+    "mix8_allo":        0.50,   # Mix8 Top-2
 }
 
 
 # Strategy Ticker Ownership
 # Each strategy has clear ticker ownership for simplified margin calculations and position tracking:
-# - Dual Momentum: SPUU, QLD, EFO, BND (BND is defensive + vol-target overflow)
 # - 7-Asset Rotator (AAA family): NTSD, SAA, EET, UBT, UST, UGL, DBC (top-3 selected monthly), SHV (defensive)
+# - World-Trend: WLDU, UGLD, USFR (defensive)
+# - Mix8 Top-2: SSO, QLD, EFO, EEM, GLD, IEF, TLT, KMLM (top-2 monthly), SGOV (defensive)
 
 # Strategy ticker ownership mapping for cost basis recalculation
 STRATEGY_SYMBOLS = {
-    "dual_momentum": ["SPUU", "QLD", "EFO", "BND"],
     "aaa": ["NTSD", "SAA", "EET", "UBT", "UST", "UGL", "DBC", "SHV"],
+    "world_trend": ["WLDU", "UGLD", "USFR"],
+    "mix8": ["SSO", "QLD", "EFO", "EEM", "GLD", "IEF", "TLT", "KMLM", "SGOV"],
+}
+
+# Sleeve-Register: Firestore-Schluessel -> (Gewichts-Schluessel, Anzeigename).
+# Die EINE Stelle, an der Reporting, Rebalancing, Waechter und Orchestrator
+# ihre Sleeves herbekommen. Handgepflegte Kopien davon waren die Ursache des
+# KeyError-Risikos in audit_monthly_run beim HFEA-Retirement.
+SLEEVES = {
+    "aaa":         ("aaa_allo", "7-Asset Rotator"),
+    "world_trend": ("world_trend_allo", "World-Trend"),
+    "mix8":        ("mix8_allo", "Mix8 Top-2"),
 }
 
 alpaca_environment = "live"
@@ -78,7 +90,9 @@ aaa_config = {
         ("DBC", "DBC"),
     ],
     "defensive": "SHV",                   # Held when DD-stop fires or no positive momentum
-    "lookback_days": 126,                 # 6-month momentum on signal symbols
+    "lookbacks": [126],                   # 6-month momentum on signal symbols
+    "lookback_weights": [1.0],
+    "score_label": "6m",
     "top_n": 3,                           # Hold top-3 by momentum
     "min_score": 0.0,                     # Only include picks with positive momentum
     "vol_window": 60,                     # 60-day trailing realized vol for inverse-vol + target
@@ -87,23 +101,61 @@ aaa_config = {
     "tolerance_amount": 5.0,              # Skip trades < $5
 }
 
-# Dual Momentum Strategy configuration — best-of-3 multi-asset with DD-stop + vol-target.
-# Candidates are (signal_symbol, position_symbol). Strategy picks the candidate with the
-# strongest blended-momentum score each month. Position size is scaled by
-# min(1, target_vol / realized_vol) and the remainder parks in defensive (BND).
-# A trailing-peak-NAV DD-stop forces defensive when the strategy is dd_threshold below peak.
-# Backtest winner: 17.21% CAGR / 0.65 Sharpe / -34% MaxDD over 24 years (≤2× leverage).
-dual_momentum_config = {
-    "candidates": [("SPY", "SPUU"), ("QQQ", "QLD"), ("EFA", "EFO")],
-    "defensive": "BND",
-    "lookbacks": {"6m": 126, "12m": 252},   # trading days
-    "lookback_weights": {"6m": 0.5, "12m": 0.5},
-    "skip_days": 21,                         # Jegadeesh-Titman skip-most-recent-month
-    "min_score": 0.01,                       # winner must exceed +1% to enter risk asset
-    "dd_threshold": 0.30,                    # 30% trailing-peak NAV stop
-    "target_vol": 0.25,                      # 25% annualized vol target
-    "vol_window": 60,                        # trading-day window for realized vol
+# Mix8 Top-2 — live since 2026-09-23. Same engine as AAA (make_monthly_buys_rotator),
+# broader menu, blended 3/6/12m momentum, top-2. Backtested with EXACTLY this sizing
+# logic: 1994-2026 16.7 % CAGR pre-tax, Sharpe 0.61 after German tax, max DD -33.7 %.
+# Managed futures via KMLM, not DBMF: the backtest's managed-futures series IS KMLM,
+# and KMLM became free when HFEA was retired on 2026-09-22.
+mix8_config = {
+    "strategy_key": "mix8",
+    "alloc_key": "mix8_allo",
+    "display_name": "Mix8 Top-2",
+    "candidates": [
+        ("SPY", "SSO"),
+        ("QQQ", "QLD"),
+        ("EFA", "EFO"),
+        ("EEM", "EEM"),
+        ("GLD", "GLD"),
+        ("IEF", "IEF"),
+        ("TLT", "TLT"),
+        ("KMLM", "KMLM"),
+    ],
+    "defensive": "SGOV",
+    "lookbacks": [63, 126, 252],          # 3/6/12-month momentum, equally weighted
+    "lookback_weights": [1 / 3, 1 / 3, 1 / 3],
+    "score_label": "3/6/12m",
+    "top_n": 2,
+    "min_score": 0.0,
+    "vol_window": 60,
+    "target_vol": 0.25,
+    "dd_threshold": 0.30,
+    "tolerance_amount": 5.0,
 }
+
+# World-Trend — live since 2026-09-23. Each leg is held (50 %) while its UNLEVERAGED
+# index sits above its 150-day SMA, confirmed on 3 consecutive days with a 1 % band;
+# otherwise that half sits in USFR. Signals come from EODHD, not Alpaca: URTH trades
+# ~5,700 shares/day on IEX, and IEX showed stale closes 7 % off consolidated on
+# 2023-05-01 and 2023-05-18 plus a different band state on 9 of 1,027 days.
+# EODHD adjusted_close is total return, which is what the backtest ran on.
+world_trend_config = {
+    "strategy_key": "world_trend",
+    "alloc_key": "world_trend_allo",
+    "display_name": "World-Trend",
+    "legs": [
+        ("URTH.US", "WLDU"),               # 2x MSCI World
+        ("GLD.US", "UGLD"),                # 2x gold (UGL belongs to AAA)
+    ],
+    "defensive": "USFR",
+    "sma_period": 150,
+    "band": 0.01,
+    "confirm_days": 3,
+    "max_live_jump": 0.20,                 # gold fell a real 10 % on 2026-01-30; only
+                                           # catch ticker changes and broken prints
+    "max_quote_age_minutes": 120,
+    "tolerance_amount": 5.0,
+}
+
 
 # Margin control configuration for automated leverage management
 # Enables up to +10% leverage only when market conditions are favorable
@@ -122,7 +174,7 @@ margin_control_config = {
 # Tilts monthly contributions toward underweight strategies to bring portfolio back to target
 rebalance_config = {
     "aggressiveness": 2.0,          # 0.0 = disabled (use fixed %), 1.0 = proportional tilt, 2.0+ = aggressive tilt
-    "max_single_strategy_pct": 0.50,  # Cap any single strategy at 50% of monthly contribution
+    "max_single_strategy_pct": 0.50,  # Cap per strategy = max(this, 1.5 × its target) of the monthly contribution
     "min_floor_pct_of_target": 0.50,  # Each strategy receives at least this fraction of its target (e.g. 9-Sig at 7.5% gets ≥ 3.75%) so aggressive tilts can't starve a small allocation entirely
 }
 
@@ -301,7 +353,7 @@ def alpaca_request_with_retry(method, url, headers, max_retries=5, timeout=60, l
     return None
 
 
-def get_alpaca_historical_bars(api, symbol, days=400, raw=False):
+def get_alpaca_historical_bars(api, symbol, days=400, raw=False, adjustment="split"):
     """Fetch historical daily bars from Alpaca IEX feed.
 
     `days` is interpreted as TRADING days. We request ~1.5× as many calendar
@@ -312,6 +364,10 @@ def get_alpaca_historical_bars(api, symbol, days=400, raw=False):
     raw=True            → list of bar dicts {t, o, h, l, c, v, ...} from Alpaca.
                           Callers that need OHLC + timestamps (ADX, backfill,
                           OHLC-based signals) must request raw=True.
+    adjustment="split" (default) liefert Kurse ohne Dividendenbereinigung - so
+    rechnen die SMA-Gates und Alerts seit jeher. "all" bereinigt auch
+    Ausschuettungen (Total Return); die Rotatoren nutzen das fuer Momentum und
+    Vola, weil ihr Backtest auf Total Return steht.
     Returns None if the request fails or no bars are returned.
     """
     from datetime import datetime, timedelta
@@ -329,7 +385,7 @@ def get_alpaca_historical_bars(api, symbol, days=400, raw=False):
         "end": end_date.strftime("%Y-%m-%d"),
         "timeframe": "1Day",
         "limit": 10000,
-        "adjustment": "split",
+        "adjustment": adjustment,
         "feed": "iex",
     }
 
@@ -947,13 +1003,13 @@ def calculate_monthly_investments(api, margin_result, env="live"):
     }
 
 
-def save_balance(strategy, data, env="live"):
+def save_balance(strategy, data, env="live", merge=False):
     """
     Save strategy balance to Firestore with environment separation.
     Handles Firestore unavailability gracefully for local testing.
     
     Args:
-        strategy: Strategy name (e.g., "dual_momentum")
+        strategy: Strategy name (e.g., "aaa")
         data: Either a simple float (invested amount) or dict with multiple fields
         env: Environment ("live" or "paper") - determines Firestore collection
     """
@@ -964,7 +1020,9 @@ def save_balance(strategy, data, env="live"):
         
         # Handle both simple float values and complex dictionaries
         if isinstance(data, dict):
-            doc_ref.set(data)
+            # merge=True nur fuer Teil-Updates (World-Trend-Tagescheck): set()
+            # ohne merge ueberschreibt das ganze Dokument inkl. total_invested.
+            doc_ref.set(data, merge=merge)
         else:
             doc_ref.set({"invested": data})
             
@@ -2121,114 +2179,21 @@ def check_unified_index_alert(request, env=None):
         return jsonify({"error": error_message}), 500
 
 
-def get_dual_momentum_position_value(api):
-    """
-    Get current value and position details for dual momentum strategy.
-    
-    Args:
-        api: Alpaca API credentials dict
-    
-    Returns:
-        dict: {
-            "total_value": float,
-            "current_position": str,
-            "shares_held": float,
-            "position_value": float
-        }
-    """
-    try:
-        # Get positions using the list_positions function
-        positions = list_positions(api)
-        dual_momentum_symbols = STRATEGY_SYMBOLS["dual_momentum"]
-        defensive = dual_momentum_config["defensive"]
-
-        total_value = 0
-        by_symbol = {}
-        primary_position = None
-        primary_value = 0.0
-        primary_shares = 0.0
-
-        for position in positions:
-            ticker = position.get("symbol")
-            if ticker in dual_momentum_symbols:
-                position_value = float(position.get("market_value", 0))
-                qty = float(position.get("qty", 0))
-                total_value += position_value
-                by_symbol[ticker] = {"value": position_value, "shares": qty}
-                # "Primary" is the largest non-defensive holding (the momentum winner).
-                if ticker != defensive and position_value > primary_value:
-                    primary_position = ticker
-                    primary_value = position_value
-                    primary_shares = qty
-
-        return {
-            "total_value": total_value,
-            "current_position": primary_position,    # winner ETF if any, else None
-            "shares_held": primary_shares,
-            "position_value": total_value,
-            "by_symbol": by_symbol,
-        }
-    except Exception as e:
-        print(f"Error getting dual momentum position value: {e}")
-        return {
-            "total_value": 0,
-            "current_position": None,
-            "shares_held": 0,
-            "position_value": 0
-        }
-
-
 def get_all_strategy_values(api):
     """
-    Get current market value of all strategies from Alpaca positions.
-    Aggregates values from all strategy-specific functions into a single dict.
-    
-    This is used for contribution rebalancing to determine how far each strategy
-    is from its target allocation percentage.
-    
-    Args:
-        api: Alpaca API credentials
-    
-    Returns:
-        dict: {
-            "dual_momentum": float,
-            "aaa": float,
-            "total": float
-        }
+    Current market value of every sleeve from Alpaca positions, plus "total".
+    Used for contribution rebalancing to see how far each sleeve is from target.
     """
     try:
-        # Get all positions once to minimize API calls
         positions = {p["symbol"]: float(p["market_value"]) for p in list_positions(api)}
-
-        # Dual Momentum: SPUU, QLD, EFO, BND (BND shared as defensive)
-        dual_momentum_value = (
-            positions.get("SPUU", 0) +
-            positions.get("QLD", 0) +
-            positions.get("EFO", 0) +
-            positions.get("BND", 0)
-        )
-        
-        # 7-Asset Rotator: sum of all 7-asset universe + SHV defensive
-        aaa_value = sum(positions.get(sym, 0) for sym in STRATEGY_SYMBOLS["aaa"])
-
-        total_value = (
-            dual_momentum_value +
-            aaa_value
-        )
-
-        return {
-            "dual_momentum": dual_momentum_value,
-            "aaa": aaa_value,
-            "total": total_value
-        }
-
+        values = {key: sum(positions.get(sym, 0) for sym in STRATEGY_SYMBOLS[key]) for key in SLEEVES}
+        values["total"] = sum(values.values())
+        return values
     except Exception as e:
         print(f"Error getting all strategy values: {e}")
-        return {
-            "dual_momentum": 0,
-            "aaa": 0,
-            "total": 0
-        }
+        values = {key: 0 for key in SLEEVES}
+        values["total"] = 0
+        return values
 
 
 def calculate_rebalanced_allocations(api, aggressiveness=None):
@@ -2262,11 +2227,7 @@ def calculate_rebalanced_allocations(api, aggressiveness=None):
     max_single_pct = rebalance_config["max_single_strategy_pct"]
     
     # Map from strategy name to allocation key in strategy_allocations
-    strategy_to_allo_key = {
-        "dual_momentum": "dual_momentum_allo",
-
-        "aaa": "aaa_allo",
-    }
+    strategy_to_allo_key = {key: allo for key, (allo, _) in SLEEVES.items()}
     
     # Get target percentages from strategy_allocations
     target_percentages = {
@@ -2377,12 +2338,13 @@ def calculate_rebalanced_allocations(api, aggressiveness=None):
             for allo_key in strategy_allocations.keys()
         }
     
-    # Apply max_single_strategy_pct cap and redistribute excess.
-    # The cap must never sit below a strategy's own target: with four sleeves
-    # every target was under 50%, so it only bit on aggressive tilts. With two
-    # (since 2026-09-22) AAA's 66.7% target would sit permanently at a 50% cap
-    # and the excess would flow to the OVERweight sleeve.
-    caps = {key: max(max_single_pct, strategy_allocations[key])
+    # Apply the per-sleeve cap and redistribute excess.
+    # The cap needs headroom ABOVE a sleeve's own target, or the tilt can never
+    # help that sleeve catch up: at cap = target, an underweight Mix8 (target
+    # 50 %) was clipped back to 50 % and its excess flowed to the others. With
+    # the old flat 50 % cap it was worse still. Cap = max(50 %, 1.5 x target):
+    # 50 % for the 25 % sleeves, 75 % for Mix8.
+    caps = {key: min(1.0, max(max_single_pct, 1.5 * strategy_allocations[key]))
             for key in adjusted_allocations_normalized}
     adjusted_allocations = adjusted_allocations_normalized.copy()
     iterations = 0
@@ -2469,11 +2431,7 @@ def print_allocation_dashboard(rebalance_result, contribution_amount=None):
         contribution_amount: Optional total contribution amount to show dollar allocations
     """
     # Strategy display names for prettier output
-    strategy_display_names = {
-        "dual_momentum": "Dual Momentum",
-
-        "aaa": "7-Asset Rotator",
-    }
+    strategy_display_names = {key: label for key, (_, label) in SLEEVES.items()}
     
     current_values = rebalance_result["current_values"]
     current_pcts = rebalance_result["current_percentages"]
@@ -2537,278 +2495,6 @@ def print_allocation_dashboard(rebalance_result, contribution_amount=None):
     print("=" * (80 if contribution_amount else 75) + "\n")
 
 
-# ════════════════════════════════════════════════════════════════════
-# DUAL MOMENTUM (SPUU/QLD/EFO + BND) — best-of-3 with DD-stop + vol-target
-# Backtest: 17.2% CAGR / 0.65 Sharpe / -34% MaxDD (24y, ≤2× leverage).
-# ════════════════════════════════════════════════════════════════════
-
-
-# Calendar-to-trading-day ratio used to convert the backtest's calendar-day
-# lookbacks to trading-day bar indices. 1.45 ≈ 365/252.
-_DM_CAL_TO_TRADING = 1 / 1.45
-
-
-def _dm_blended_momentum_score(api, signal_symbol, cfg):
-    """
-    Blended skip-1m momentum score for a signal symbol (e.g. SPY/QQQ/EFA).
-
-    Score = Σ weight_k × (P_now / P_past_k - 1) where:
-      • P_now    = close `skip_days` calendar days ago (skip-most-recent-month).
-      • P_past_k = close `lookback_k` trading days ago (6m=126, 12m=252).
-    Returns None if data is insufficient.
-    """
-    lookbacks = cfg["lookbacks"]
-    weights = cfg["lookback_weights"]
-    # Convert skip_days from calendar to trading days to index a trading-day bar list.
-    skip_idx = max(1, int(round(cfg["skip_days"] * _DM_CAL_TO_TRADING)))
-    max_lookback = max(lookbacks.values())
-    needed_days = skip_idx + max_lookback + 50  # buffer for non-trading days
-    try:
-        bars = get_alpaca_historical_bars(api, signal_symbol, days=max(400, needed_days + 100))
-    except Exception as e:
-        print(f"DM: error fetching bars for {signal_symbol}: {e}")
-        return None
-
-    if len(bars) < skip_idx + max_lookback + 1:
-        print(f"DM: insufficient bars for {signal_symbol} ({len(bars)} < {skip_idx + max_lookback + 1})")
-        return None
-
-    price_now = bars[-(skip_idx + 1)]
-    if price_now <= 0:
-        return None
-    score = 0.0
-    for label, lookback in lookbacks.items():
-        price_past = bars[-(skip_idx + lookback + 1)]
-        if price_past <= 0:
-            return None
-        score += weights[label] * (price_now / price_past - 1)
-    return score
-
-
-def _dm_realized_vol(api, symbol, window=60):
-    """60-day annualized realized vol from close-to-close simple returns."""
-    try:
-        bars = get_alpaca_historical_bars(api, symbol, days=max(120, window + 60))
-    except Exception as e:
-        print(f"DM: error fetching bars for {symbol} vol: {e}")
-        return None
-    if len(bars) < window + 1:
-        print(f"DM: insufficient bars for {symbol} vol ({len(bars)} < {window + 1})")
-        return None
-    rets = [(bars[i + 1] / bars[i]) - 1 for i in range(len(bars) - window - 1, len(bars) - 1) if bars[i] > 0]
-    if len(rets) < window // 2:
-        return None
-    mean = sum(rets) / len(rets)
-    var = sum((r - mean) ** 2 for r in rets) / max(1, len(rets) - 1)
-    return (var ** 0.5) * (252 ** 0.5)
-
-
-def _dm_pick_target(api, cfg):
-    """Score every candidate and pick the winner. Returns (pos|None, scores, defensive)."""
-    defensive = cfg["defensive"]
-    scores = {}
-    for signal_sym, pos_sym in cfg["candidates"]:
-        score = _dm_blended_momentum_score(api, signal_sym, cfg)
-        if score is not None:
-            scores[pos_sym] = score
-    if not scores:
-        return None, scores, defensive
-    best_pos, best_score = max(scores.items(), key=lambda kv: kv[1])
-    if best_score < cfg["min_score"]:
-        return None, scores, defensive
-    return best_pos, scores, defensive
-
-
-def monthly_dual_momentum_strategy(api, force_execute=False, investment_calc=None,
-                                    margin_result=None, skip_order_wait=False, env="live"):
-    """
-    Dual Momentum (best-of-3) — SPUU/QLD/EFO rotation with DD-stop + vol-target.
-
-    Each month:
-      1. Compute blended momentum score for SPY/QQQ/EFA (6m+12m, skip-1m).
-      2. Pick the highest-scoring candidate; if score < 1%, hold defensive (BND).
-      3. Apply trailing-peak-NAV DD-stop (30%): if strategy is 30% below peak,
-         force defensive and reset peak.
-      4. Scale the winner position by min(1, target_vol / 60d realized vol).
-         Excess parks in BND. Target_vol = 25% annualized.
-      5. Rebalance to (winner × scale, BND × (1-scale)).
-    """
-    if not force_execute and not check_trading_day(mode="monthly"):
-        print("Not first trading day of the month")
-        return "Not first trading day of the month"
-
-    if force_execute:
-        print("Dual Momentum: Force execution enabled - bypassing trading day check")
-
-    if margin_result is None:
-        margin_result = check_margin_conditions(api, env=env)
-    if investment_calc is None:
-        investment_calc = calculate_monthly_investments(api, margin_result, env)
-
-    investment_amount = investment_calc["strategy_amounts"].get("dual_momentum_allo", 0.0)
-    cfg = dual_momentum_config
-    defensive = cfg["defensive"]
-    candidate_positions = [pos for _, pos in cfg["candidates"]]
-    all_symbols = candidate_positions + [defensive]
-    check_date = datetime.datetime.now().strftime("%Y-%m-%d")
-
-    balances = load_balances(env)
-    state = balances.get("dual_momentum", {})
-    total_invested = state.get("total_invested", 0)
-    peak_nav = float(state.get("peak_nav", 0) or 0)
-
-    # 1) Current positions and NAV
-    value_data = get_dual_momentum_position_value(api)
-    current_value = value_data["total_value"]
-    by_symbol = value_data["by_symbol"]
-    print(f"Dual Momentum — investment ${investment_amount:.2f}, current value ${current_value:.2f}")
-    print(f"  by symbol: {by_symbol}")
-
-    # 2) DD-stop check (skipped if we don't yet have a peak — first run seeds it).
-    new_peak_nav = max(peak_nav, current_value) if peak_nav > 0 else current_value
-    dd = (current_value - new_peak_nav) / new_peak_nav if new_peak_nav > 0 else 0.0
-    dd_triggered = peak_nav > 0 and dd < -cfg["dd_threshold"]
-    realized_vol = None
-    if dd_triggered:
-        print(f"  DD-stop TRIGGERED: drawdown {dd:.1%} < -{cfg['dd_threshold']:.0%}; forcing defensive")
-        winner = None
-        scores = {}
-        new_peak_nav = current_value  # reset peak after stop
-    else:
-        winner, scores, _ = _dm_pick_target(api, cfg)
-        print(f"  momentum scores: {scores}")
-        print(f"  winner: {winner if winner else 'DEFENSIVE (no score > min)'}")
-
-    # 3) Vol-target scale (only when we have a winner).
-    if winner is not None:
-        realized_vol = _dm_realized_vol(api, winner, window=cfg["vol_window"])
-        if realized_vol is None or realized_vol <= 0:
-            print(f"  realized vol unavailable for {winner}; defaulting scale=1.0")
-            scale = 1.0
-        else:
-            scale = min(1.0, cfg["target_vol"] / realized_vol)
-            print(f"  {winner} 60d vol: {realized_vol:.1%} -> scale {scale:.3f}")
-    else:
-        scale = 0.0
-
-    # 4) Target dollar allocations across all 4 symbols.
-    total_to_allocate = current_value + investment_amount
-    targets = {sym: 0.0 for sym in all_symbols}
-    if winner is None:
-        targets[defensive] = total_to_allocate
-    else:
-        targets[winner] = scale * total_to_allocate
-        targets[defensive] = (1.0 - scale) * total_to_allocate
-
-    print(f"  target $: {{ {', '.join(f'{s}: ${v:,.2f}' for s, v in targets.items())} }}")
-
-    # 5) Rebalance — compute deltas, sell first then buy.
-    prices = {}
-    for sym in all_symbols:
-        try:
-            prices[sym] = float(get_latest_trade(api, sym))
-        except Exception as e:
-            send_telegram_message(f"🔄 Dual Momentum\n❌ Failed to fetch price for {sym}: {e}")
-            return f"Failed to fetch price for {sym}: {e}"
-
-    current_dollars = {sym: by_symbol.get(sym, {}).get("value", 0.0) for sym in all_symbols}
-    deltas = {sym: targets[sym] - current_dollars[sym] for sym in all_symbols}
-    trades_info = []
-
-    # Sells (negative delta) first to free cash for buys.
-    for sym in all_symbols:
-        if deltas[sym] >= -1.0:  # ignore < $1 deltas
-            continue
-        shares_have = by_symbol.get(sym, {}).get("shares", 0.0)
-        sell_dollars = -deltas[sym]
-        shares_to_sell = min(shares_have, sell_dollars / prices[sym])
-        if shares_to_sell * prices[sym] < margin_control_config["min_investment"]:
-            continue
-        try:
-            order = submit_order(api, sym, shares_to_sell, "sell")
-            if not skip_order_wait:
-                wait_for_order_fill(api, order["id"])
-            trades_info.append(f"Sold {shares_to_sell:.4f} {sym} (${shares_to_sell * prices[sym]:.2f})")
-            print(f"  sold {shares_to_sell:.4f} {sym} (${shares_to_sell * prices[sym]:.2f})")
-        except Exception as e:
-            send_telegram_message(f"🔄 Dual Momentum\n❌ Sell {sym} failed: {e}")
-            return f"Failed to sell {sym}: {e}"
-
-    # Buys (positive delta).
-    for sym in all_symbols:
-        if deltas[sym] <= margin_control_config["min_investment"]:
-            continue
-        buy_dollars = deltas[sym]
-        shares_to_buy = buy_dollars / prices[sym]
-        try:
-            order = submit_order(api, sym, shares_to_buy, "buy")
-            if not skip_order_wait:
-                wait_for_order_fill(api, order["id"])
-            trades_info.append(f"Bought {shares_to_buy:.4f} {sym} @ ${prices[sym]:.2f} (${buy_dollars:.2f})")
-            print(f"  bought {shares_to_buy:.4f} {sym} @ ${prices[sym]:.2f} (${buy_dollars:.2f})")
-        except Exception as e:
-            send_telegram_message(f"🔄 Dual Momentum\n❌ Buy {sym} failed: {e}")
-            return f"Failed to buy {sym}: {e}"
-
-    if not trades_info:
-        trades_info.append("No trades needed; targets already aligned.")
-
-    # 6) Persist state.
-    final_value_data = get_dual_momentum_position_value(api)
-    final_by_symbol = final_value_data["by_symbol"]
-    primary_position = winner if winner is not None else defensive
-    primary_shares = final_by_symbol.get(primary_position, {}).get("shares", 0.0)
-    defensive_shares = final_by_symbol.get(defensive, {}).get("shares", 0.0)
-    final_total_invested = total_invested + investment_amount
-    final_total_value = final_value_data["total_value"]
-    final_peak_nav = max(new_peak_nav, final_total_value)
-    strategy_return = (final_total_value / final_total_invested - 1) if final_total_invested > 0 else 0
-
-    save_balance("dual_momentum", {
-        "total_invested": final_total_invested,
-        "primary_position": primary_position,
-        "primary_shares": primary_shares,
-        "primary_target_pct": scale if winner is not None else 0.0,
-        "defensive_shares": defensive_shares,
-        "defensive_target_pct": (1.0 - scale) if winner is not None else 1.0,
-        "peak_nav": final_peak_nav,
-        "last_momentum_check": {
-            "scores": scores,
-            "winner": winner,
-            "dd_triggered": dd_triggered,
-            "drawdown": dd,
-            "realized_vol": realized_vol,
-            "vol_scale": scale,
-            "skip_days": cfg["skip_days"],
-            "lookbacks": cfg["lookbacks"],
-            "source": "monthly_dual_momentum",
-        },
-        "last_signal_check_date": check_date,
-        "last_trade_date": check_date if any(("No trades" not in t) for t in trades_info) else state.get("last_trade_date"),
-    }, env)
-
-    # 7) Telegram summary
-    scores_str = ", ".join(f"{s}: {sc:+.1%}" for s, sc in scores.items()) if scores else "n/a"
-    msg = f"🔄 Dual Momentum (25.7%) — ${investment_amount:,.2f}\n\n"
-    msg += f"Scores: {scores_str}\n"
-    if dd_triggered:
-        msg += f"⚠️ DD-stop triggered (DD {dd:.1%}) — defensive\n"
-    elif winner is None:
-        msg += "Signal: defensive (no candidate above +1%)\n"
-    else:
-        msg += f"Winner: {winner} (scale {scale:.0%}, vol {realized_vol:.0%})\n"
-    msg += "\n"
-    for t in trades_info:
-        msg += f"{t}\n"
-    msg += f"\nTotal invested: ${final_total_invested:,.2f}\n"
-    msg += f"Current value: ${final_total_value:,.2f}\n"
-    msg += f"Peak NAV: ${final_peak_nav:,.2f}\n"
-    msg += f"Return: {strategy_return:+.1%}"
-    send_telegram_message(msg)
-
-    return f"Dual Momentum completed. Winner: {primary_position} ({scale:.0%}), return {strategy_return:.2%}"
-
-
 # Non-fractionable tickers on Alpaca — must be traded in whole shares.
 # These are typically newer or smaller ETFs that Alpaca hasn't added to
 # its fractional list yet. Submitting a fractional order errors with
@@ -2816,6 +2502,7 @@ def monthly_dual_momentum_strategy(api, force_execute=False, investment_calc=Non
 # orders and floors to integer for these tickers.
 NON_FRACTIONABLE_TICKERS = {
     "NTSD",   # WisdomTree US Plus Intl — may be non-fractionable, defensive listing
+    "WLDU",   # Leverage Shares 2x World — fractionable=False per Alpaca assets API (2026-09-22)
     # Add more here as discovered. To check: try a fractional order and watch
     # for `code: 40310000` in the error response.
 }
@@ -2855,31 +2542,46 @@ def _size_sell_order(symbol: str, shares_to_sell: float) -> float:
 # ════════════════════════════════════════════════════════════════════
 
 
-def _aaa_six_month_momentum(api, signal_symbol, lookback_days):
-    """Trailing-N-day price return on the unleveraged signal symbol."""
-    try:
-        bars = get_alpaca_historical_bars(api, signal_symbol, days=max(300, lookback_days + 100))
-    except Exception as e:
-        print(f"AAA: error fetching bars for {signal_symbol}: {e}")
-        return None
-    if len(bars) < lookback_days + 1:
-        print(f"AAA: insufficient bars for {signal_symbol} ({len(bars)} < {lookback_days + 1})")
+class RotatorDataError(Exception):
+    """Kursdaten fuer einen Rotator fehlen. Wird NIE in einen Default
+    abgefangen: fielen alle Abrufe aus und wuerden fehlende Kandidaten einfach
+    ausgelassen, landete der Rotator komplett im Defensiv-ETF - eine
+    Liquidation wegen eines Datenlochs. Also: Abbruch, keine Trades."""
+
+
+def _rotator_momentum(api, signal_symbol, lookbacks, weights):
+    """Gewichtete Trailing-Rendite ueber mehrere Fenster auf dem ungehebelten
+    Signal. Dividendenbereinigt (adjustment="all"): der Backtest rechnet auf
+    Total Return, und auf reinen Kursen haette KMLMs Jahresausschuettung vom
+    28.12.2022 (-10,5 % an einem Tag) ein Jahr lang als Verlust gezaehlt.
+
+    None = zu wenig Historie (Kandidat wird ausgelassen, wie bisher).
+    RotatorDataError = Abruf fehlgeschlagen (Lauf bricht ab)."""
+    longest = max(lookbacks)
+    bars = get_alpaca_historical_bars(api, signal_symbol, days=max(300, longest + 100),
+                                      adjustment="all")
+    if bars is None:
+        raise RotatorDataError(f"keine Kursdaten fuer {signal_symbol}")
+    if len(bars) < longest + 1:
+        print(f"Rotator: insufficient bars for {signal_symbol} ({len(bars)} < {longest + 1})")
         return None
     price_now = bars[-1]
-    price_past = bars[-(lookback_days + 1)]
-    if price_now <= 0 or price_past <= 0:
-        return None
-    return price_now / price_past - 1
+    score = 0.0
+    for lb, w in zip(lookbacks, weights):
+        price_past = bars[-(lb + 1)]
+        if price_now <= 0 or price_past <= 0:
+            return None
+        score += w * (price_now / price_past - 1)
+    return score
 
 
-def _aaa_realized_vol(api, symbol, window=60):
-    """60-day annualized realized vol of close-to-close simple returns."""
-    try:
-        bars = get_alpaca_historical_bars(api, symbol, days=max(150, window + 60))
-    except Exception as e:
-        print(f"AAA: error fetching bars for {symbol} vol: {e}")
-        return None
-    if len(bars) < window + 1:
+def _rotator_realized_vol(api, symbol, window=60):
+    """60-day annualized realized vol of close-to-close simple returns,
+    dividendenbereinigt - sonst blaeht ein Ausschuettungstag die Vola fuer
+    60 Tage auf und das Inverse-Vola-Gewicht schrumpft grundlos."""
+    bars = get_alpaca_historical_bars(api, symbol, days=max(150, window + 60),
+                                      adjustment="all")
+    if bars is None or len(bars) < window + 1:
         return None
     rets = [(bars[i + 1] / bars[i]) - 1 for i in range(len(bars) - window - 1, len(bars) - 1) if bars[i] > 0]
     if len(rets) < window // 2:
@@ -2889,126 +2591,48 @@ def _aaa_realized_vol(api, symbol, window=60):
     return (var ** 0.5) * (252 ** 0.5)
 
 
-def get_aaa_position_value(api):
-    """Total AAA value + per-symbol breakdown across the 7-asset universe + SHV."""
+def get_rotator_position_value(api, cfg):
+    """Total value + per-symbol breakdown for one rotator's ticker universe."""
+    symbols = STRATEGY_SYMBOLS[cfg["strategy_key"]]
     try:
         positions = list_positions(api)
-        aaa_symbols = STRATEGY_SYMBOLS["aaa"]
-        by_symbol = {sym: {"value": 0.0, "shares": 0.0} for sym in aaa_symbols}
+        by_symbol = {sym: {"value": 0.0, "shares": 0.0} for sym in symbols}
         total_value = 0.0
         for position in positions:
             ticker = position.get("symbol")
-            if ticker in aaa_symbols:
+            if ticker in symbols:
                 value = float(position.get("market_value", 0))
                 shares = float(position.get("qty", 0))
                 by_symbol[ticker] = {"value": value, "shares": shares}
                 total_value += value
         return {"total_value": total_value, "by_symbol": by_symbol}
     except Exception as e:
-        print(f"Error getting AAA position value: {e}")
-        return {"total_value": 0.0, "by_symbol": {sym: {"value": 0.0, "shares": 0.0} for sym in STRATEGY_SYMBOLS["aaa"]}}
+        print(f"Error getting {cfg['display_name']} position value: {e}")
+        return {"total_value": 0.0, "by_symbol": {sym: {"value": 0.0, "shares": 0.0} for sym in symbols}}
 
 
-def make_monthly_buys_aaa(api, force_execute=False, investment_calc=None,
-                           margin_result=None, skip_order_wait=False, env="live"):
-    """
-    7-Asset Rotator (AAA family) monthly execution. Each call:
-      1. Add this month's contribution to the AAA pool.
-      2. Compute 6m momentum on the 7 signal symbols (SPY/IWM/EEM/TLT/IEF/GLD/DBC).
-      3. Check DD-30 trailing-peak NAV stop — if breached, dump everything to SHV.
-      4. Pick top-3 positive-momentum signals; if fewer than 1 positive, go to SHV.
-      5. Inverse-vol weight the top-N (using 60d trailing vol of the *held* positions).
-      6. Apply portfolio vol-target scale = min(1, 25% / weighted_vol). Excess to SHV.
-      7. Generate buy/sell deltas, sells-first then buys.
-      8. Save state and update Firestore.
-    """
-    if not force_execute and not check_trading_day(mode="monthly"):
-        return "Not first trading day of the month"
-    if force_execute:
-        print("AAA: Force execution enabled — bypassing trading day check")
+def plan_rotator_weights(api, cfg):
+    """Signal-Teil eines Monatslaufs ohne Orders: Scores, Top-N, Inverse-Vola
+    auf den GEHALTENEN ETF, Vola-Ziel mit gewichteter Summe der Einzelvolas
+    (konservativ - unterstellt perfekte Korrelation), Gewichte ueber die Picks
+    normiert. Genau diese Logik steckt im Backtest 'Live-Logik'.
 
-    if margin_result is None:
-        margin_result = check_margin_conditions(api, env=env)
-    if investment_calc is None:
-        investment_calc = calculate_monthly_investments(api, margin_result, env)
-
-    cfg = aaa_config
-    alloc_key = cfg["alloc_key"]
-    name = cfg["display_name"]
-    investment_amount = investment_calc["strategy_amounts"].get(alloc_key, 0)
-    target_margin = margin_result["target_margin"]
-    metrics = margin_result["metrics"]
-    leverage = metrics.get("leverage", 1.0)
-    buying_power = investment_calc["total_available"] + investment_calc["margin_approved"]
-    pct_label = strategy_allocations.get(alloc_key, 0) * 100
-    check_date = datetime.datetime.now().strftime("%Y-%m-%d")
-
-    def _skip(reason):
-        msg = f"🎛 {name} ({pct_label:.2f}%) — ${investment_amount:,.2f}\n⏭ {reason}"
-        send_telegram_message(msg)
-        print(reason)
-        return reason
-
-    # Gate checks
-    if target_margin == 0 and leverage > 1.0:
-        return _skip(f"Skipped — deleveraging required ({leverage:.2f}x)")
-    if buying_power < investment_amount:
-        return _skip(f"Skipped — insufficient buying power (${buying_power:,.2f})")
-    if investment_amount < margin_control_config["min_investment"]:
-        return _skip(f"Skipped — ${investment_amount:.2f} below $1.00 minimum")
-    if target_margin > 0:
-        pv = metrics.get("portfolio_value", 0)
-        equity = metrics.get("equity", 0)
-        if pv > 0 and equity > 0:
-            projected_leverage = (pv + investment_amount) / equity
-            if projected_leverage >= margin_control_config["max_leverage"]:
-                return _skip(f"Skipped — projected leverage {projected_leverage:.3f}x exceeds limit")
-
-    # Load state
-    balances = load_balances(env)
-    state = balances.get(cfg["strategy_key"], {})
-    total_invested = state.get("total_invested", 0)
-    peak_nav = float(state.get("peak_nav", 0) or 0)
-
-    # Current AAA value (before today's contribution)
-    value_data = get_aaa_position_value(api)
-    current_value = value_data["total_value"]
-    by_symbol = value_data["by_symbol"]
-    print(f"AAA — investment ${investment_amount:.2f}, current value ${current_value:.2f}")
-
-    # DD-30 stop check
-    new_peak_nav = max(peak_nav, current_value) if peak_nav > 0 else current_value
-    dd = (current_value - new_peak_nav) / new_peak_nav if new_peak_nav > 0 else 0.0
-    dd_triggered = peak_nav > 0 and dd < -cfg["dd_threshold"]
-    if dd_triggered:
-        print(f"  DD-stop TRIGGERED: drawdown {dd:.1%} < -{cfg['dd_threshold']:.0%} — forcing defensive")
-        new_peak_nav = current_value  # reset peak
-
-    # Compute momentum scores (skip if DD-triggered)
+    Raises RotatorDataError, wenn ein Signalabruf fehlschlaegt."""
     scores = {}
-    if not dd_triggered:
-        for signal_sym, pos_sym in cfg["candidates"]:
-            sc = _aaa_six_month_momentum(api, signal_sym, cfg["lookback_days"])
-            if sc is not None:
-                scores[pos_sym] = sc
-        print(f"  momentum scores: {scores}")
+    for signal_sym, pos_sym in cfg["candidates"]:
+        sc = _rotator_momentum(api, signal_sym, cfg["lookbacks"], cfg["lookback_weights"])
+        if sc is not None:
+            scores[pos_sym] = sc
+    ranked = sorted(scores.items(), key=lambda kv: -kv[1])
+    picks = [pos for pos, sc in ranked[: cfg["top_n"]] if sc > cfg["min_score"]]
 
-    # Pick top-N positive-momentum picks
-    if dd_triggered:
-        picks = []
-    else:
-        ranked = sorted(scores.items(), key=lambda kv: -kv[1])
-        picks = [pos for pos, sc in ranked[: cfg["top_n"]] if sc > cfg["min_score"]]
-
-    # Compute inverse-vol weights on the picks, then portfolio vol-target scale
     weights = {pos: 0.0 for _, pos in cfg["candidates"]}
-    cash_weight = 1.0
     realized_vols = {}
     scale = 0.0
     if picks:
         invvols = {}
         for pos in picks:
-            v = _aaa_realized_vol(api, pos, window=cfg["vol_window"])
+            v = _rotator_realized_vol(api, pos, window=cfg["vol_window"])
             if v is not None and v > 0:
                 invvols[pos] = 1.0 / v
                 realized_vols[pos] = v
@@ -3023,12 +2647,92 @@ def make_monthly_buys_aaa(api, force_execute=False, investment_calc=None,
         scale = min(1.0, cfg["target_vol"] / est_vol) if est_vol > 0 else 1.0
         for pos in picks:
             weights[pos] = raw[pos] * scale
-        cash_weight = 1.0 - sum(weights.values())
-        print(f"  picks: {picks}, inverse-vol scale: {scale:.3f}, est vol: {est_vol:.1%}")
+    cash_weight = 1.0 - sum(weights.values())
+    return {"scores": scores, "picks": picks, "weights": weights, "cash_weight": cash_weight,
+            "scale": scale, "realized_vols": realized_vols}
+
+
+def make_monthly_buys_rotator(api, cfg, force_execute=False, investment_calc=None,
+                              margin_result=None, skip_order_wait=False, env="live"):
+    """
+    Monthly execution for a momentum rotator (7-Asset Rotator, Mix8). Each call:
+      1. Add this month's contribution to the sleeve's pool.
+      2. Compute blended momentum on the unleveraged signal symbols.
+      3. Check DD-30 trailing-peak NAV stop — if breached, dump everything to defensive.
+      4. Pick top-N positive-momentum signals; if none positive, go defensive.
+      5. Inverse-vol weight the picks (using 60d trailing vol of the *held* positions).
+      6. Apply portfolio vol-target scale = min(1, target / weighted_vol). Excess to defensive.
+      7. Generate buy/sell deltas, sells-first then buys.
+      8. Save state and update Firestore.
+    """
+    name = cfg["display_name"]
+    tag = cfg["strategy_key"].upper()
+    if not force_execute and not check_trading_day(mode="monthly"):
+        return "Not first trading day of the month"
+    if force_execute:
+        print(f"{tag}: Force execution enabled — bypassing trading day check")
+
+    if margin_result is None:
+        margin_result = check_margin_conditions(api, env=env)
+    if investment_calc is None:
+        investment_calc = calculate_monthly_investments(api, margin_result, env)
+
+    symbols = STRATEGY_SYMBOLS[cfg["strategy_key"]]
+    alloc_key = cfg["alloc_key"]
+    investment_amount = investment_calc["strategy_amounts"].get(alloc_key, 0)
+    pct_label = strategy_allocations.get(alloc_key, 0) * 100
+    check_date = datetime.datetime.now().strftime("%Y-%m-%d")
+
+    def _skip(reason):
+        msg = f"🎛 {name} ({pct_label:.2f}%) — ${investment_amount:,.2f}\n⏭ {reason}"
+        send_telegram_message(msg)
+        print(reason)
+        return reason
+
+    # Gate checks
+    gate = _contribution_gate(investment_amount, investment_calc, margin_result)
+    if gate:
+        return _skip(gate)
+
+    # Load state
+    balances = load_balances(env)
+    state = balances.get(cfg["strategy_key"], {})
+    total_invested = state.get("total_invested", 0)
+    peak_nav = float(state.get("peak_nav", 0) or 0)
+
+    # Current sleeve value (before today's contribution)
+    value_data = get_rotator_position_value(api, cfg)
+    current_value = value_data["total_value"]
+    by_symbol = value_data["by_symbol"]
+    print(f"{tag} — investment ${investment_amount:.2f}, current value ${current_value:.2f}")
+
+    # DD-30 stop check
+    new_peak_nav = max(peak_nav, current_value) if peak_nav > 0 else current_value
+    dd = (current_value - new_peak_nav) / new_peak_nav if new_peak_nav > 0 else 0.0
+    dd_triggered = peak_nav > 0 and dd < -cfg["dd_threshold"]
+    if dd_triggered:
+        print(f"  DD-stop TRIGGERED: drawdown {dd:.1%} < -{cfg['dd_threshold']:.0%} — forcing defensive")
+        new_peak_nav = current_value  # reset peak
+
+    # Signals (skipped entirely if DD-triggered)
+    if dd_triggered:
+        plan = {"scores": {}, "picks": [], "weights": {pos: 0.0 for _, pos in cfg["candidates"]},
+                "cash_weight": 1.0, "scale": 0.0, "realized_vols": {}}
+    else:
+        try:
+            plan = plan_rotator_weights(api, cfg)
+        except RotatorDataError as e:
+            send_telegram_message(f"❗ {name}: {e} — Lauf abgebrochen, keine Trades.")
+            return f"❌ {name}: {e}"
+        print(f"  momentum scores: {plan['scores']}")
+    scores, picks, weights = plan["scores"], plan["picks"], plan["weights"]
+    cash_weight, scale, realized_vols = plan["cash_weight"], plan["scale"], plan["realized_vols"]
+    if picks:
+        print(f"  picks: {picks}, inverse-vol scale: {scale:.3f}")
 
     # Compute target dollar amounts
     total_to_allocate = current_value + investment_amount
-    targets = {sym: 0.0 for sym in STRATEGY_SYMBOLS["aaa"]}
+    targets = {sym: 0.0 for sym in symbols}
     for pos, w in weights.items():
         if pos in targets:
             targets[pos] = w * total_to_allocate
@@ -3038,20 +2742,20 @@ def make_monthly_buys_aaa(api, force_execute=False, investment_calc=None,
 
     # Fetch prices for any symbols we'll trade
     prices = {}
-    for sym in STRATEGY_SYMBOLS["aaa"]:
+    for sym in symbols:
         if targets[sym] > 0 or by_symbol[sym]["value"] > cfg["tolerance_amount"]:
             try:
                 prices[sym] = float(get_latest_trade(api, sym))
             except Exception as e:
                 send_telegram_message(f"🎛 {name}\n❌ Failed to fetch price for {sym}: {e}")
-                return f"AAA: failed to fetch price for {sym}: {e}"
+                return f"{tag}: failed to fetch price for {sym}: {e}"
 
-    current_dollars = {sym: by_symbol[sym]["value"] for sym in STRATEGY_SYMBOLS["aaa"]}
-    deltas = {sym: targets[sym] - current_dollars[sym] for sym in STRATEGY_SYMBOLS["aaa"]}
+    current_dollars = {sym: by_symbol[sym]["value"] for sym in symbols}
+    deltas = {sym: targets[sym] - current_dollars[sym] for sym in symbols}
     trades_info = []
 
     # Sells first (negative deltas)
-    for sym in STRATEGY_SYMBOLS["aaa"]:
+    for sym in symbols:
         if deltas[sym] >= -cfg["tolerance_amount"]:
             continue
         if sym not in prices:
@@ -3069,10 +2773,10 @@ def make_monthly_buys_aaa(api, force_execute=False, investment_calc=None,
             trades_info.append(f"Sold {shares_to_sell:.4f} {sym} (${shares_to_sell * prices[sym]:.2f})")
         except Exception as e:
             send_telegram_message(f"🎛 {name}\n❌ Sell {sym} failed: {e}")
-            return f"AAA: failed to sell {sym}: {e}"
+            return f"{tag}: failed to sell {sym}: {e}"
 
     # Buys (positive deltas)
-    for sym in STRATEGY_SYMBOLS["aaa"]:
+    for sym in symbols:
         if deltas[sym] <= cfg["tolerance_amount"]:
             continue
         if sym not in prices:
@@ -3091,13 +2795,13 @@ def make_monthly_buys_aaa(api, force_execute=False, investment_calc=None,
             trades_info.append(f"Bought {shares_to_buy:.4f} {sym} @ ${prices[sym]:.2f} (${actual_dollars:.2f}){suffix}")
         except Exception as e:
             send_telegram_message(f"🎛 {name}\n❌ Buy {sym} failed: {e}")
-            return f"AAA: failed to buy {sym}: {e}"
+            return f"{tag}: failed to buy {sym}: {e}"
 
     if not trades_info:
         trades_info.append("No trades needed; targets already aligned.")
 
     # Persist state
-    final_value_data = get_aaa_position_value(api)
+    final_value_data = get_rotator_position_value(api, cfg)
     final_total = final_value_data["total_value"]
     final_by_symbol = final_value_data["by_symbol"]
     final_peak_nav = max(new_peak_nav, final_total)
@@ -3105,8 +2809,8 @@ def make_monthly_buys_aaa(api, force_execute=False, investment_calc=None,
     strategy_return = (final_total / final_total_invested - 1) if final_total_invested > 0 else 0
     save_balance(cfg["strategy_key"], {
         "total_invested": final_total_invested,
-        "current_positions": {sym: final_by_symbol[sym]["shares"] for sym in STRATEGY_SYMBOLS["aaa"]},
-        "current_values": {sym: final_by_symbol[sym]["value"] for sym in STRATEGY_SYMBOLS["aaa"]},
+        "current_positions": {sym: final_by_symbol[sym]["shares"] for sym in symbols},
+        "current_values": {sym: final_by_symbol[sym]["value"] for sym in symbols},
         "peak_nav": final_peak_nav,
         "last_momentum_check": {
             "scores": scores,
@@ -3124,7 +2828,7 @@ def make_monthly_buys_aaa(api, force_execute=False, investment_calc=None,
     # Telegram summary
     scores_str = ", ".join(f"{s}: {sc:+.1%}" for s, sc in scores.items()) if scores else "n/a"
     msg = f"🎛 {name} ({pct_label:.2f}%) — ${investment_amount:,.2f}\n\n"
-    msg += f"6m scores: {scores_str}\n"
+    msg += f"{cfg['score_label']} scores: {scores_str}\n"
     if dd_triggered:
         msg += f"⚠️ DD-stop triggered (DD {dd:.1%}) — all to {cfg['defensive']}\n"
     elif not picks:
@@ -3145,7 +2849,264 @@ def make_monthly_buys_aaa(api, force_execute=False, investment_calc=None,
     msg += f"Return: {strategy_return:+.1%}"
     send_telegram_message(msg)
 
-    return f"AAA monthly complete. Picks: {picks}. Value ${final_total:,.2f}, return {strategy_return:.2%}"
+    return f"{tag} monthly complete. Picks: {picks}. Value ${final_total:,.2f}, return {strategy_return:.2%}"
+
+
+def make_monthly_buys_aaa(api, force_execute=False, investment_calc=None,
+                           margin_result=None, skip_order_wait=False, env="live"):
+    """7-Asset Rotator (AAA family) monthly execution — see make_monthly_buys_rotator."""
+    return make_monthly_buys_rotator(api, aaa_config, force_execute, investment_calc,
+                                     margin_result, skip_order_wait, env)
+
+
+def make_monthly_buys_mix8(api, force_execute=False, investment_calc=None,
+                           margin_result=None, skip_order_wait=False, env="live"):
+    """Mix8 Top-2 monthly execution — see make_monthly_buys_rotator."""
+    return make_monthly_buys_rotator(api, mix8_config, force_execute, investment_calc,
+                                     margin_result, skip_order_wait, env)
+
+
+def _contribution_gate(investment_amount, investment_calc, margin_result):
+    """Gemeinsame Monats-Gates der Sleeves. Liefert den Skip-Grund oder None."""
+    target_margin = margin_result["target_margin"]
+    metrics = margin_result["metrics"]
+    leverage = metrics.get("leverage", 1.0)
+    buying_power = investment_calc["total_available"] + investment_calc["margin_approved"]
+    if target_margin == 0 and leverage > 1.0:
+        return f"Skipped — deleveraging required ({leverage:.2f}x)"
+    if buying_power < investment_amount:
+        return f"Skipped — insufficient buying power (${buying_power:,.2f})"
+    if investment_amount < margin_control_config["min_investment"]:
+        return f"Skipped — ${investment_amount:.2f} below $1.00 minimum"
+    if target_margin > 0:
+        pv = metrics.get("portfolio_value", 0)
+        equity = metrics.get("equity", 0)
+        if pv > 0 and equity > 0:
+            projected_leverage = (pv + investment_amount) / equity
+            if projected_leverage >= margin_control_config["max_leverage"]:
+                return f"Skipped — projected leverage {projected_leverage:.3f}x exceeds limit"
+    return None
+
+
+def _wt_leg_state(closes, sma_period, band, confirm):
+    """Trendzustand eines World-Trend-Beins. Dieselbe Zustandsmaschine wie der
+    Backtest: ueber dem Band zaehlt `up`, darunter `dn`, im Band werden beide
+    zurueckgesetzt; `confirm` Tage in Folge schalten um. Sie laeuft ueber die
+    ganze geladene Historie, damit der Zustand auch ohne gespeicherten Vortag
+    stimmt - ein verpasster Lauf verfaelscht nichts."""
+    if len(closes) < sma_period:
+        raise EodhdDataError(f"nur {len(closes)} Kurse, SMA{sma_period} braucht {sma_period}")
+    state, up, dn, sma = False, 0, 0, None
+    for t in range(sma_period - 1, len(closes)):
+        sma = sum(closes[t - sma_period + 1:t + 1]) / sma_period
+        p = closes[t]
+        if p > sma * (1 + band):
+            up += 1
+            dn = 0
+        elif p < sma * (1 - band):
+            dn += 1
+            up = 0
+        else:
+            up = dn = 0
+        if up >= confirm:
+            state = True
+        if dn >= confirm:
+            state = False
+    return {"on": state, "price": closes[-1], "sma": sma, "up": up, "dn": dn,
+            "diff_pct": (closes[-1] / sma - 1) * 100}
+
+
+def _wt_signal_closes(index_symbol, cfg, today_iso):
+    """Schlusskurse vor heute (EODHD, Total Return) plus heutiger Live-Kurs."""
+    hist = fetch_eodhd_eod_series(index_symbol, calendar_days=900)
+    past = [(d, c) for d, c in hist if d < today_iso]
+    if not past:
+        raise EodhdDataError(f"{index_symbol}: keine Schlusskurse vor {today_iso}")
+    newest_date, newest_close = past[-1]
+    gap = (datetime.date.fromisoformat(today_iso)
+           - datetime.date.fromisoformat(newest_date)).days
+    if gap > MAX_EOD_GAP_DAYS:
+        raise EodhdDataError(f"{index_symbol}: neuester Schluss ist {gap} Tage alt ({newest_date})")
+    live, ts = fetch_eodhd_realtime(index_symbol)
+    age_min = (datetime.datetime.utcnow() - ts).total_seconds() / 60
+    if age_min > cfg["max_quote_age_minutes"]:
+        raise EodhdDataError(f"{index_symbol}: Live-Kurs ist {age_min:.0f} min alt")
+    if abs(live / newest_close - 1) > cfg["max_live_jump"]:
+        raise EodhdDataError(
+            f"{index_symbol}: Live-Kurs {live:.2f} weicht {(live / newest_close - 1) * 100:+.1f} % "
+            f"vom letzten Schluss {newest_close:.2f} ({newest_date}) ab")
+    return [c for _, c in past] + [live], {"last_close_date": newest_date,
+                                             "live_ts": ts.isoformat() + "Z"}
+
+
+def world_trend_signals(cfg=None, today_iso=None):
+    """Zustand je Bein, keyed by Produkt-Ticker. Raises EodhdDataError."""
+    cfg = cfg or world_trend_config
+    today_iso = today_iso or _heute_iso()
+    out = {}
+    for index_symbol, product in cfg["legs"]:
+        closes, meta = _wt_signal_closes(index_symbol, cfg, today_iso)
+        leg = _wt_leg_state(closes, cfg["sma_period"], cfg["band"], cfg["confirm_days"])
+        leg.update(meta)
+        leg["index"] = index_symbol
+        out[product] = leg
+    return out
+
+
+def world_trend_target_weights(cfg, signals):
+    """Jedes aktive Bein 1/n, der Rest im Defensiv-ETF."""
+    n = len(cfg["legs"])
+    w = {product: (1.0 / n if signals[product]["on"] else 0.0) for _, product in cfg["legs"]}
+    w[cfg["defensive"]] = 1.0 - sum(w.values())
+    return w
+
+
+def _wt_buy(api, cfg, symbol, dollars, price, skip_order_wait, trades):
+    shares, note = _size_buy_order(symbol, dollars, price)
+    if shares <= 0 or shares * price < margin_control_config["min_investment"]:
+        if note:
+            trades.append(f"⏭ {symbol}: {note}")
+        return 0.0
+    order = submit_order(api, symbol, shares, "buy")
+    if not skip_order_wait:
+        wait_for_order_fill(api, order["id"])
+    spent = shares * price
+    trades.append(f"Bought {shares:.4f} {symbol} @ ${price:.2f} (${spent:,.2f})" + (f" [{note}]" if note else ""))
+    return spent
+
+
+def _wt_trade_to_targets(api, cfg, target_w, skip_order_wait=False):
+    """Stellt die Sleeve auf `target_w` ihres EIGENEN Werts um. Verkauft zuerst;
+    Kaeufe sind auf die eigenen Verkaufserloese begrenzt. World-Trend greift
+    nie auf Konto-Cash zu - der Fehler des alten SPXL-Tagesjobs, der ein
+    SGOV-Polster automatisch zurueck in SPXL tauschte."""
+    symbols = STRATEGY_SYMBOLS[cfg["strategy_key"]]
+    vd = get_rotator_position_value(api, cfg)
+    total, by = vd["total_value"], vd["by_symbol"]
+    targets = {s: target_w.get(s, 0.0) * total for s in symbols}
+    prices = {s: float(get_latest_trade(api, s)) for s in symbols
+              if targets[s] > 0 or by[s]["value"] > cfg["tolerance_amount"]}
+    trades, cash = [], 0.0
+    for s in symbols:                                    # 1) Verkaeufe
+        delta = targets[s] - by[s]["value"]
+        if delta >= -cfg["tolerance_amount"] or s not in prices:
+            continue
+        shares = _size_sell_order(s, min(by[s]["shares"], -delta / prices[s]))
+        if shares <= 0:
+            continue
+        order = submit_order(api, s, shares, "sell")
+        filled = None if skip_order_wait else wait_for_order_fill(api, order["id"])
+        proceeds = filled if filled else shares * prices[s]
+        cash += proceeds
+        trades.append(f"Sold {shares:.4f} {s} (${proceeds:,.2f})")
+    for _, s in cfg["legs"]:                             # 2) Risiko-Beine
+        delta = targets[s] - by[s]["value"]
+        if delta > cfg["tolerance_amount"] and s in prices:
+            cash -= _wt_buy(api, cfg, s, min(delta, cash), prices[s], skip_order_wait, trades)
+    d = cfg["defensive"]                                 # 3) Rest inkl. Rundungsrest
+    if cash > cfg["tolerance_amount"]:
+        price = prices.get(d) or float(get_latest_trade(api, d))
+        _wt_buy(api, cfg, d, cash, price, skip_order_wait, trades)
+    return trades
+
+
+def _wt_signal_summary(cfg, signals):
+    lines = []
+    for index_symbol, product in cfg["legs"]:
+        sg = signals[product]
+        lines.append(f"{'🟢' if sg['on'] else '🔴'} {product} ({index_symbol.split('.')[0]}): "
+                     f"{sg['price']:.2f} vs SMA{cfg['sma_period']} {sg['sma']:.2f} ({sg['diff_pct']:+.1f} %)")
+    return "\n".join(lines)
+
+
+def daily_world_trend(api, env="live", force=False, skip_order_wait=False):
+    """Taeglicher Check. Handelt nur, wenn ein Bein umschaltet oder der Bestand
+    nicht zum Signal passt - nicht auf Drift, genau wie der Backtest."""
+    cfg = world_trend_config
+    name = cfg["display_name"]
+    if not force and not check_trading_day(mode="daily"):
+        print(f"{name}: market closed today")
+        return "Market closed today."
+    try:
+        signals = world_trend_signals(cfg)
+    except EodhdDataError as e:
+        send_telegram_message(f"❗ {name}: {e} — kein Signal, keine Trades.")
+        return f"❌ {name}: {e}"
+    target_w = world_trend_target_weights(cfg, signals)
+    states = {p: bool(signals[p]["on"]) for _, p in cfg["legs"]}
+    stored = load_balances(env).get(cfg["strategy_key"], {}).get("leg_states")
+    vd = get_rotator_position_value(api, cfg)
+    total = vd["total_value"]
+    trades, reason = [], None
+    if total >= margin_control_config["min_investment"]:
+        cur = {s: vd["by_symbol"][s]["value"] / total for s in STRATEGY_SYMBOLS[cfg["strategy_key"]]}
+        flipped = stored is not None and any(stored.get(p) != states[p] for p in states)
+        mismatch = any((target_w[p] > 0 and cur[p] < 0.05) or (target_w[p] == 0 and cur[p] > 0.05)
+                       for _, p in cfg["legs"])
+        if flipped or mismatch:
+            reason = "Signalwechsel" if flipped else "Bestand passt nicht zum Signal"
+            trades = _wt_trade_to_targets(api, cfg, target_w, skip_order_wait)
+    save_balance(cfg["strategy_key"], {
+        "leg_states": states,
+        "last_signal": {p: {k: signals[p][k] for k in ("on", "price", "sma", "diff_pct", "up", "dn", "last_close_date")}
+                        for p in states},
+        "last_signal_check_date": datetime.datetime.now().strftime("%Y-%m-%d"),
+    }, env, merge=True)
+    if trades:
+        msg = f"🌍 {name} — {reason}\n\n{_wt_signal_summary(cfg, signals)}\n\n" + "\n".join(trades)
+        send_telegram_message(msg)
+        return f"{name}: {reason}, {len(trades)} trades"
+    legs_str = ", ".join(p + (" on" if v else " off") for p, v in states.items())
+    return f"{name}: no change ({legs_str})"
+
+
+def make_monthly_buys_world_trend(api, force_execute=False, investment_calc=None,
+                                  margin_result=None, skip_order_wait=False, env="live"):
+    """Monatszufuehrung: der Beitrag geht nach dem aktuellen Signal auf die Beine,
+    ohne den Bestand umzuschichten (das tut nur der Tagesjob bei Signalwechsel)."""
+    cfg = world_trend_config
+    name = cfg["display_name"]
+    if not force_execute and not check_trading_day(mode="monthly"):
+        return "Not first trading day of the month"
+    if margin_result is None:
+        margin_result = check_margin_conditions(api, env=env)
+    if investment_calc is None:
+        investment_calc = calculate_monthly_investments(api, margin_result, env)
+    amount = investment_calc["strategy_amounts"].get(cfg["alloc_key"], 0)
+    pct_label = strategy_allocations.get(cfg["alloc_key"], 0) * 100
+    reason = _contribution_gate(amount, investment_calc, margin_result)
+    if reason:
+        send_telegram_message(f"🌍 {name} ({pct_label:.2f}%) — ${amount:,.2f}\n⏭ {reason}")
+        return reason
+    try:
+        signals = world_trend_signals(cfg)
+    except EodhdDataError as e:
+        send_telegram_message(f"❗ {name}: {e} — Beitrag nicht investiert.")
+        return f"❌ {name}: {e}"
+    target_w = world_trend_target_weights(cfg, signals)
+    trades, cash = [], amount
+    for _, s in cfg["legs"]:
+        if target_w[s] > 0:
+            cash -= _wt_buy(api, cfg, s, target_w[s] * amount, float(get_latest_trade(api, s)),
+                            skip_order_wait, trades)
+    d = cfg["defensive"]
+    if cash > cfg["tolerance_amount"]:
+        _wt_buy(api, cfg, d, cash, float(get_latest_trade(api, d)), skip_order_wait, trades)
+    state = load_balances(env).get(cfg["strategy_key"], {})
+    vd = get_rotator_position_value(api, cfg)
+    symbols = STRATEGY_SYMBOLS[cfg["strategy_key"]]
+    total_invested = float(state.get("total_invested", 0) or 0) + amount
+    save_balance(cfg["strategy_key"], {
+        "total_invested": total_invested,
+        "leg_states": {p: bool(signals[p]["on"]) for _, p in cfg["legs"]},
+        "current_positions": {s: vd["by_symbol"][s]["shares"] for s in symbols},
+        "current_values": {s: vd["by_symbol"][s]["value"] for s in symbols},
+        "last_trade_date": datetime.datetime.now().strftime("%Y-%m-%d"),
+    }, env, merge=True)
+    msg = (f"🌍 {name} ({pct_label:.2f}%) — ${amount:,.2f}\n\n{_wt_signal_summary(cfg, signals)}\n\n"
+           + "\n".join(trades or ["No trades."]) + f"\n\nCurrent value: ${vd['total_value']:,.2f}")
+    send_telegram_message(msg)
+    return f"{name} monthly complete. Value ${vd['total_value']:,.2f}"
 
 
 # Helper function to wait for an order to be filled
@@ -3227,8 +3188,8 @@ def monthly_invest_all_strategies(api, force_execute=False, skip_order_wait=Fals
         return (strategy_amounts[key] / total_investing * 100) if total_investing > 0 else 0
     
     print(f"Total investing power: ${total_investing:.2f}")
-    print(f"  Dual Momentum ({get_pct('dual_momentum_allo'):.1f}%): ${strategy_amounts['dual_momentum_allo']:.2f}")
-    print(f"  7-Asset Rotator ({get_pct('aaa_allo'):.1f}%): ${strategy_amounts['aaa_allo']:.2f}")
+    for _key, (_allo, _label) in SLEEVES.items():
+        print(f"  {_label} ({get_pct(_allo):.1f}%): ${strategy_amounts[_allo]:.2f}")
     
     # Send one shared account status message to Telegram before executing strategies
     metrics = margin_result.get("metrics", {})
@@ -3271,7 +3232,7 @@ def monthly_invest_all_strategies(api, force_execute=False, skip_order_wait=Fals
     # Per-strategy budget breakdown. Labels aus strategy_allocations abgeleitet,
     # damit sie bei der naechsten Gewichtsaenderung nicht wieder auseinanderlaufen.
     account_msg += "Budget per strategy:\n"
-    _labels = {"dual_momentum_allo": "Dual Momentum", "aaa_allo": "7-Asset Rotator"}
+    _labels = {allo: label for allo, label in SLEEVES.values()}
     for key, weight in strategy_allocations.items():
         label = f"{_labels.get(key, key)} {weight * 100:.1f}%"
         account_msg += f"  • {label}: ${strategy_amounts[key]:,.2f}\n"
@@ -3292,17 +3253,21 @@ def monthly_invest_all_strategies(api, force_execute=False, skip_order_wait=Fals
             print(err)
             results[name] = err
 
-    _run("dual_momentum", "Dual Momentum", lambda: monthly_dual_momentum_strategy(api, force_execute, investment_calc, margin_result, skip_order_wait, env))
-    _run("aaa", "7-Asset Rotator", lambda: make_monthly_buys_aaa(api, force_execute=force_execute, investment_calc=investment_calc, margin_result=margin_result, skip_order_wait=skip_order_wait, env=env))
+    _runners = {
+        "aaa": make_monthly_buys_aaa,
+        "world_trend": make_monthly_buys_world_trend,
+        "mix8": make_monthly_buys_mix8,
+    }
+    for _key, (_allo, _label) in SLEEVES.items():
+        _fn = _runners[_key]
+        _run(_key, _label, lambda _fn=_fn: _fn(api, force_execute=force_execute, investment_calc=investment_calc,
+                                              margin_result=margin_result, skip_order_wait=skip_order_wait, env=env))
 
     print("\n=== All Monthly Strategies Complete ===")
 
     # Send a summary so a missing strategy is impossible to overlook
     summary_lines = ["📋 Monthly Orchestrator Summary"]
-    label_map = {
-        "dual_momentum": "Dual Momentum",
-        "aaa": "7-Asset Rotator",
-    }
+    label_map = {key: label for key, (_, label) in SLEEVES.items()}
     for key, label in label_map.items():
         outcome = results.get(key, "(no result)")
         outcome_str = str(outcome)
@@ -3332,43 +3297,19 @@ def monthly_invest_all(request):
     return jsonify(results), 200
 
 
-@app.route("/monthly_dual_momentum", methods=["POST"])
-def monthly_dual_momentum(request):
-    """
-    Cloud Function endpoint for Dual Momentum Strategy.
-    Executes monthly dual momentum strategy with SPUU/QLD/EFO/BND best-of-3.
-    """
-    try:
-        api = set_alpaca_environment(env=alpaca_environment)
-        result = monthly_dual_momentum_strategy(api, env=alpaca_environment)
-        return jsonify({"result": result}), 200
-    except Exception as e:
-        error_message = f"Dual Momentum Strategy error: {str(e)}"
-        print(error_message)
-        send_telegram_message(error_message)
-        return jsonify({"error": error_message}), 500
+@app.route("/monthly_buy_mix8", methods=["POST"])
+def monthly_buy_mix8(request):
+    """Manual/debug entry point — the orchestrator runs Mix8 in-process."""
+    api = set_alpaca_environment(env=alpaca_environment)
+    return make_monthly_buys_mix8(api, env=alpaca_environment)
 
 
-# ─────────────────────────────────────────────────────────────────────────
-# RETIRED 2026-09-21: Regime SSO und 9-Sig
-#
-# Beide Sleeves am 21.09.2026 aufgeloest. Grund: US-/Tech-Konzentration und
-# schwache risikoadjustierte Ergebnisse. Ein originalgetreuer 25-Jahre-Replay
-# aller Sleeves (mit DD-30-Stops, 6m-Momentum, taeglichen SMA-Gates und
-# positionsgenauem Hebel) ergab Sharpe 0,50 fuer Regime SSO und 0,47 fuer
-# 9-Sig, gegen 0,87 fuer den AAA-Rotator.
-#
-# Live-Positionen SSO, TQQQ und AGG wurden am selben Tag verkauft
-# (Erloes 1.159,06 USD) und in AAA umgeschichtet. Die 20,74% Zielallokation
-# gingen an die verbleibenden vier Sleeves, siehe strategy_allocations.
-#
-# Die internen Funktionen (make_monthly_buys_regime, compute_regime_score,
-# execute_quarterly_nine_sig_signal und weitere) stehen noch als toter Code
-# in dieser Datei und werden in einem eigenen Schritt entfernt. Sie werden
-# von keinem Pfad mehr aufgerufen: weder vom Orchestrator noch ueber eine
-# HTTP-Route. Ohne Route kann cloudbuild sie nicht mehr deployen.
-# ─────────────────────────────────────────────────────────────────────────
-
+@app.route("/daily_world_trend", methods=["POST"])
+def daily_world_trend_route(request):
+    """Taeglicher World-Trend-Check (Scheduler 15:50 ET). Datenfehler => 500."""
+    api = set_alpaca_environment(env=alpaca_environment)
+    result = daily_world_trend(api, env=alpaca_environment)
+    return result, (500 if str(result).startswith("❌") else 200)
 
 @app.route("/monthly_buy_aaa", methods=["POST"])
 def monthly_buy_aaa(request):
@@ -3423,10 +3364,7 @@ def audit_monthly_run(api, env="live", lookback_days=14):
         print(f"Warning: could not list recent orders: {e}")
         recent_orders = []
 
-    expected_symbols = {
-        "Dual Momentum": STRATEGY_SYMBOLS["dual_momentum"],
-        "7-Asset Rotator": STRATEGY_SYMBOLS["aaa"],
-    }
+    expected_symbols = {label: STRATEGY_SYMBOLS[key] for key, (_, label) in SLEEVES.items()}
 
     strategy_activity = {label: [] for label in expected_symbols}
     for o in recent_orders:
@@ -3503,8 +3441,12 @@ def run_local(action, env="paper", request="test", force_execute=False,
             response, code = check_unified_index_alert(
                 _LocalRequest(alert_payload), env=env)
             return {"http_status": code, **response.get_json()}
-    elif action == "monthly_dual_momentum":
-        return monthly_dual_momentum_strategy(api, force_execute=force_execute, skip_order_wait=True, env=env)
+    elif action == "monthly_buy_mix8":
+        return make_monthly_buys_mix8(api, force_execute=force_execute, skip_order_wait=True, env=env)
+    elif action == "monthly_buy_world_trend":
+        return make_monthly_buys_world_trend(api, force_execute=force_execute, skip_order_wait=True, env=env)
+    elif action == "daily_world_trend":
+        return daily_world_trend(api, env=env, force=force_execute)
     elif action == "monthly_buy_aaa":
         return make_monthly_buys_aaa(api, force_execute=force_execute, skip_order_wait=True, env=env)
     else:
@@ -3520,8 +3462,10 @@ if __name__ == "__main__":
         choices=[
             "monthly_invest_all",
             "index_alert",
-            "monthly_dual_momentum",
             "monthly_buy_aaa",
+            "monthly_buy_mix8",
+            "monthly_buy_world_trend",
+            "daily_world_trend",
         ],
         required=True,
         help="Action to perform: 'monthly_invest_all' runs all monthly strategies with coordinated budgets (recommended)",

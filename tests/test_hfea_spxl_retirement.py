@@ -24,19 +24,15 @@ RETIRED_FUNCTIONS = [
     "monthly_buy_spxl",
     "daily_trade_spxl_200sma",
 ]
-FREED_TICKERS = {"UPRO", "TMF", "KMLM", "SPXL", "SGOV"}
+FREED_TICKERS = {"UPRO", "TMF", "SPXL"}
+# KMLM und SGOV wurden frei und am 2026-09-23 bewusst an Mix8 vergeben.
+REUSED_BY_MIX8 = {"KMLM", "SGOV"}
 
 
-def test_only_active_sleeves_carry_weight():
-    assert set(main.strategy_allocations) == {"dual_momentum_allo", "aaa_allo"}
+def test_retired_sleeves_carry_no_weight():
+    assert "hfea_allo" not in main.strategy_allocations
+    assert "spxl_allo" not in main.strategy_allocations
     assert sum(main.strategy_allocations.values()) == pytest.approx(1.0)
-
-
-def test_interim_weights_keep_the_one_to_two_ratio():
-    # Uebergangsgewichte bis zu den neuen Sleeves: DM und AAA behalten ihr
-    # Verhaeltnis vom 21.09. (25:50). Wer das aendert, soll es bewusst tun.
-    w = main.strategy_allocations
-    assert w["aaa_allo"] == pytest.approx(2 * w["dual_momentum_allo"])
 
 
 def test_retired_sleeves_own_no_tickers():
@@ -44,6 +40,7 @@ def test_retired_sleeves_own_no_tickers():
     assert "spxl_sma" not in main.STRATEGY_SYMBOLS
     owned = {t for syms in main.STRATEGY_SYMBOLS.values() for t in syms}
     assert owned.isdisjoint(FREED_TICKERS)
+    assert REUSED_BY_MIX8 <= set(main.STRATEGY_SYMBOLS["mix8"])
 
 
 def test_no_http_route_for_retired_functions():
@@ -85,25 +82,3 @@ def test_cloudbuild_retires_instead_of_deploying():
     retire = retire[:retire.index("waitFor")]
     for name in RETIRED_FUNCTIONS:
         assert name in retire, f"Bereinigung loescht {name} nicht"
-
-
-@pytest.mark.parametrize("aaa_value,dm_value", [
-    (2180.81, 1801.19),   # Buch am 22.09.2026: AAA 54,8 %, DM 45,2 %
-    (1000.0, 3000.0),     # AAA stark untergewichtet
-    (3500.0, 500.0),      # AAA uebergewichtet
-])
-def test_contribution_tilt_never_rewards_the_overweight_sleeve(monkeypatch, aaa_value, dm_value):
-    """Mit zwei Sleeves hatte die 50-%-Kappe AAA unter sein Ziel gedrueckt und
-    den Ueberschuss an DM gegeben — auch wenn DM uebergewichtet war."""
-    total = aaa_value + dm_value
-    monkeypatch.setattr(main, "get_all_strategy_values", lambda api: {
-        "dual_momentum": dm_value, "aaa": aaa_value, "total": total})
-    adj = main.calculate_rebalanced_allocations({})["adjusted_allocations"]
-    assert sum(adj.values()) == pytest.approx(1.0)
-    target = main.strategy_allocations
-    aaa_under = aaa_value / total < target["aaa_allo"]
-    if aaa_under:
-        assert adj["aaa_allo"] >= target["aaa_allo"] - 1e-9
-        assert adj["dual_momentum_allo"] <= target["dual_momentum_allo"] + 1e-9
-    else:
-        assert adj["aaa_allo"] <= target["aaa_allo"] + 1e-9

@@ -166,24 +166,12 @@ def mark_f4_retired(env, sale_fills, actual_proceeds):
 
 
 def _strategy_runners(api, investment_calc, margin_result, env):
+    kw = dict(force_execute=True, investment_calc=investment_calc,
+              margin_result=margin_result, skip_order_wait=False, env=env)
     return [
-        (
-            "dual_momentum",
-            lambda: bot.monthly_dual_momentum_strategy(
-                api, True, investment_calc, margin_result, False, env
-            ),
-        ),
-        (
-            "aaa",
-            lambda: bot.make_monthly_buys_aaa(
-                api,
-                force_execute=True,
-                investment_calc=investment_calc,
-                margin_result=margin_result,
-                skip_order_wait=False,
-                env=env,
-            ),
-        ),
+        ("aaa", lambda: bot.make_monthly_buys_aaa(api, **kw)),
+        ("world_trend", lambda: bot.make_monthly_buys_world_trend(api, **kw)),
+        ("mix8", lambda: bot.make_monthly_buys_mix8(api, **kw)),
     ]
 
 
