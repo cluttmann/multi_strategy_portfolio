@@ -1,48 +1,52 @@
 # Investment Strategy with Alpaca and Google Cloud Functions
 
-This project contains a set of Python Cloud Functions for managing a multi-strategy portfolio using Alpaca's trading API. The portfolio is composed of **six complementary strategies**: **HFEA**, **SPXL SMA**, **9-Sig (Jason Kelly Methodology)**, **Dual Momentum (best-of-3 leveraged rotation)**, **Regime SSO (US regime detector)**, and **7-Asset Rotator (AAA-family multi-asset rotation)**.
+A set of Python Cloud Functions managing a multi-strategy portfolio through Alpaca's
+trading API, deployed to Google Cloud (`europe-west3`, project `trading-436516`).
 
-*Earlier compositions also included: RSSB/WTIP (discontinued 2026-05-11); Regime World (discontinued 2026-05-12); and World 40/30/30/F4 (discontinued 2026-09-09 after the corrected proxy audit left insufficient long-run evidence and its international-equity role became redundant with the separate Scalable ACWI strategy).*
+## 📖 Vollständige Dokumentation
+
+> **[docs/investment_policy.md](docs/investment_policy.md) ist die maßgebliche Dokumentation.**
+> Sie enthält Zweck, exakte Regeln, Ticker und Backtest-Ergebnisse jedes Sleeves,
+> die Depotregeln, die Hebel- und Finanzierungspolitik über alle Broker sowie den
+> FIRE-Plan. Alles darunter in dieser README ist entweder eine Kurzfassung davon
+> oder historisch.
 
 ## Portfolio Allocation
 
-Current production weights (sum to 100%):
+**Vier aktive Sleeves** (Stand 2026-09-23, Summe 100 %):
 
-| Strategy | Weight | Role |
-|---|---:|---|
-| HFEA | 18.29% | Aggressive 3× leveraged buy-and-hold (UPRO/TMF/KMLM) |
-| SPXL SMA | 18.29% | 3× S&P trend-following with 200-SMA gate |
-| 9-Sig | 6.10% | Systematic TQQQ/AGG with crash protection (tail-risk sleeve) |
-| Dual Momentum (best-of-3) | 24.39% | SPUU/QLD/EFO rotation + DD-stop + vol-target |
-| Regime SSO | 14.64% | 7-signal US regime detector — SSO ↔ USFR rotation |
-| 7-Asset Rotator (AAA family) | 18.29% | Monthly top-3 momentum rotation over NTSD/SAA/EET/UBT/UST/UGL/DBC, inverse-vol weighted with DD30 + vol25 risk controls |
+| Sleeve | Gewicht | Regel | Ticker |
+|---|---:|---|---|
+| **Mix8 Top-2** | 42,50 % | Monatlich Top-2 nach 3/6/12-Monats-Momentum, Inverse-Vol, Vol-Target 25 %, DD-Stop 30 % | SSO QLD EFO EEM GLD IEF TLT KMLM → SGOV |
+| **7-Asset-Rotator (AAA)** | 21,25 % | Monatlich Top-3 nach 6-Monats-Momentum, sonst wie Mix8 | NTSD SAA EET UBT UST UGL DBC → SHV |
+| **World-Trend** | 21,25 % | Täglich, je 50 % WLDU und UGLD solange der ungehebelte Index (EODHD) über seiner 150-Tage-SMA steht, 1 %-Band, 3 Bestätigungstage | WLDU UGLD → USFR |
+| **S&P-Trend 3×** | 15,00 % | Täglich, SPXL solange SPY über seiner 200-Tage-SMA steht, 1 %-Band, 1 Bestätigungstag | SPXL → BIL |
 
-### Why the 2026-09-09 update
+**Kennzahlen des Depots** (kanonischer Lauf 2026-09-23, Lot-Ledger, Spreads gegen
+die echten ETFs geeicht, deutsche Steuer mit FIFO und Teilfreistellung):
 
-World 40/30/30 was removed after a corrected audit showed that the current GOLY
-strategy has usable live history only from 2025-01-06 and none of the long-run
-proxy families replicated its return level reliably. Its international-equity
-role also duplicates the separately held, leveraged MSCI ACWI strategy in the
-Scalable account. The old 18% weight was redistributed proportionally across
-the six remaining sleeves; no strategy mechanics changed.
+| Fenster | CAGR vor St. | Sharpe | CAGR nach St. | Sharpe nach | MaxDD |
+|---|---:|---:|---:|---:|---:|
+| 1994–2026 (32,2 J) | 16,96 % | 0,75 | 14,31 % | 0,63 | −26,9 % |
+| 2000–2026 (26,6 J) | 15,55 % | 0,73 | 13,06 % | 0,62 | −26,9 % |
 
-### Historical: why the 2026-05-12 update was made
+Je Sleeve, Korrelationen, Krisen und Jahresrenditen: siehe
+[Teil IV der Policy](docs/investment_policy.md#teil-iv--backtest-ergebnisse-alpaca).
 
-After full Wave 7/8 backtests + Monte Carlo + tax-aware analysis, the portfolio was restructured around four principles:
+**Aufgelöst 2026-09:** Dual Momentum (23.09.), HFEA und SPXL SMA (22.09., SPXL
+kehrt als S&P-Trend 3× unter anderer Zielsetzung zurück), Regime SSO und 9-Sig
+(21.09.), World 40/30/30 / F4 (09.09.). Früher: Regime World (12.05.2026),
+RSSB/WTIP (11.05.2026).
 
-1. **Cap single-strategy concentration** — no sleeve > 20%. Previously DM 2× was 26%, creating concentration risk.
-2. **Lift the highest-Sharpe sleeves** — 7-Asset Rotator (Sharpe 0.74) was underweighted at 9.68%; bumped to 15%.
-3. **Tax-aware caps** — high-turnover sleeves (7-Asset Rotator monthly 7-asset rotation, Regime SSO SSO↔USFR rotation) capped to limit short-term cap-gains exposure in this taxable account.
-4. **Add international diversification via World 40/30/30** — zero deployed-ticker overlap; the most tax-efficient sleeve (quarterly rebal of 3 fixed assets, no rotation).
+---
 
-| Allocation rule | Cap | Reason |
-|---|---:|---|
-| HFEA / SPXL SMA | ≤ 15% | US-equity concentration limit |
-| Regime SSO | ≤ 12% | Medium turnover (SSO↔USFR) |
-| 7-Asset Rotator | ≤ 15% | High turnover (monthly 7-asset rotation, top-3 selection) |
-| DM 2× best-of-3 | ≤ 20% | Medium turnover (monthly winner selection from 3 candidates) |
-| 9-Sig | ~ 5% | Highest MaxDD (-98%); deliberately small |
-| World 40/30/30 | 18% | Lowest turnover (quarterly, 3 fixed assets) — gets the largest single weight |
+> ## ⚠️ Alles ab hier ist historisch
+>
+> Die folgenden Abschnitte beschreiben Strategien, Gewichte und Backtests aus
+> früheren Portfoliozusammensetzungen. Sie werden als Entscheidungsprotokoll
+> aufbewahrt und sind **kein gültiger Stand**. Maßgeblich sind der
+> Produktionscode auf `main` und
+> [docs/investment_policy.md](docs/investment_policy.md).
 
 ## Overview of the Strategies
 
