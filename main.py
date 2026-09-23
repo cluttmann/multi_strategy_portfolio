@@ -207,6 +207,13 @@ rebalance_config = {
     "aggressiveness": 2.0,          # 0.0 = disabled (use fixed %), 1.0 = proportional tilt, 2.0+ = aggressive tilt
     "max_single_strategy_pct": 0.50,  # Cap per strategy = max(this, 1.5 × its target) of the monthly contribution
     "min_floor_pct_of_target": 0.50,  # Each strategy receives at least this fraction of its target (e.g. 9-Sig at 7.5% gets ≥ 3.75%) so aggressive tilts can't starve a small allocation entirely
+    # Einmal im Jahr, am ersten Handelstag dieses Monats, stellt der Orchestrator
+    # alle Sleeves komplett auf Zielallokation, statt nur die Einzahlung zu kippen.
+    # Backtest 2026-09-23 (ein Depot, FIFO, deutsche Steuer, Live-Mechanik der
+    # Sleeves): in 65 von 65 Fuenfzehnjahresfenstern besser als der reine Tilt,
+    # +0,25 bis +0,41 pp IRR nach Steuern, schlechtester MaxDD -25,4 statt -29,4 %.
+    # Der Tilt allein liess S&P-Trend bis 27 % laufen. None schaltet es ab.
+    "annual_rebalance_month": 1,
 }
 
 
@@ -926,7 +933,7 @@ def check_margin_conditions(api, env="live"):
     return result
 
 
-def calculate_monthly_investments(api, margin_result, env="live"):
+def calculate_monthly_investments(api, margin_result, env="live", annual_rebalance=False):
     """
     Calculate dynamic monthly investment amounts based on available cash and margin.
     
@@ -994,11 +1001,23 @@ def calculate_monthly_investments(api, margin_result, env="live"):
         margin_approved = 0
     
     total_investing = available_cash + margin_approved
-    
+
+    # Jaehrliches Rebalancing, nur auf Anforderung des Orchestrators: die Betraege
+    # sind dann Ziel minus Ist je Sleeve und koennen negativ sein (Sleeve gibt ab).
+    annual = None
+    if annual_rebalance:
+        try:
+            annual = calculate_annual_rebalance(api, total_investing)
+        except Exception as e:
+            print(f"⚠️  Jaehrliches Rebalancing ausgesetzt: {e}")
+            annual = {"error": str(e)}
+
     # Step 4: Calculate allocations (with optional rebalancing tilt)
     rebalance_result = None
-    
-    if rebalance_config["aggressiveness"] > 0:
+
+    if annual and "error" not in annual:
+        strategy_amounts = dict(annual["strategy_amounts"])
+    elif rebalance_config["aggressiveness"] > 0:
         # Calculate rebalanced allocations that tilt toward underweight strategies
         rebalance_result = calculate_rebalanced_allocations(
             api, 
@@ -1030,8 +1049,64 @@ def calculate_monthly_investments(api, margin_result, env="live"):
         "total_investing": total_investing,
         "strategy_amounts": strategy_amounts,
         "reserved_amounts": {},  # No reserved amounts anymore
-        "rebalance_result": rebalance_result  # Include rebalancing details for reference
+        "rebalance_result": rebalance_result,  # Include rebalancing details for reference
+        "annual_rebalance": annual,
     }
+
+
+def calculate_annual_rebalance(api, total_investing):
+    """Betraege fuer das jaehrliche Rebalancing: je Sleeve Ziel minus Ist. Ziel ist
+    die Zielquote auf (Summe der Sleeves + heutiges Investitionsbudget), die Summe
+    der Betraege ist also genau das Budget. Positiv = auffuellen, negativ = abgeben.
+
+    Liest die Positionen direkt und wirft bei einem Fehler. get_all_strategy_values
+    liefert bei Fehlern Nullen - ein Rebalancing darauf hielte jede Sleeve fuer leer."""
+    positions = {p["symbol"]: float(p["market_value"]) for p in list_positions(api)}
+    values = {key: sum(positions.get(s, 0.0) for s in STRATEGY_SYMBOLS[key]) for key in SLEEVES}
+    invested = sum(values.values())
+    if invested <= 0:
+        raise ValueError("keine Sleeve-Positionen gefunden")
+    total = invested + max(0.0, total_investing)
+    amounts, sleeves = {}, {}
+    for key, (allo, label) in SLEEVES.items():
+        target = strategy_allocations[allo]
+        amounts[allo] = target * total - values[key]
+        sleeves[key] = {"value": values[key], "weight": values[key] / invested,
+                        "target": target, "amount": amounts[allo]}
+        print(f"  Rebalancing {label}: {values[key] / invested:.1%} -> {target:.2%} ({amounts[allo]:+,.2f} $)")
+    return {"strategy_amounts": amounts, "sleeves": sleeves, "invested": invested, "total": total}
+
+
+def _margin_budget(cash, equity, target_margin):
+    """(verfuegbares Cash, freigegebene Margin, genutzte Margin) nach genau der Regel
+    von calculate_monthly_investments. Ein Test haelt beide deckungsgleich."""
+    if target_margin > 0 and equity > 0:
+        used = max(0.0, -cash)
+        return max(0.0, cash), max(0.0, equity * target_margin - used), used
+    return max(0.0, cash), 0.0, 0.0
+
+
+def _rebalance_buy_budget(api, investment_calc, margin_result, sellers):
+    """Budget der auffuellenden Sleeves, nachdem die uebergewichteten abgegeben haben:
+    aus dem ECHTEN Kontostand, mit derselben Margin-Regel wie jeden Monat. Die
+    geplanten Kaeufe werden anteilig gekappt, wenn die Verkaeufe weniger gebracht
+    haben (gescheiterter Verkauf, Kursbewegung). None, wenn das Konto nicht lesbar ist."""
+    acct = get_account_info(api)
+    if not acct:
+        return None
+    available, margin, used = _margin_budget(acct["cash"], acct["equity"],
+                                             margin_result.get("target_margin", 0))
+    budget = available + margin
+    amounts = investment_calc["strategy_amounts"]
+    buyers = {allo: amounts[allo] for key, (allo, _) in SLEEVES.items()
+              if key not in sellers and amounts[allo] > 0}
+    need = sum(buyers.values())
+    scale = min(1.0, budget / need) if need > 0 else 0.0
+    new_amounts = {allo: 0.0 for allo in amounts}
+    new_amounts.update({allo: amt * scale for allo, amt in buyers.items()})
+    return {**investment_calc, "strategy_amounts": new_amounts, "total_available": available,
+            "margin_approved": margin, "used_margin": used, "total_investing": budget,
+            "rebalance_scale": scale}
 
 
 def save_balance(strategy, data, env="live", merge=False):
@@ -2714,16 +2789,18 @@ def make_monthly_buys_rotator(api, cfg, force_execute=False, investment_calc=Non
     pct_label = strategy_allocations.get(alloc_key, 0) * 100
     check_date = datetime.datetime.now().strftime("%Y-%m-%d")
 
-    def _skip(reason):
-        msg = f"🎛 {name} ({pct_label:.2f}%) — ${investment_amount:,.2f}\n⏭ {reason}"
-        send_telegram_message(msg)
-        print(reason)
-        return reason
-
-    # Gate checks
-    gate = _contribution_gate(investment_amount, investment_calc, margin_result)
-    if gate:
-        return _skip(gate)
+    # Die Gates sperren nur NEUES Geld; die Rotation laeuft immer. Frueher brach
+    # der ganze Lauf ab: bei geschlossenem Margin-Gate und negativem Cash bekam
+    # jede Sleeve 0 $ ("below $1.00 minimum"), und AAA/Mix8 blieben genau im
+    # Abschwung in ihren alten Positionen stehen - ohne Rotation, ohne DD-Stopp.
+    # Im Rebalancing-Lauf (negativer Betrag = abgeben) haelt der Orchestrator
+    # das Budget selbst ein.
+    gate_note = None
+    if investment_amount > 0 and not _is_rebalance_run(investment_calc):
+        gate_note = _contribution_gate(investment_amount, investment_calc, margin_result)
+        if gate_note:
+            print(f"{tag}: {gate_note} — rotating without new money")
+            investment_amount = 0.0
 
     # Load state
     balances = load_balances(env)
@@ -2762,7 +2839,7 @@ def make_monthly_buys_rotator(api, cfg, force_execute=False, investment_calc=Non
         print(f"  picks: {picks}, inverse-vol scale: {scale:.3f}")
 
     # Compute target dollar amounts
-    total_to_allocate = current_value + investment_amount
+    total_to_allocate = max(0.0, current_value + investment_amount)
     targets = {sym: 0.0 for sym in symbols}
     for pos, w in weights.items():
         if pos in targets:
@@ -2835,7 +2912,17 @@ def make_monthly_buys_rotator(api, cfg, force_execute=False, investment_calc=Non
     final_value_data = get_rotator_position_value(api, cfg)
     final_total = final_value_data["total_value"]
     final_by_symbol = final_value_data["by_symbol"]
-    final_peak_nav = max(new_peak_nav, final_total)
+    # Peak flussbereinigt: Einzahlung und Rebalancing-Abgabe sind weder Gewinn
+    # noch Verlust. Ohne Skalierung saehe die Januar-Abgabe im Folgemonat wie ein
+    # Drawdown aus (DD-30-Stopp!), und Einzahlungen verdeckten echte Verluste.
+    # Der Drawdown von vor dem Lauf wird ueber den TATSAECHLICHEN Wertsprung
+    # getragen, nicht ueber den geplanten Betrag: ein Rundungsrest (NTSD nur in
+    # ganzen Stuecken) kommt nie in der Sleeve an und darf den Peak nicht
+    # aufblaehen. So misst der Stopp dieselbe Rendite-NAV wie der Backtest.
+    if current_value > 0 and final_total > 0:
+        final_peak_nav = new_peak_nav * final_total / current_value
+    else:
+        final_peak_nav = max(new_peak_nav, final_total)
     final_total_invested = total_invested + investment_amount
     strategy_return = (final_total / final_total_invested - 1) if final_total_invested > 0 else 0
     save_balance(cfg["strategy_key"], {
@@ -2859,6 +2946,10 @@ def make_monthly_buys_rotator(api, cfg, force_execute=False, investment_calc=Non
     # Telegram summary
     scores_str = ", ".join(f"{s}: {sc:+.1%}" for s, sc in scores.items()) if scores else "n/a"
     msg = f"🎛 {name} ({pct_label:.2f}%) — ${investment_amount:,.2f}\n\n"
+    if gate_note:
+        msg += f"⏭ Kein neues Geld ({gate_note.replace('Skipped — ', '')}), Rotation laeuft\n"
+    if investment_amount < 0:
+        msg += f"🔄 Jährliches Rebalancing: gibt ${-investment_amount:,.2f} ab\n"
     msg += f"{cfg['score_label']} scores: {scores_str}\n"
     if dd_triggered:
         msg += f"⚠️ DD-stop triggered (DD {dd:.1%}) — all to {cfg['defensive']}\n"
@@ -2895,6 +2986,12 @@ def make_monthly_buys_mix8(api, force_execute=False, investment_calc=None,
     """Mix8 Top-2 monthly execution — see make_monthly_buys_rotator."""
     return make_monthly_buys_rotator(api, mix8_config, force_execute, investment_calc,
                                      margin_result, skip_order_wait, env)
+
+
+def _is_rebalance_run(investment_calc):
+    """True im jaehrlichen Rebalancing-Lauf des Orchestrators."""
+    annual = (investment_calc or {}).get("annual_rebalance")
+    return bool(annual) and "error" not in annual
 
 
 def _contribution_gate(investment_amount, investment_calc, margin_result):
@@ -3109,6 +3206,43 @@ def daily_trend_sleeves(api, env="live", force=False, skip_order_wait=False):
     return ("❌ " if failed else "") + " | ".join(str(r) for r in results)
 
 
+def _trend_rebalance_sell(api, cfg, dollars, skip_order_wait, env, pct_label):
+    """Jaehrliches Rebalancing, Trend-Sleeve ueber Ziel: gibt `dollars` anteilig aus
+    allen ihren Positionen ab - die Signalaufteilung der Sleeve bleibt, wie sie ist.
+    Nicht teilbare Ticker werden auf ganze Stuecke abgerundet; was dadurch fehlt,
+    kappt der Orchestrator bei den Kaeufen der anderen Sleeves."""
+    name = cfg["display_name"]
+    symbols = STRATEGY_SYMBOLS[cfg["strategy_key"]]
+    vd = get_rotator_position_value(api, cfg)
+    frac = min(1.0, dollars / vd["total_value"]) if vd["total_value"] > 0 else 0.0
+    trades, raised = [], 0.0
+    for s in symbols:
+        pos = vd["by_symbol"][s]
+        if pos["shares"] <= 0 or pos["value"] * frac < cfg["tolerance_amount"]:
+            continue
+        shares = _size_sell_order(s, pos["shares"] * frac)
+        if shares <= 0:
+            continue
+        order = submit_order(api, s, shares, "sell")
+        filled = None if skip_order_wait else wait_for_order_fill(api, order["id"])
+        proceeds = filled if filled else shares * pos["value"] / pos["shares"]
+        raised += proceeds
+        trades.append(f"Sold {shares:.4f} {s} (${proceeds:,.2f})")
+    state = load_balances(env).get(cfg["strategy_key"], {})
+    after = get_rotator_position_value(api, cfg)
+    save_balance(cfg["strategy_key"], {
+        "total_invested": float(state.get("total_invested", 0) or 0) - raised,
+        "current_positions": {s: after["by_symbol"][s]["shares"] for s in symbols},
+        "current_values": {s: after["by_symbol"][s]["value"] for s in symbols},
+        "last_trade_date": (datetime.datetime.now().strftime("%Y-%m-%d") if trades
+                            else state.get("last_trade_date")),
+    }, env, merge=True)
+    send_telegram_message(f"{cfg['emoji']} {name} ({pct_label:.2f}%) — 🔄 Rebalancing: gibt ${dollars:,.2f} ab\n\n"
+                          + "\n".join(trades or ["Keine Order noetig."])
+                          + f"\n\nCurrent value: ${after['total_value']:,.2f}")
+    return f"{name} rebalancing: sold ${raised:,.2f}"
+
+
 def make_monthly_buys_trend(api, cfg, force_execute=False, investment_calc=None,
                             margin_result=None, skip_order_wait=False, env="live"):
     """Monatszufuehrung einer Trend-Sleeve: der Beitrag geht nach dem aktuellen
@@ -3123,7 +3257,13 @@ def make_monthly_buys_trend(api, cfg, force_execute=False, investment_calc=None,
         investment_calc = calculate_monthly_investments(api, margin_result, env)
     amount = investment_calc["strategy_amounts"].get(cfg["alloc_key"], 0)
     pct_label = strategy_allocations.get(cfg["alloc_key"], 0) * 100
-    reason = _contribution_gate(amount, investment_calc, margin_result)
+    rebalancing = _is_rebalance_run(investment_calc)
+    if rebalancing and amount < 0:
+        return _trend_rebalance_sell(api, cfg, -amount, skip_order_wait, env, pct_label)
+    if rebalancing and amount < margin_control_config["min_investment"]:
+        send_telegram_message(f"{cfg['emoji']} {name} ({pct_label:.2f}%) — 🔄 Rebalancing: bereits im Ziel")
+        return f"{name}: rebalancing — already at target"
+    reason = None if rebalancing else _contribution_gate(amount, investment_calc, margin_result)
     if reason:
         send_telegram_message(f"{cfg['emoji']} {name} ({pct_label:.2f}%) — ${amount:,.2f}\n⏭ {reason}")
         return reason
@@ -3192,7 +3332,8 @@ def wait_for_order_fill(api, order_id, timeout=300, poll_interval=5):
     )
 
 
-def monthly_invest_all_strategies(api, force_execute=False, skip_order_wait=False, env="live"):
+def monthly_invest_all_strategies(api, force_execute=False, skip_order_wait=False, env="live",
+                                  annual_rebalance=None):
     """
     Orchestrator function that runs every active monthly investment strategy.
     Calculates budgets ONCE and distributes them to ensure exact percentage splits.
@@ -3238,7 +3379,12 @@ def monthly_invest_all_strategies(api, force_execute=False, skip_order_wait=Fals
     print("\nStep 2: Calculating budgets for all strategies...")
     
     margin_result = check_margin_conditions(api, env=env)
-    investment_calc = calculate_monthly_investments(api, margin_result, env)
+    if annual_rebalance is None:                 # None = nach Kalender, True/False = erzwingen
+        annual_month = rebalance_config.get("annual_rebalance_month")
+        annual_rebalance = annual_month is not None and datetime.datetime.now().month == annual_month
+    investment_calc = calculate_monthly_investments(api, margin_result, env, annual_rebalance=annual_rebalance)
+    annual = investment_calc.get("annual_rebalance")
+    rebalancing = _is_rebalance_run(investment_calc)
     
     # Get actual allocation percentages (may differ from targets if rebalancing is enabled)
     total_investing = investment_calc['total_investing']
@@ -3292,11 +3438,20 @@ def monthly_invest_all_strategies(api, force_execute=False, skip_order_wait=Fals
     
     # Per-strategy budget breakdown. Labels aus strategy_allocations abgeleitet,
     # damit sie bei der naechsten Gewichtsaenderung nicht wieder auseinanderlaufen.
-    account_msg += "Budget per strategy:\n"
-    _labels = {allo: label for allo, label in SLEEVES.values()}
-    for key, weight in strategy_allocations.items():
-        label = f"{_labels.get(key, key)} {weight * 100:.1f}%"
-        account_msg += f"  • {label}: ${strategy_amounts[key]:,.2f}\n"
+    if rebalancing:
+        account_msg += "🔄 Jährliches Rebalancing auf Zielallokation:\n"
+        for key, (allo, label) in SLEEVES.items():
+            row = annual["sleeves"][key]
+            account_msg += (f"  • {label}: {row['weight'] * 100:.1f} % → {row['target'] * 100:.2f} % "
+                            f"({row['amount']:+,.2f} $)\n")
+    else:
+        if annual:
+            account_msg += f"⚠️ Jährliches Rebalancing ausgesetzt: {annual['error']} — normaler Monatslauf\n\n"
+        account_msg += "Budget per strategy:\n"
+        _labels = {allo: label for allo, label in SLEEVES.values()}
+        for key, weight in strategy_allocations.items():
+            label = f"{_labels.get(key, key)} {weight * 100:.1f}%"
+            account_msg += f"  • {label}: ${strategy_amounts[key]:,.2f}\n"
     
     send_telegram_message(account_msg)
     
@@ -3320,10 +3475,33 @@ def monthly_invest_all_strategies(api, force_execute=False, skip_order_wait=Fals
         "mix8": make_monthly_buys_mix8,
         "spx_trend": make_monthly_buys_spx_trend,
     }
-    for _key, (_allo, _label) in SLEEVES.items():
-        _fn = _runners[_key]
-        _run(_key, _label, lambda _fn=_fn: _fn(api, force_execute=force_execute, investment_calc=investment_calc,
-                                              margin_result=margin_result, skip_order_wait=skip_order_wait, env=env))
+    def _run_sleeve(key, calc):
+        fn = _runners[key]
+        _run(key, SLEEVES[key][1], lambda: fn(api, force_execute=force_execute, investment_calc=calc,
+                                             margin_result=margin_result, skip_order_wait=skip_order_wait, env=env))
+
+    if rebalancing:
+        # Erst geben die uebergewichteten Sleeves ab, dann fuellen die anderen auf -
+        # hoechstens mit dem, was die Verkaeufe wirklich gebracht haben, plus dem
+        # regulaeren Budget. Scheitert ein Verkauf, schrumpfen die Kaeufe mit; das
+        # Konto wird nie ueberzogen.
+        sellers = [k for k, (allo, _) in SLEEVES.items() if strategy_amounts[allo] < 0]
+        for key in sellers:
+            _run_sleeve(key, investment_calc)
+        buy_calc = _rebalance_buy_budget(api, investment_calc, margin_result, sellers)
+        if buy_calc is None:
+            send_telegram_message("❗ Rebalancing: Kontostand nach den Verkaeufen nicht lesbar — keine Kaeufe. "
+                                  "Der Erloes bleibt Cash und geht mit dem naechsten Monatslauf raus.")
+        for key in SLEEVES:
+            if key in sellers:
+                continue
+            if buy_calc is None:
+                results[key] = "Skipped — Kontostand nach den Verkaeufen nicht lesbar"
+                continue
+            _run_sleeve(key, buy_calc)
+    else:
+        for key in SLEEVES:
+            _run_sleeve(key, investment_calc)
 
     print("\n=== All Monthly Strategies Complete ===")
 
@@ -3487,11 +3665,12 @@ def validate_force_environment(env, force_execute):
 
 
 def run_local(action, env="paper", request="test", force_execute=False,
-              investment_amount=None, alert_payload=None):
+              investment_amount=None, alert_payload=None, annual_rebalance=None):
     validate_force_environment(env, force_execute)
     api = set_alpaca_environment(env=env, use_secret_manager=False)
     if action == "monthly_invest_all":
-        return monthly_invest_all_strategies(api, force_execute=force_execute, skip_order_wait=True, env=env)
+        return monthly_invest_all_strategies(api, force_execute=force_execute, skip_order_wait=True, env=env,
+                                             annual_rebalance=annual_rebalance)
     elif action == "index_alert":
         if not alert_payload:
             return ("index_alert braucht mindestens --index_symbol. Beispiel: "
@@ -3573,6 +3752,8 @@ if __name__ == "__main__":
     parser.add_argument("--public_chat_secret", default=None,
                         help="index_alert: Secret-Name eines zweiten Telegram-Kanals, "
                              "in den nur echte Crossings gehen")
+    parser.add_argument("--annual_rebalance", action="store_true",
+                        help="monthly_invest_all: jaehrliches Rebalancing erzwingen (Test; sonst nur im Januar)")
     parser.add_argument("--currency_symbol", default=None,
                         help="Default: Euro-Zeichen bei --source eodhd, sonst $")
     args = parser.parse_args()
@@ -3596,5 +3777,6 @@ if __name__ == "__main__":
     # Run the function locally
     result = run_local(action=args.action, env=args.env, force_execute=args.force,
                        investment_amount=args.investment_amount,
-                       alert_payload=alert_payload)
+                       alert_payload=alert_payload,
+                       annual_rebalance=True if args.annual_rebalance else None)
     print(f"\nResult: {result}\n")
