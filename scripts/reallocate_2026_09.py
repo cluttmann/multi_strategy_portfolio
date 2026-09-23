@@ -26,7 +26,9 @@ import main as bot
 from scripts.retire_f4_live import capture_snapshot, get_market_clock, strict_wait_for_fill, write_audit
 
 CONFIRMATION_TOKEN = "REALLOCATE_2026_09_LIVE"
-CASH_BUFFER = 0.005      # 0,5 % der Equity bleiben Cash: Kurse bewegen sich zwischen Plan und Fill
+CASH_BUFFER = 0.0        # Carl will 100 % auf Zielallokation. Kursbewegungen zwischen Plan und
+                         # Fill ergeben ein paar Dollar Rest oder Mini-Saldo; die Margin bleibt
+                         # erlaubt, und der Orchestrator investiert Reste am 1. des Monats.
 TOLERANCE = 5.0          # USD; kleinere Differenzen werden nicht gehandelt
 RETIRED_DOCS = {"dual_momentum": ("SPUU", "QLD", "EFO", "BND")}
 
