@@ -132,7 +132,7 @@ def fetch_window(api, after_date, until_date):
     """Fetch every activity type we reconcile, filtered to <= until_date."""
     after_iso = (after_date - timedelta(days=1)).isoformat()
     out = defaultdict(list)
-    for atype in ("FILL", "DIV", "CGD", "CSD", "INT"):
+    for atype in ("FILL", "DIV", "CGD", "CSD", "INT", "INTNRA", "JNLC"):
         for act in fetch_activities(api, atype, after_iso):
             raw = act._raw
             if act_date(raw) <= until_date:
@@ -241,11 +241,13 @@ def main():
     dep_pq, dep_al = sum(d["amount"] for d in deposits), al_sum(acts["CSD"])
     div_pq = sum(d["amount"] for d in divs)
     div_al = al_sum(acts["DIV"]) + al_sum(acts["CGD"])   # gross; Parqet records gross
-    int_pq, int_al = sum(i["amount"] for i in interest), al_sum(acts["INT"])
+    int_pq = sum(i["amount"] for i in interest)
+    interest_acts = acts["INT"] + acts["INTNRA"] + acts["JNLC"]
+    int_al = al_sum(interest_acts)
     for label, pq, al_, n_pq, n_al in [
         ("Deposits ", dep_pq, dep_al, len(deposits), len(acts["CSD"])),
         ("Dividends", div_pq, div_al, len(divs), len(acts["DIV"]) + len(acts["CGD"])),
-        ("Interest ", int_pq, int_al, len(interest), len(acts["INT"])),
+        ("Interest ", int_pq, int_al, len(interest), len(interest_acts)),
     ]:
         diff = pq - al_
         mark = "✓" if abs(diff) < 1.0 else "✗"

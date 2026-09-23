@@ -45,6 +45,7 @@ import argparse
 import os
 import sys
 import time
+from collections import Counter
 from datetime import datetime, timedelta
 
 import alpaca_trade_api as tradeapi
@@ -103,6 +104,7 @@ SYMBOL_TO_ISIN = {
     "EFO":  "US74347X5005",
     "EET":  "US74347X3026",
     "AGG":  "US4642872265",
+    "EEM":  "US4642872349",
     "SSO":  "US74347R1077",
     "ZROZ": "US72201R8824",
     "GLD":  "US78463V1070",
@@ -526,6 +528,30 @@ def _max_date_in_col_a(ws):
     return max(dates) if dates else None
 
 
+def _unseen_cash_rows(rows, master_rows, import_rows):
+    """Preserve distinct Alpaca activities that share a cash fingerprint.
+
+    The two sheet tabs overlap: each delta is also appended to the master log.
+    Use the larger count per fingerprint, not their sum, as the already logged
+    population. Alpaca can post separate JNLC credits with identical dates and
+    amounts, so a set would silently drop the later activity.
+    """
+    def fp(row):
+        return (row[0].strip(), _norm_amount(row[1]), row[4].strip())
+
+    master_counts = Counter(fp(r) for r in master_rows if len(r) >= 5 and any(c.strip() for c in r))
+    import_counts = Counter(fp(r) for r in import_rows if len(r) >= 5 and any(c.strip() for c in r))
+    logged_counts = master_counts | import_counts
+    seen_counts = Counter()
+    unseen = []
+    for row in rows:
+        key = fp(row)
+        seen_counts[key] += 1
+        if seen_counts[key] > logged_counts[key]:
+            unseen.append(row)
+    return unseen
+
+
 def sync_cash(api, gc, since_override):
     ss = gc.open_by_key(GOOGLE_SHEET_KEY)
     ws_import = ss.worksheet(CASH_TAB)
@@ -541,23 +567,10 @@ def sync_cash(api, gc, since_override):
             ws_master.append_rows(existing_rows, value_input_option="USER_ENTERED")
             time.sleep(0.5)
 
-    # Cash activities carry no stable ID, so dedup is by fingerprint. Deliberately
-    # key on (date, amount, type) only — NOT the whole row. `fee` is a derived
-    # attribute, so including it means any change to how fees are computed makes
-    # already-uploaded rows look new and re-emits them as Parqet duplicates. That
-    # bit us when per-trade fees stopped being folded into transfer rows (a 6,99 ->
-    # 6,98 change on one deposit was enough).
-    def _fp(row):
-        return (row[0].strip(), _norm_amount(row[1]), row[4].strip())
-
-    existing_fingerprints = {
-        _fp(r) for r in ws_master.get_all_values()[1:]
-        if len(r) >= 5 and any(c.strip() for c in r)
-    }
-    existing_fingerprints |= {
-        _fp(r) for r in ws_import.get_all_values()[1:]
-        if len(r) >= 5 and any(c.strip() for c in r)
-    }
+    # Cash has no ID in the sheet; compare the count of each date/amount/type
+    # fingerprint. A set would erase distinct same-day credits of equal amount.
+    master_rows = ws_master.get_all_values()[1:]
+    import_rows = ws_import.get_all_values()[1:]
 
     if since_override:
         since_date = since_override
@@ -637,7 +650,7 @@ def sync_cash(api, gc, since_override):
         ])
 
     before = len(rows)
-    rows = [r for r in rows if _fp(r) not in existing_fingerprints]
+    rows = _unseen_cash_rows(rows, master_rows, import_rows)
     skipped_dup = before - len(rows)
 
     # Newest-first to match the equity tab convention.
