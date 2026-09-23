@@ -100,3 +100,50 @@ def test_defensive_etf_is_trimmed_to_the_residual_not_closed_and_rebought():
     assert R.TOLERANCE < residual < 150.33
     kept = 150.33 - shv_sells[0]["est"]
     assert kept == pytest.approx(residual, abs=prices["SHV"] * 1e-6 + 0.01)
+
+
+def test_approved_margin_scales_every_sleeve_budget():
+    sleeves = {k: dict(v) for k, v in SLEEVES.items()}
+    investable, targets = R.build_targets(EQUITY, sleeves, margin=1330.74)
+    assert investable == pytest.approx(EQUITY * (1 - R.CASH_BUFFER) + 1330.74)
+    for key, (allo, _) in main.SLEEVES.items():
+        assert sleeves[key]["budget"] == pytest.approx(investable * main.strategy_allocations[allo])
+
+
+def test_closed_margin_gate_means_no_margin(monkeypatch):
+    monkeypatch.setattr(main, "check_margin_conditions",
+                        lambda api, env="live": {"allowed": False, "errors": [], "target_margin": 0})
+    margin, _ = R.approved_margin({}, "paper")
+    assert margin == 0.0
+
+
+def test_margin_data_error_means_no_margin(monkeypatch):
+    monkeypatch.setattr(main, "check_margin_conditions",
+                        lambda api, env="live": {"allowed": True, "errors": ["FRED timeout"], "target_margin": 0.1})
+    margin, _ = R.approved_margin({}, "paper")
+    assert margin == 0.0
+
+
+def test_second_run_keeps_the_retirement_audit_trail(monkeypatch, tmp_path):
+    """Die Margin-Aufstockung laeuft als zweiter execute(). Sie darf die bereits
+    geschriebene Stilllegung von dual_momentum nicht mit leeren Orders ueberschreiben."""
+    writes = []
+
+    class Doc:
+        def __init__(self, key): self.key = key
+        def get(self): return type("S", (), {"to_dict": lambda _: {"retired": True, "retirement_orders": ["alt"]}})()
+        def set(self, data, merge=False): writes.append((self.key, data))
+
+    class Col:
+        def document(self, key): return Doc(key)
+
+    monkeypatch.setattr(main, "get_firestore_client", lambda: type("C", (), {"collection": lambda _, n: Col()})())
+    monkeypatch.setattr(R, "get_market_clock", lambda api: {"is_open": True})
+    monkeypatch.setattr(R, "build_dry_run", lambda api, env, use_margin=False: {
+        "pending_orders": [], "sells": [], "buys": [], "sleeves": {}, "margin": 100.0})
+    snap = {"positions": [], "account": {"equity": "1000", "cash": "-100"}}
+    monkeypatch.setattr(R, "capture_snapshot", lambda api: snap)
+    monkeypatch.setattr(R, "_write_sleeve_state", lambda *a: None)
+    monkeypatch.setattr(main, "recalculate_all_strategies_cost_basis", lambda *a, **k: None)
+    R.execute({}, env="paper", audit_path=tmp_path / "a.json", use_margin=True)
+    assert writes == []

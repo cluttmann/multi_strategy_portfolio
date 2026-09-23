@@ -47,10 +47,10 @@ def sleeve_weights(api):
     return out
 
 
-def build_targets(equity, sleeves):
-    """Ziel-USD je Ticker: Budget der Sleeve x Gewicht. Jede Sleeve bekommt
-    zusaetzlich die Liste ihrer Ticker, damit Rundungsreste zugeordnet werden."""
-    investable = equity * (1 - CASH_BUFFER)
+def build_targets(equity, sleeves, margin=0.0):
+    """Ziel-USD je Ticker: Budget der Sleeve x Gewicht. `margin` ist der vom
+    Margin-Gate freigegebene Betrag (0, wenn die Gates zu sind)."""
+    investable = equity * (1 - CASH_BUFFER) + margin
     targets = {}
     for key, (allo, _) in bot.SLEEVES.items():
         budget = investable * bot.strategy_allocations[allo]
@@ -114,15 +114,28 @@ def _prices(api, symbols):
     return {s: float(bot.get_latest_trade(api, s)) for s in symbols}
 
 
-def build_dry_run(api, env="live"):
+def approved_margin(api, env):
+    """Margin nach genau der Regel des Orchestrators: check_margin_conditions +
+    calculate_monthly_investments. Bei geschlossenem Gate oder Datenfehler 0 -
+    konservativ, wie ueberall im Bot."""
+    margin_result = bot.check_margin_conditions(api, env=env)
+    if not margin_result.get("allowed") or margin_result.get("errors"):
+        return 0.0, margin_result
+    calc = bot.calculate_monthly_investments(api, margin_result, env)
+    return float(calc["margin_approved"]), margin_result
+
+
+def build_dry_run(api, env="live", use_margin=False):
     snapshot = capture_snapshot(api)
     equity = float(snapshot["account"]["equity"])
     sleeves = sleeve_weights(api)
-    investable, targets = build_targets(equity, sleeves)
+    margin, margin_result = approved_margin(api, env) if use_margin else (0.0, None)
+    investable, targets = build_targets(equity, sleeves, margin)
     symbols = sorted({p["symbol"] for p in snapshot["positions"]} | set(targets))
     prices = _prices(api, symbols)
     sells, buys, skipped = plan_orders(snapshot["positions"], targets, prices)
     return {"env": env, "market_is_open": bool(get_market_clock(api).get("is_open")),
+            "margin": margin, "margin_gates": (margin_result or {}).get("gate_results"),
             "pending_orders": snapshot["pending_orders"], "equity": equity, "investable": investable,
             "cash": float(snapshot["account"]["cash"]), "sleeves": sleeves, "targets": targets,
             "prices": prices, "sells": sells, "buys": buys, "skipped": skipped}
@@ -162,12 +175,12 @@ def _write_sleeve_state(env, sleeves, post_positions):
         doc.set(record, merge=True)
 
 
-def execute(api, env="live", confirmation=None, audit_path=None):
+def execute(api, env="live", confirmation=None, audit_path=None, use_margin=False):
     if env == "live" and confirmation != CONFIRMATION_TOKEN:
         raise ValueError(f"Live-Ausfuehrung braucht --confirm {CONFIRMATION_TOKEN}")
     if not get_market_clock(api).get("is_open"):
         raise RuntimeError("Markt geschlossen - nichts gesendet")
-    dry = build_dry_run(api, env)
+    dry = build_dry_run(api, env, use_margin=use_margin)
     if dry["pending_orders"]:
         raise RuntimeError(f"Offene Orders vorhanden: {dry['pending_orders']}")
     audit_path = Path(audit_path or f"output/reallocate_{datetime.datetime.now():%Y%m%d_%H%M%S}.json")
@@ -191,6 +204,10 @@ def execute(api, env="live", confirmation=None, audit_path=None):
     _write_sleeve_state(env, dry["sleeves"], post["positions"])
     db = bot.get_firestore_client().collection(f"strategy-balances-{env}")
     for doc_key, syms in RETIRED_DOCS.items():
+        # Zweiter Lauf (z. B. Margin-Aufstockung): die Stilllegung steht schon,
+        # ein erneutes set() wuerde retirement_orders mit [] ueberschreiben.
+        if (db.document(doc_key).get().to_dict() or {}).get("retired"):
+            continue
         db.document(doc_key).set({"retired": True, "retired_at": datetime.datetime.utcnow().isoformat(),
                                   "retirement_orders": [f for f in audit["sell_fills"] if f["symbol"] in syms],
                                   "retirement_note": "2026-09-23: durch Mix8 ersetzt; QLD/EFO gehen an Mix8"},
@@ -200,7 +217,8 @@ def execute(api, env="live", confirmation=None, audit_path=None):
     by_sleeve = {label: sum(float(p["market_value"]) for p in post["positions"] if p["symbol"] in bot.STRATEGY_SYMBOLS[k])
                  for k, (_, label) in bot.SLEEVES.items()}
     eq = float(post["account"]["equity"])
-    msg = "🔁 Umschichtung ausgefuehrt\n\n" + "\n".join(
+    head = f"💳 Margin-Aufstockung ausgefuehrt (+${dry['margin']:,.2f})" if dry.get("margin") else "🔁 Umschichtung ausgefuehrt"
+    msg = head + "\n\n" + "\n".join(
         f"{label}: ${v:,.2f} ({v / eq * 100:.1f} %)" for label, v in by_sleeve.items())
     msg += f"\n\n{len(audit['sell_fills'])} Verkaeufe, {len(audit['buy_fills'])} Kaeufe\nCash: ${float(post['account']['cash']):,.2f}"
     bot.send_telegram_message(msg)
@@ -215,10 +233,13 @@ def main():
     mode.add_argument("--execute", action="store_true")
     parser.add_argument("--confirm")
     parser.add_argument("--audit-path")
+    parser.add_argument("--use-margin", action="store_true",
+                        help="zusaetzlich die vom Margin-Gate freigegebene Margin investieren")
     args = parser.parse_args()
     api = bot.set_alpaca_environment(args.env, use_secret_manager=False)
-    result = build_dry_run(api, args.env) if args.dry_run else \
-        execute(api, args.env, confirmation=args.confirm, audit_path=args.audit_path)
+    result = build_dry_run(api, args.env, use_margin=args.use_margin) if args.dry_run else \
+        execute(api, args.env, confirmation=args.confirm, audit_path=args.audit_path,
+                use_margin=args.use_margin)
     print(json.dumps(result, indent=2, sort_keys=True, default=str))
 
 
