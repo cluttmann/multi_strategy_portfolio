@@ -1,4 +1,5 @@
-"""Einmalige Umschichtung auf AAA 25 / World-Trend 25 / Mix8 50 (2026-09-23).
+"""Einmalige Umschichtung auf AAA 21,25 / World-Trend 21,25 / Mix8 42,5 /
+S&P-Trend 15 (2026-09-23).
 
 Jede Sleeve bestimmt ihre Zielzusammensetzung mit genau der Logik, die sie
 danach live fuehrt (plan_rotator_weights, world_trend_signals). Ihr Budget ist
@@ -38,9 +39,9 @@ def sleeve_weights(api):
         w = {s: plan["weights"].get(s, 0.0) for s in bot.STRATEGY_SYMBOLS[key]}
         w[cfg["defensive"]] = plan["cash_weight"]
         out[key] = {"weights": w, "plan": plan}
-    wt = bot.world_trend_config
-    signals = bot.world_trend_signals(wt)
-    out["world_trend"] = {"weights": bot.world_trend_target_weights(wt, signals), "signals": signals}
+    for cfg in bot.TREND_SLEEVES:
+        signals = bot.trend_signals(cfg)
+        out[cfg["strategy_key"]] = {"weights": bot.world_trend_target_weights(cfg, signals), "signals": signals}
     return out
 
 
@@ -68,8 +69,8 @@ def plan_orders(positions, targets, prices):
     Rundungsreste wie bei SSO am 21.09.)."""
     current = {p["symbol"]: float(p["market_value"]) for p in positions}
     shares = {p["symbol"]: float(p["qty"]) for p in positions}
-    defensive = {key: cfg["defensive"] for key, cfg in
-                 (("aaa", bot.aaa_config), ("mix8", bot.mix8_config), ("world_trend", bot.world_trend_config))}
+    defensive = {cfg["strategy_key"]: cfg["defensive"]
+                 for cfg in [bot.aaa_config, bot.mix8_config] + bot.TREND_SLEEVES}
     owner = {s: k for k, syms in bot.STRATEGY_SYMBOLS.items() for s in syms}
     universe = sorted(set(current) | set(targets))
     effective = {s: targets.get(s, 0.0) for s in universe}
@@ -148,7 +149,7 @@ def _write_sleeve_state(env, sleeves, post_positions):
             "reallocated_at": now.isoformat(),
             "last_trade_date": now.strftime("%Y-%m-%d"),
         }
-        if key == "world_trend":
+        if "signals" in sleeves[key]:
             sig = sleeves[key]["signals"]
             record["leg_states"] = {p: bool(sig[p]["on"]) for p in sig}
         else:
@@ -197,7 +198,7 @@ def execute(api, env="live", confirmation=None, audit_path=None):
     by_sleeve = {label: sum(float(p["market_value"]) for p in post["positions"] if p["symbol"] in bot.STRATEGY_SYMBOLS[k])
                  for k, (_, label) in bot.SLEEVES.items()}
     eq = float(post["account"]["equity"])
-    msg = "🔁 Umschichtung 25/25/50 ausgefuehrt\n\n" + "\n".join(
+    msg = "🔁 Umschichtung ausgefuehrt\n\n" + "\n".join(
         f"{label}: ${v:,.2f} ({v / eq * 100:.1f} %)" for label, v in by_sleeve.items())
     msg += f"\n\n{len(audit['sell_fills'])} Verkaeufe, {len(audit['buy_fills'])} Kaeufe\nCash: ${float(post['account']['cash']):,.2f}"
     bot.send_telegram_message(msg)

@@ -16,23 +16,24 @@ app = Flask(__name__)
 # Strategy allocation percentages for dynamic monthly investment calculation
 # Investment amounts are calculated dynamically each month based on available cash and margin
 strategy_allocations = {
-    # Set 2026-09-22 for the one-time reallocation on 2026-09-23. Chosen from a
-    # 66-mix grid (5 % steps, max 50 % per sleeve) on BOTH windows 1994-2026 and
-    # 2000-2026, after German tax, with each rotator backtested on the exact
-    # sizing logic of make_monthly_buys_rotator: 25/25/50 is the only mix in the
-    # top three under both the live sizing and the research sizing. Live-faithful:
-    # 15.3 % / 14.6 % CAGR pre-tax, Sharpe 0.63 / 0.62, worst max DD -23.8 %.
-    # The top of that grid is flat (±0.01 Sharpe); the 50 % cap on Mix8 binds.
+    # Set 2026-09-23. Base AAA/World-Trend/Mix8 = 1:1:2 from a 66-mix grid on
+    # 1994-2026 and 2000-2026 after German tax, each rotator on the exact live
+    # sizing logic (25/25/50: 15.3 / 14.6 % CAGR pre-tax, Sharpe 0.63 / 0.62,
+    # worst max DD -23.8 %). Then 15 % S&P-Trend 3x on top, pro rata from the
+    # three, so the portfolio keeps up in long bull runs: 15.8 / 14.8 % CAGR,
+    # Sharpe 0.62 / 0.62, max DD -25.1 %, behind the MSCI World in 12 % of
+    # 5-year windows instead of 23 %.
     #
-    # Retired: Dual Momentum 2026-09-23 (Mix8 beat it on every metric in both
-    # windows and needs its QLD/EFO), HFEA + SPXL SMA 2026-09-22, Regime SSO +
-    # 9-Sig 2026-09-21.
+    # Retired: Dual Momentum 2026-09-23, HFEA + SPXL SMA 2026-09-22 (SPXL SMA
+    # returns as S&P-Trend under a different objective), Regime SSO + 9-Sig
+    # 2026-09-21.
     #
     # These govern the MONTHLY CONTRIBUTION SPLIT; calculate_monthly_investments()
     # invests ALL account cash on each monthly run.
-    "aaa_allo":         0.25,   # 7-Asset Rotator
-    "world_trend_allo": 0.25,   # World-Trend (WLDU / UGLD, 150-day SMA)
-    "mix8_allo":        0.50,   # Mix8 Top-2
+    "aaa_allo":         0.2125,   # 7-Asset Rotator
+    "world_trend_allo": 0.2125,   # World-Trend (WLDU / UGLD, 150-day SMA)
+    "mix8_allo":        0.425,    # Mix8 Top-2
+    "spx_trend_allo":   0.15,     # S&P-Trend 3x (SPXL / BIL, 200-day SMA)
 }
 
 
@@ -41,12 +42,14 @@ strategy_allocations = {
 # - 7-Asset Rotator (AAA family): NTSD, SAA, EET, UBT, UST, UGL, DBC (top-3 selected monthly), SHV (defensive)
 # - World-Trend: WLDU, UGLD, USFR (defensive)
 # - Mix8 Top-2: SSO, QLD, EFO, EEM, GLD, IEF, TLT, KMLM (top-2 monthly), SGOV (defensive)
+# - S&P-Trend 3x: SPXL, BIL (defensive)
 
 # Strategy ticker ownership mapping for cost basis recalculation
 STRATEGY_SYMBOLS = {
     "aaa": ["NTSD", "SAA", "EET", "UBT", "UST", "UGL", "DBC", "SHV"],
     "world_trend": ["WLDU", "UGLD", "USFR"],
     "mix8": ["SSO", "QLD", "EFO", "EEM", "GLD", "IEF", "TLT", "KMLM", "SGOV"],
+    "spx_trend": ["SPXL", "BIL"],
 }
 
 # Sleeve-Register: Firestore-Schluessel -> (Gewichts-Schluessel, Anzeigename).
@@ -57,6 +60,7 @@ SLEEVES = {
     "aaa":         ("aaa_allo", "7-Asset Rotator"),
     "world_trend": ("world_trend_allo", "World-Trend"),
     "mix8":        ("mix8_allo", "Mix8 Top-2"),
+    "spx_trend":   ("spx_trend_allo", "S&P-Trend 3x"),
 }
 
 alpaca_environment = "live"
@@ -142,6 +146,7 @@ world_trend_config = {
     "strategy_key": "world_trend",
     "alloc_key": "world_trend_allo",
     "display_name": "World-Trend",
+    "emoji": "🌍",
     "legs": [
         ("URTH.US", "WLDU"),               # 2x MSCI World
         ("GLD.US", "UGLD"),                # 2x gold (UGL belongs to AAA)
@@ -156,6 +161,32 @@ world_trend_config = {
     "tolerance_amount": 5.0,
 }
 
+# S&P-Trend 3x — live since 2026-09-23, added so the portfolio keeps up in long
+# equity bull runs. SPXL while SPY (EODHD, total return) sits above its 200-day
+# SMA with a 1 % band, else BIL; one day beyond the band switches. It is the
+# SPXL SMA sleeve retired on 2026-09-22 under a max-Sharpe objective (neutral,
+# -0.002) and brought back under Carl's objective of not lagging the MSCI World:
+# at 15 % it cuts the share of 5-year windows behind the MSCI World from 23 % to
+# 12 % (1994-2026), lifts 2009-21 from 10.4 % to 12.4 %/yr (World 12.3 %),
+# raises CAGR by 0.6 pp and leaves Sharpe unchanged. Cost: 2022 -18 % vs -14 %.
+spx_trend_config = {
+    "strategy_key": "spx_trend",
+    "alloc_key": "spx_trend_allo",
+    "display_name": "S&P-Trend 3x",
+    "emoji": "📈",
+    "legs": [
+        ("SPY.US", "SPXL"),
+    ],
+    "defensive": "BIL",
+    "sma_period": 200,
+    "band": 0.01,
+    "confirm_days": 1,
+    "max_live_jump": 0.20,
+    "max_quote_age_minutes": 120,
+    "tolerance_amount": 5.0,
+}
+
+TREND_SLEEVES = [world_trend_config, spx_trend_config]
 
 # Margin control configuration for automated leverage management
 # Enables up to +10% leverage only when market conditions are favorable
@@ -2889,8 +2920,8 @@ def _contribution_gate(investment_amount, investment_calc, margin_result):
 
 
 def _wt_leg_state(closes, sma_period, band, confirm):
-    """Trendzustand eines World-Trend-Beins. Dieselbe Zustandsmaschine wie der
-    Backtest: ueber dem Band zaehlt `up`, darunter `dn`, im Band werden beide
+    """Trendzustand eines Beins. Dieselbe Zustandsmaschine wie der Backtest:
+    ueber dem Band zaehlt `up`, darunter `dn`, im Band werden beide
     zurueckgesetzt; `confirm` Tage in Folge schalten um. Sie laeuft ueber die
     ganze geladene Historie, damit der Zustand auch ohne gespeicherten Vortag
     stimmt - ein verpasster Lauf verfaelscht nichts."""
@@ -2939,9 +2970,9 @@ def _wt_signal_closes(index_symbol, cfg, today_iso):
                                              "live_ts": ts.isoformat() + "Z"}
 
 
-def world_trend_signals(cfg=None, today_iso=None):
-    """Zustand je Bein, keyed by Produkt-Ticker. Raises EodhdDataError."""
-    cfg = cfg or world_trend_config
+def trend_signals(cfg, today_iso=None):
+    """Zustand je Bein einer Trend-Sleeve, keyed by Produkt-Ticker.
+    Raises EodhdDataError."""
     today_iso = today_iso or _heute_iso()
     out = {}
     for index_symbol, product in cfg["legs"]:
@@ -2977,8 +3008,8 @@ def _wt_buy(api, cfg, symbol, dollars, price, skip_order_wait, trades):
 
 def _wt_trade_to_targets(api, cfg, target_w, skip_order_wait=False):
     """Stellt die Sleeve auf `target_w` ihres EIGENEN Werts um. Verkauft zuerst;
-    Kaeufe sind auf die eigenen Verkaufserloese begrenzt. World-Trend greift
-    nie auf Konto-Cash zu - der Fehler des alten SPXL-Tagesjobs, der ein
+    Kaeufe sind auf die eigenen Verkaufserloese begrenzt. Eine Trend-Sleeve
+    greift nie auf Konto-Cash zu - der Fehler des alten SPXL-Tagesjobs, der ein
     SGOV-Polster automatisch zurueck in SPXL tauschte."""
     symbols = STRATEGY_SYMBOLS[cfg["strategy_key"]]
     vd = get_rotator_position_value(api, cfg)
@@ -3019,16 +3050,16 @@ def _wt_signal_summary(cfg, signals):
     return "\n".join(lines)
 
 
-def daily_world_trend(api, env="live", force=False, skip_order_wait=False):
-    """Taeglicher Check. Handelt nur, wenn ein Bein umschaltet oder der Bestand
-    nicht zum Signal passt - nicht auf Drift, genau wie der Backtest."""
-    cfg = world_trend_config
+def daily_trend_sleeve(api, cfg, env="live", force=False, skip_order_wait=False):
+    """Taeglicher Check einer Trend-Sleeve. Handelt nur, wenn ein Bein
+    umschaltet oder der Bestand nicht zum Signal passt - nicht auf Drift,
+    genau wie der Backtest."""
     name = cfg["display_name"]
     if not force and not check_trading_day(mode="daily"):
         print(f"{name}: market closed today")
         return "Market closed today."
     try:
-        signals = world_trend_signals(cfg)
+        signals = trend_signals(cfg)
     except EodhdDataError as e:
         send_telegram_message(f"❗ {name}: {e} — kein Signal, keine Trades.")
         return f"❌ {name}: {e}"
@@ -3053,18 +3084,36 @@ def daily_world_trend(api, env="live", force=False, skip_order_wait=False):
         "last_signal_check_date": datetime.datetime.now().strftime("%Y-%m-%d"),
     }, env, merge=True)
     if trades:
-        msg = f"🌍 {name} — {reason}\n\n{_wt_signal_summary(cfg, signals)}\n\n" + "\n".join(trades)
+        msg = f"{cfg['emoji']} {name} — {reason}\n\n{_wt_signal_summary(cfg, signals)}\n\n" + "\n".join(trades)
         send_telegram_message(msg)
         return f"{name}: {reason}, {len(trades)} trades"
     legs_str = ", ".join(p + (" on" if v else " off") for p, v in states.items())
     return f"{name}: no change ({legs_str})"
 
 
-def make_monthly_buys_world_trend(api, force_execute=False, investment_calc=None,
-                                  margin_result=None, skip_order_wait=False, env="live"):
-    """Monatszufuehrung: der Beitrag geht nach dem aktuellen Signal auf die Beine,
-    ohne den Bestand umzuschichten (das tut nur der Tagesjob bei Signalwechsel)."""
-    cfg = world_trend_config
+def daily_world_trend(api, env="live", force=False, skip_order_wait=False):
+    return daily_trend_sleeve(api, world_trend_config, env, force, skip_order_wait)
+
+
+def daily_trend_sleeves(api, env="live", force=False, skip_order_wait=False):
+    """Alle Trend-Sleeves nacheinander. Ein Datenfehler in einer blockiert die
+    andere nicht; das Gesamtergebnis ist ❌, sobald eine gescheitert ist."""
+    results = []
+    for cfg in TREND_SLEEVES:
+        try:
+            results.append(daily_trend_sleeve(api, cfg, env, force, skip_order_wait))
+        except Exception as e:
+            send_telegram_message(f"❗ {cfg['display_name']}: {e}")
+            results.append(f"❌ {cfg['display_name']}: {e}")
+    failed = [r for r in results if str(r).startswith("❌")]
+    return ("❌ " if failed else "") + " | ".join(str(r) for r in results)
+
+
+def make_monthly_buys_trend(api, cfg, force_execute=False, investment_calc=None,
+                            margin_result=None, skip_order_wait=False, env="live"):
+    """Monatszufuehrung einer Trend-Sleeve: der Beitrag geht nach dem aktuellen
+    Signal auf die Beine, ohne den Bestand umzuschichten (das tut nur der
+    Tagesjob bei Signalwechsel)."""
     name = cfg["display_name"]
     if not force_execute and not check_trading_day(mode="monthly"):
         return "Not first trading day of the month"
@@ -3076,10 +3125,10 @@ def make_monthly_buys_world_trend(api, force_execute=False, investment_calc=None
     pct_label = strategy_allocations.get(cfg["alloc_key"], 0) * 100
     reason = _contribution_gate(amount, investment_calc, margin_result)
     if reason:
-        send_telegram_message(f"🌍 {name} ({pct_label:.2f}%) — ${amount:,.2f}\n⏭ {reason}")
+        send_telegram_message(f"{cfg['emoji']} {name} ({pct_label:.2f}%) — ${amount:,.2f}\n⏭ {reason}")
         return reason
     try:
-        signals = world_trend_signals(cfg)
+        signals = trend_signals(cfg)
     except EodhdDataError as e:
         send_telegram_message(f"❗ {name}: {e} — Beitrag nicht investiert.")
         return f"❌ {name}: {e}"
@@ -3103,10 +3152,22 @@ def make_monthly_buys_world_trend(api, force_execute=False, investment_calc=None
         "current_values": {s: vd["by_symbol"][s]["value"] for s in symbols},
         "last_trade_date": datetime.datetime.now().strftime("%Y-%m-%d"),
     }, env, merge=True)
-    msg = (f"🌍 {name} ({pct_label:.2f}%) — ${amount:,.2f}\n\n{_wt_signal_summary(cfg, signals)}\n\n"
+    msg = (f"{cfg['emoji']} {name} ({pct_label:.2f}%) — ${amount:,.2f}\n\n{_wt_signal_summary(cfg, signals)}\n\n"
            + "\n".join(trades or ["No trades."]) + f"\n\nCurrent value: ${vd['total_value']:,.2f}")
     send_telegram_message(msg)
     return f"{name} monthly complete. Value ${vd['total_value']:,.2f}"
+
+
+def make_monthly_buys_world_trend(api, force_execute=False, investment_calc=None,
+                                  margin_result=None, skip_order_wait=False, env="live"):
+    return make_monthly_buys_trend(api, world_trend_config, force_execute, investment_calc,
+                                   margin_result, skip_order_wait, env)
+
+
+def make_monthly_buys_spx_trend(api, force_execute=False, investment_calc=None,
+                                margin_result=None, skip_order_wait=False, env="live"):
+    return make_monthly_buys_trend(api, spx_trend_config, force_execute, investment_calc,
+                                   margin_result, skip_order_wait, env)
 
 
 # Helper function to wait for an order to be filled
@@ -3257,6 +3318,7 @@ def monthly_invest_all_strategies(api, force_execute=False, skip_order_wait=Fals
         "aaa": make_monthly_buys_aaa,
         "world_trend": make_monthly_buys_world_trend,
         "mix8": make_monthly_buys_mix8,
+        "spx_trend": make_monthly_buys_spx_trend,
     }
     for _key, (_allo, _label) in SLEEVES.items():
         _fn = _runners[_key]
@@ -3304,11 +3366,11 @@ def monthly_buy_mix8(request):
     return make_monthly_buys_mix8(api, env=alpaca_environment)
 
 
-@app.route("/daily_world_trend", methods=["POST"])
-def daily_world_trend_route(request):
-    """Taeglicher World-Trend-Check (Scheduler 15:50 ET). Datenfehler => 500."""
+@app.route("/daily_trend_sleeves", methods=["POST"])
+def daily_trend_sleeves_route(request):
+    """Taeglicher Check aller Trend-Sleeves (Scheduler 15:50 ET). Datenfehler => 500."""
     api = set_alpaca_environment(env=alpaca_environment)
-    result = daily_world_trend(api, env=alpaca_environment)
+    result = daily_trend_sleeves(api, env=alpaca_environment)
     return result, (500 if str(result).startswith("❌") else 200)
 
 @app.route("/monthly_buy_aaa", methods=["POST"])
@@ -3445,8 +3507,10 @@ def run_local(action, env="paper", request="test", force_execute=False,
         return make_monthly_buys_mix8(api, force_execute=force_execute, skip_order_wait=True, env=env)
     elif action == "monthly_buy_world_trend":
         return make_monthly_buys_world_trend(api, force_execute=force_execute, skip_order_wait=True, env=env)
-    elif action == "daily_world_trend":
-        return daily_world_trend(api, env=env, force=force_execute)
+    elif action == "monthly_buy_spx_trend":
+        return make_monthly_buys_spx_trend(api, force_execute=force_execute, skip_order_wait=True, env=env)
+    elif action == "daily_trend_sleeves":
+        return daily_trend_sleeves(api, env=env, force=force_execute)
     elif action == "monthly_buy_aaa":
         return make_monthly_buys_aaa(api, force_execute=force_execute, skip_order_wait=True, env=env)
     else:
@@ -3465,7 +3529,8 @@ if __name__ == "__main__":
             "monthly_buy_aaa",
             "monthly_buy_mix8",
             "monthly_buy_world_trend",
-            "daily_world_trend",
+            "monthly_buy_spx_trend",
+            "daily_trend_sleeves",
         ],
         required=True,
         help="Action to perform: 'monthly_invest_all' runs all monthly strategies with coordinated budgets (recommended)",

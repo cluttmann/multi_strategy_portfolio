@@ -8,7 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import main
 from scripts import reallocate_2026_09 as R
 
-PRICES = {"QLD": 97.6, "BND": 71.3, "DBC": 32.6, "EET": 115.0, "NTSD": 48.2, "SAA": 33.5,
+PRICES = {"SPXL": 290.0, "BIL": 91.5, "QLD": 97.6, "BND": 71.3, "DBC": 32.6, "EET": 115.0, "NTSD": 48.2, "SAA": 33.5,
           "SHV": 110.2, "WLDU": 38.0, "UGLD": 22.0, "USFR": 50.3, "SSO": 110.0, "GLD": 446.0,
           "SGOV": 100.5, "UGL": 60.0, "UBT": 18.0, "UST": 40.0, "EFO": 50.0, "EEM": 55.0,
           "IEF": 95.0, "TLT": 88.0, "KMLM": 30.0, "AGG": 96.0}
@@ -26,7 +26,8 @@ SLEEVES = {
                         "UGL": 0.0, "SHV": 0.25}},
     "mix8": {"weights": {"SSO": 0.35, "QLD": 0.30, "EFO": 0.0, "EEM": 0.0, "GLD": 0.0, "IEF": 0.0,
                          "TLT": 0.0, "KMLM": 0.0, "SGOV": 0.35}},
-    "world_trend": {"weights": {"WLDU": 0.5, "UGLD": 0.5, "USFR": 0.0}},
+    "world_trend": {"weights": {"WLDU": 0.5, "UGLD": 0.0, "USFR": 0.5}},
+    "spx_trend": {"weights": {"SPXL": 1.0, "BIL": 0.0}},
 }
 EQUITY = 13350.41
 
@@ -66,7 +67,8 @@ def test_whole_share_residual_of_wldu_lands_in_usfr():
     wldu = next(o for o in buys if o["symbol"] == "WLDU")
     usfr = next(o for o in buys if o["symbol"] == "USFR")
     assert wldu["qty"] == int(wldu["qty"])
-    assert usfr["est"] == pytest.approx(targets["WLDU"] - wldu["est"], abs=PRICES["USFR"])
+    residual = targets["WLDU"] - wldu["est"]
+    assert usfr["est"] == pytest.approx(targets["USFR"] + residual, abs=PRICES["USFR"])
 
 
 def test_every_order_symbol_belongs_to_a_live_sleeve_or_is_an_exit():

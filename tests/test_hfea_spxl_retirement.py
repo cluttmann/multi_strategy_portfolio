@@ -24,8 +24,9 @@ RETIRED_FUNCTIONS = [
     "monthly_buy_spxl",
     "daily_trade_spxl_200sma",
 ]
-FREED_TICKERS = {"UPRO", "TMF", "SPXL"}
-# KMLM und SGOV wurden frei und am 2026-09-23 bewusst an Mix8 vergeben.
+FREED_TICKERS = {"UPRO", "TMF"}
+# Am 2026-09-23 bewusst wieder vergeben: KMLM und SGOV an Mix8, SPXL an den
+# S&P-Trend (der SPXL SMA unter einem anderen Ziel).
 REUSED_BY_MIX8 = {"KMLM", "SGOV"}
 
 
@@ -41,6 +42,7 @@ def test_retired_sleeves_own_no_tickers():
     owned = {t for syms in main.STRATEGY_SYMBOLS.values() for t in syms}
     assert owned.isdisjoint(FREED_TICKERS)
     assert REUSED_BY_MIX8 <= set(main.STRATEGY_SYMBOLS["mix8"])
+    assert "SPXL" in main.STRATEGY_SYMBOLS["spx_trend"]
 
 
 def test_no_http_route_for_retired_functions():

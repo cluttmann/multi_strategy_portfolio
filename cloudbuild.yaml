@@ -73,7 +73,7 @@ steps:
     waitFor: ['prep-sources']
 
 # ─────────────────────────────────────────────────────────────────────────────
-# WAVE B — Mix8 and World-Trend in parallel, then the 7-Asset Rotator (after Wave A).
+# WAVE B — Mix8 and the trend sleeves in parallel, then the 7-Asset Rotator (after Wave A).
 # ─────────────────────────────────────────────────────────────────────────────
 
   # Deploy the monthly_buy_mix8 Function (manual/debug — the orchestrator runs Mix8 in-process)
@@ -93,19 +93,19 @@ steps:
     - --set-env-vars=GOOGLE_CLOUD_PROJECT=1098661711782,GOOGLE_CLOUD_PROJECT_ID=trading-436516
     waitFor: ['deploy-orchestrator']
 
-  # Deploy daily_world_trend (World-Trend daily SMA check, own scheduler below)
+  # Deploy daily_trend_sleeves (World-Trend + S&P-Trend daily SMA check, own scheduler below)
   - name: 'gcr.io/cloud-builders/gcloud'
-    id: 'deploy-world-trend'
+    id: 'deploy-trend-sleeves'
     args:
     - functions
     - deploy
-    - daily_world_trend
+    - daily_trend_sleeves
     - --source=fn-light
     - --trigger-http
     - --region=europe-west3
     - --runtime=python310
     - --timeout=540s
-    - --entry-point=daily_world_trend_route
+    - --entry-point=daily_trend_sleeves_route
     - --memory=512MB
     - --set-env-vars=GOOGLE_CLOUD_PROJECT=1098661711782,GOOGLE_CLOUD_PROJECT_ID=trading-436516
     waitFor: ['deploy-orchestrator']
@@ -130,7 +130,7 @@ steps:
     - --entry-point=monthly_buy_aaa
     - --memory=512MB
     - --set-env-vars=GOOGLE_CLOUD_PROJECT=1098661711782,GOOGLE_CLOUD_PROJECT_ID=trading-436516
-    waitFor: ['deploy-mix8', 'deploy-world-trend']
+    waitFor: ['deploy-mix8', 'deploy-trend-sleeves']
 
 # ─────────────────────────────────────────────────────────────────────────────
 # WAVE C2 — final 2 function deploys (start after Wave C1 completes).
@@ -330,32 +330,47 @@ steps:
   # Cloud Scheduler 'daily_regime_world_check' removed 2026-05-12 — Regime World strategy
   # discontinued. The existing GCP scheduler job has been deleted (cleanup completed 2026-05-17).
 
-  # World-Trend: taeglicher Signal-Check kurz vor Handelsschluss. Handelt nur bei
-  # Signalwechsel und nur innerhalb der eigenen Positionen. Neuer Job, deshalb
-  # describe -> update, sonst create (ein nacktes update schlaegt beim ersten
-  # Build fehl).
+  # Trend-Sleeves (World-Trend, S&P-Trend): taeglicher Signal-Check kurz vor
+  # Handelsschluss. Handeln nur bei Signalwechsel und nur innerhalb der eigenen
+  # Positionen. describe -> update, sonst create (ein nacktes update schlaegt
+  # beim ersten Build fehl).
   - name: 'gcr.io/cloud-builders/gcloud'
     entrypoint: 'bash'
     args:
       - '-c'
       - |
-        if gcloud scheduler jobs describe daily_world_trend --location=europe-west3 >/dev/null 2>&1; then
-          gcloud scheduler jobs update http daily_world_trend \
+        if gcloud scheduler jobs describe daily_trend_sleeves --location=europe-west3 >/dev/null 2>&1; then
+          gcloud scheduler jobs update http daily_trend_sleeves \
             --schedule='50 15 * * 1-5' \
-            --uri='https://europe-west3-trading-436516.cloudfunctions.net/daily_world_trend' \
+            --uri='https://europe-west3-trading-436516.cloudfunctions.net/daily_trend_sleeves' \
             --http-method='POST' \
             --time-zone='America/New_York' \
             --location='europe-west3' \
             --oidc-service-account-email='1098661711782-compute@developer.gserviceaccount.com'
         else
-          gcloud scheduler jobs create http daily_world_trend \
+          gcloud scheduler jobs create http daily_trend_sleeves \
             --schedule='50 15 * * 1-5' \
-            --uri='https://europe-west3-trading-436516.cloudfunctions.net/daily_world_trend' \
+            --uri='https://europe-west3-trading-436516.cloudfunctions.net/daily_trend_sleeves' \
             --http-method='POST' \
             --time-zone='America/New_York' \
             --location='europe-west3' \
             --oidc-service-account-email='1098661711782-compute@developer.gserviceaccount.com'
         fi
+    waitFor:
+      - 'deploy-aaa'
+      - 'deploy-index-alert'
+      - 'deploy-audit'
+
+  # daily_world_trend (angelegt 2026-09-22) ersetzt durch daily_trend_sleeves, das
+  # World-Trend und S&P-Trend in einem Lauf prueft. Erst Scheduler, dann Function.
+  - name: 'gcr.io/cloud-builders/gcloud'
+    id: 'retire-daily-world-trend'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        gcloud scheduler jobs delete daily_world_trend --location=europe-west3 --quiet 2>/dev/null || true
+        gcloud functions delete daily_world_trend --region=europe-west3 --quiet 2>/dev/null || true
     waitFor:
       - 'deploy-aaa'
       - 'deploy-index-alert'
