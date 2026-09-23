@@ -1096,7 +1096,18 @@ def _rebalance_buy_budget(api, investment_calc, margin_result, sellers):
         return None
     available, margin, used = _margin_budget(acct["cash"], acct["equity"],
                                              margin_result.get("target_margin", 0))
-    budget = available + margin
+    # Die Margin wird nur durch Einzahlungen abgebaut, nie durch Verkaufserloese.
+    # Deshalb zaehlt hier das Monatsbudget von VOR den Verkaeufen plus das, was
+    # die Verkaeufe wirklich gebracht haben - nicht das Netto-Cash. Bei offener
+    # Schuld verrechnet `max(0, cash)` den Erloes sonst gegen die Schuld und
+    # kappt die Kaeufe (1.500 Schuld, 2.262 Erloes -> nur 762 investiert), und
+    # der abgebende Sleeve steht danach prozentual wieder ueber Ziel.
+    cash_before = (margin_result.get("metrics") or {}).get("cash")
+    if cash_before is None:
+        budget = available + margin            # Kontostand von vorher unbekannt: konservativ
+    else:
+        proceeds = max(0.0, acct["cash"] - cash_before)
+        budget = investment_calc["total_available"] + investment_calc["margin_approved"] + proceeds
     amounts = investment_calc["strategy_amounts"]
     buyers = {allo: amounts[allo] for key, (allo, _) in SLEEVES.items()
               if key not in sellers and amounts[allo] > 0}

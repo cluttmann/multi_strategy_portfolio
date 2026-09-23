@@ -99,7 +99,7 @@ def test_margin_budget_is_the_monthly_rule(monkeypatch, cash, target_margin):
 
 
 # ── Orchestrator: erst abgeben, dann auffuellen ──────────────────────────────
-def _orchestrate(monkeypatch, cash_after, annual_rebalance=True, positions_fail=False):
+def _orchestrate(monkeypatch, cash_after, annual_rebalance=True, positions_fail=False, cash_before=500.0):
     broker = _Broker(BOOK)
     broker.install(monkeypatch)
     if positions_fail:
@@ -108,7 +108,8 @@ def _orchestrate(monkeypatch, cash_after, annual_rebalance=True, positions_fail=
         monkeypatch.setattr(main, "list_positions", boom)
     monkeypatch.setattr(main, "recalculate_all_strategies_cost_basis", lambda *a, **k: {"success": True})
     margin = {"allowed": False, "target_margin": 0, "gate_results": {}, "errors": [],
-              "metrics": {"cash": 500.0, "equity": 15500.0, "portfolio_value": 15500.0, "leverage": 1.0}}
+              "metrics": {"cash": cash_before, "equity": 15500.0, "portfolio_value": 15500.0,
+                          "leverage": 1.0}}
     monkeypatch.setattr(main, "check_margin_conditions", lambda api, env="live": margin)
     monkeypatch.setattr(main, "get_account_info", lambda api: {
         "cash": cash_after, "equity": 15500.0, "portfolio_value": 15500.0, "maintenance_margin": 0.0})
@@ -260,3 +261,19 @@ def test_rotator_peak_ignores_money_that_never_arrived(monkeypatch):
     _, broker, saved = _rotator(monkeypatch, {"NTSD": 10}, {"NTSD": 1.0}, 0.0, calc, peak_nav=480.0, key="aaa")
     assert broker.pos["NTSD"] == 12                           # 2 ganze Stuecke fuer 100 $
     assert saved["peak_nav"] == pytest.approx(12 * 48.0)      # am Hoch geblieben, kein Schein-DD
+
+
+def test_rebalance_buys_get_the_full_sell_proceeds_despite_margin_debt(monkeypatch, _no_outside_world):
+    """Die Margin wird nur durch Einzahlungen abgebaut, nie durch Verkaufserloese.
+
+    Konto: -1.500 Margin-Schuld, Gates zu (kein neues Budget). Ziel minus Ist
+    ergibt Verkaeufe von 2.262,50 und Kaeufe von 2.262,50. Der Erloes gehoert
+    vollstaendig den auffuellenden Sleeves; das Cash bleibt bei -1.500.
+    Vorher band `max(0, cash)` den Erloes an die Schuld und kappte die Kaeufe
+    auf 762,50 (34 %).
+    """
+    calls = _orchestrate(monkeypatch, cash_after=762.5, cash_before=-1500.0)
+    amounts = {k: a for k, a, _ in calls}
+    assert amounts["aaa"] == pytest.approx(-1612.5)
+    assert amounts["spx_trend"] == pytest.approx(-650.0)
+    assert amounts["world_trend"] + amounts["mix8"] == pytest.approx(2262.5)
