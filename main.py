@@ -142,13 +142,19 @@ mix8_config = {
 # ~5,700 shares/day on IEX, and IEX showed stale closes 7 % off consolidated on
 # 2023-05-01 and 2023-05-18 plus a different band state on 9 of 1,027 days.
 # EODHD adjusted_close is total return, which is what the backtest ran on.
+# ACHTUNG Signal != Instrument: WLDU hebelt 2x den Vanguard Total World Stock
+# (VT), das Signal laeuft auf URTH (MSCI World). Regression 03-09/2026: Beta
+# 1,982 auf VT bei R² 0,9898, gegen URTH nur R² 0,9565, und in der gemeinsamen
+# Regression faellt URTH auf -0,08. VT enthaelt Schwellenlaender und Small Caps,
+# URTH nicht. rho(VT,URTH)=0,984 - der Trendzustand stimmt fast immer ueberein,
+# aber es ist eine bewusste Abweichung, keine Identitaet.
 world_trend_config = {
     "strategy_key": "world_trend",
     "alloc_key": "world_trend_allo",
     "display_name": "World-Trend",
     "emoji": "🌍",
     "legs": [
-        ("URTH.US", "WLDU"),               # 2x MSCI World
+        ("URTH.US", "WLDU"),               # Signal MSCI World, gehalten 2x VT (s.u.)
         ("GLD.US", "UGLD"),                # 2x gold (UGL belongs to AAA)
     ],
     "defensive": "USFR",
@@ -800,6 +806,11 @@ def get_account_info(api):
             "portfolio_value": float(account_data.get("portfolio_value", 0)),
             "maintenance_margin": float(account_data.get("maintenance_margin", 0)),
             "cash": float(account_data.get("cash", 0)),
+            # Fuer das Hebel-Gate. portfolio_value und equity sind bei Alpaca
+            # dasselbe Feld - ihr Quotient ist immer 1,0. Der echte Hebel steckt
+            # im Positionswert.
+            "long_market_value": float(account_data.get("long_market_value", 0) or 0),
+            "short_market_value": float(account_data.get("short_market_value", 0) or 0),
         }
     except Exception as e:
         print(f"Error fetching account info: {e}")
@@ -912,10 +923,21 @@ def check_margin_conditions(api, env="live"):
         
         # Gate 4: Leverage (< 1.14×)
         try:
-            if equity > 0:
-                leverage = portfolio_value / equity
-            else:
+            # Bruttohebel = Positionswert / Eigenkapital. NICHT
+            # portfolio_value / equity: Alpaca liefert beide Felder synonym, der
+            # Quotient ist bei jedem regulaeren Konto exakt 1,0 und das Gate
+            # konnte nie ausloesen. Gemessen 2026-09-24: equity 13.188,75 =
+            # portfolio_value 13.188,75, long_market_value 14.508,07 -> 1,10.
+            gross = abs(account_info.get("long_market_value", 0.0)) + \
+                    abs(account_info.get("short_market_value", 0.0))
+            if equity <= 0:
                 leverage = 0.0
+            elif gross > 0:
+                leverage = gross / equity
+            else:
+                # Kein Positionswert lesbar: konservativ als Verstoss werten,
+                # statt stillschweigend 1,0 anzunehmen.
+                leverage = float("inf")
             
             result["metrics"]["leverage"] = leverage
             result["gate_results"]["leverage"] = leverage < margin_control_config["max_leverage"]

@@ -156,7 +156,21 @@ Margin wird **nur** freigegeben, wenn **alle vier** Produktionsgates bestehen
 | 1 | **Markttrend** | SPY über 200-Tage-SMA (mit Band) | — |
 | 2 | **Finanzierungskosten** | FRED-Leitzins + Spread ≤ 8,0 % | `max_margin_rate: 0.08`, Spread 2,5 % unter 35k $, 1,0 % darüber |
 | 3 | **Puffer** | Maintenance-Puffer ≥ 5 % | `min_buffer_pct: 0.05` |
-| 4 | **Hebel** | Portfoliowert / Eigenkapital < 1,14× | `max_leverage: 1.14` |
+| 4 | **Hebel** | **Positionswert / Eigenkapital** < 1,14× | `max_leverage: 1.14` |
+
+> **Korrigiert 2026-09-24.** Gate 4 rechnete `portfolio_value / equity`. Alpaca
+> liefert diese beiden Felder **synonym** — der Quotient ist bei jedem regulären
+> Konto exakt **1,0000**, egal wie viel Margin läuft. Das Gate konnte nie
+> auslösen. Gemessen am Livekonto: `equity` 13.188,55 = `portfolio_value`
+> 13.188,55, `long_market_value` 14.507,87 → **echter Hebel 1,1000**. Jetzt wird
+> der Bruttopositionswert (long + |short|) gegen das Eigenkapital gemessen. Ist
+> kein Positionswert lesbar, gilt der Hebel als **unendlich** und das Gate fällt —
+> nach derselben Regel, nach der Datenfehler nie in den aggressiveren Pfad führen.
+>
+> **Praktische Wirkung war begrenzt**, weil `_margin_budget` unabhängig davon bei
+> +10 % deckelt (`margin = equity × 0,10 − bereits genutzt`). Genau deshalb steht
+> das Konto bei exakt 1,1000 und nicht höher. Der Gurt war kaputt, der Hosenträger
+> hielt. Ab jetzt hält beides.
 
 Fällt ein Gate, ist `target_margin = 0` und das System investiert cash-only
 beziehungsweise baut Hebel ab.
@@ -305,7 +319,7 @@ Rotatoren nicht identisch verhalten.
 
 | Signal | Gehalten | Exposure |
 |---|---|---|
-| SPY | **NTSD** | kapitaleffizienter US-/Intl-Aktien-Stack (90/60) |
+| SPY | **NTSD** | **reines Aktienexposure**, gemessen 0,86 US + 0,59 international = 1,45× — *keine* Anleihen |
 | IWM | **SAA** | 2× US Small Caps |
 | EEM | **EET** | 2× Schwellenländer |
 | TLT | **UBT** | 2× US-Treasuries 20+ J |
@@ -339,7 +353,7 @@ Live seit 23.09.2026.
 
 | Signal (EODHD) | Gehalten | Exposure | Anteil |
 |---|---|---|---|
-| `URTH.US` | **WLDU** | 2× MSCI World | 50 % |
+| `URTH.US` | **WLDU** | **2× VT** (Vanguard Total World) — siehe Warnung unten | 50 % |
 | `GLD.US` | **UGLD** | 2× Gold | 50 % |
 
 **Defensiv:** USFR (Floating-Rate Treasuries).
@@ -351,6 +365,17 @@ Live seit 23.09.2026.
 3. **1-%-Band** um die SMA und **3 aufeinanderfolgende Bestätigungstage**, bevor der Zustand kippt.
 4. Bein an → seine 50 % in das gehebelte Produkt. Bein aus → seine 50 % in **USFR**.
 5. Beide Beine sind unabhängig. Ein Bein an, eines aus = 50 % Produkt, 50 % USFR.
+
+> **⚠️ Signal und Instrument haben nicht dasselbe Universum.** WLDU hebelt 2× den
+> **Vanguard Total World Stock ETF (VT)**, das Signal läuft auf **URTH (MSCI
+> World)**. Regression über 03–09/2026: Beta **1,982 auf VT bei R² 0,9898**,
+> gegen URTH nur R² 0,9565; in der gemeinsamen Regression fällt URTH auf −0,08.
+> **VT enthält Schwellenländer und Small Caps, URTH nicht.**
+> ρ(VT, URTH) = 0,984 — der Trendzustand stimmt praktisch immer überein, aber es
+> ist eine bewusste Abweichung. **Der Backtest modelliert `world` als MSCI World
+> (URTHSIM), also das Signal, nicht das gehaltene Instrument.** Offene
+> Entscheidung: Signal auf `VT.US` umstellen, damit beide dasselbe Universum
+> haben.
 
 **Datenquelle: EODHD, nicht Alpaca.** Grund: URTH handelt auf IEX nur ~5.700
 Stück/Tag; IEX zeigte am 01.05.2023 und 18.05.2023 Schlusskurse 7 % neben dem
@@ -683,7 +708,7 @@ bestes +54,6 % (2003).
 - **Nicht das gleiche Fenster für alle Bausteine.** Die frühestmögliche gemeinsame Historie ist **Juni 1994**, limitiert durch Emerging Markets. Das Fenster ab 2000 beginnt auf dem Dotcom-Hoch und ist die konservativere Rechnung.
 - **Ohne Ausschüttungen und Vorabpauschale.** Die Nachsteuerzahlen sind damit noch leicht zu gut, ungleichmäßig über die Sleeves — die Anleihebeine schütten am meisten aus.
 - **UGLD hat 4 Monate echte Historie** (aufgelegt 27.05.2026) und ~14.500 $ IEX-Tagesvolumen. Die 2×-Gold-Modellierung stützt sich auf UGL.
-- **NTSD wird als 1,5× US-Aktien modelliert.** Real ist es ein 90/60-Stack aus Aktien und Treasuries — eine Näherung.
+- **NTSD wird als 1,5× US-Aktien modelliert — das ist in der Höhe fast richtig, in der Zusammensetzung falsch.** Regression über 03–09/2026: **0,857 SPY + 0,593 EFA, R² 0,974**; nimmt man IEF hinzu, bekommt es Beta **0,000**. NTSD hält also ~1,45× **reines Aktienexposure**, davon 41 % international, und **keine Treasuries**. Das Modell bildet die Gesamthöhe ab, verbucht aber den internationalen Teil als US. Folge: **die Auslandsdiversifikation des 7-Asset-Rotators ist im Backtest unterschätzt, die US-Konzentration überschätzt.**
 
 ---
 

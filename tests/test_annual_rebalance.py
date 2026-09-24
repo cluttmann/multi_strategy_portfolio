@@ -277,3 +277,26 @@ def test_rebalance_buys_get_the_full_sell_proceeds_despite_margin_debt(monkeypat
     assert amounts["aaa"] == pytest.approx(-1612.5)
     assert amounts["spx_trend"] == pytest.approx(-650.0)
     assert amounts["world_trend"] + amounts["mix8"] == pytest.approx(2262.5)
+
+
+def test_leverage_gate_measures_positions_against_equity(monkeypatch, _no_outside_world):
+    """Gate 4 muss den ECHTEN Kontohebel messen, nicht portfolio_value/equity.
+
+    Alpaca liefert portfolio_value und equity als synonyme Felder - der Quotient
+    ist bei jedem reglichen Long-Konto exakt 1,0, egal wie viel Margin laeuft.
+    Das Gate 'leverage < 1.14' konnte deshalb nie ausloesen. Gemessen am Live-
+    Konto 2026-09-24: equity 13.188,75, portfolio_value 13.188,75 (identisch),
+    long_market_value 14.508,07 -> echter Hebel 1,10.
+
+    Hier: 1,20x Hebel, also ueber der 1,14-Grenze. Das Gate muss fallen.
+    """
+    monkeypatch.setattr(main, "get_all_market_data",
+                        lambda sym, env="live": {"price": 200.0, "sma200": 100.0})
+    monkeypatch.setattr(main, "get_fred_rate", lambda: 4.0)
+    monkeypatch.setattr(main, "get_account_info", lambda api: {
+        "cash": -2000.0, "equity": 10000.0, "portfolio_value": 10000.0,
+        "long_market_value": 12000.0, "maintenance_margin": 3000.0})
+    res = main.check_margin_conditions({}, env="paper")
+    assert res["metrics"]["leverage"] == pytest.approx(1.20)
+    assert res["gate_results"]["leverage"] is False
+    assert res["target_margin"] == 0.0
