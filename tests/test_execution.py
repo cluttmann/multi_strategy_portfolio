@@ -160,7 +160,7 @@ def test_deposit_pays_attributed_debt_and_preserves_drawdown_ratio():
 
 def test_stale_persisted_plan_cannot_submit_new_orders():
     store=MemoryStore(seeded());broker=FakeBroker();l=Ledger(store)
-    t=l.acquire();l.start(t,dict(action='old','period':'2026-09-24',planned_at='2026-09-24T12:00:00Z',orders=[dict(strategy='mix8',symbol='UBT',side='sell',qty='2',limit_price='9')]))
+    t=l.acquire();l.start(t,dict(action='old',period='2026-09-24',planned_at='2026-09-24T12:00:00Z',orders=[dict(strategy='mix8',symbol='UBT',side='sell',qty='2',limit_price='9')]))
     l.release(t)
     with pytest.raises(SafetyStop,match='stale'):Executor(l,broker).run()
     assert broker.submits==0
