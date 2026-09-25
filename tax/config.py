@@ -74,6 +74,8 @@ SYMBOL_TO_ISIN = {
     "SSO":  "US74347R1077",
     "ZROZ": "US72201R8824",
     "GLD":  "US78463V1070",
+    "UGLD": "US25461H5494",  # Direxion Daily Gold Bull 2X (2026 fund)
+    "UBT":  "US74347R1721",
     # Sector Select SPDR ETFs
     "XLC":  "US81369Y8527",
     "XLY":  "US81369Y4070",
@@ -126,6 +128,8 @@ SYMBOL_TO_NAME = {
     "SSO":  "ProShares Ultra S&P 500",
     "ZROZ": "PIMCO 25+ Year Zero Coupon U.S. Treasury Index ETF",
     "GLD":  "SPDR Gold Shares",
+    "UGLD": "Direxion Daily Gold Bull 2X ETF",
+    "UBT":  "ProShares Ultra 20+ Year Treasury",
     # Sector Select SPDR ETFs
     "XLC":  "Communication Services Select Sector SPDR Fund",
     "XLY":  "Consumer Discretionary Select Sector SPDR Fund",
@@ -239,6 +243,7 @@ SYMBOL_TFS_RATE = {
     "USFR": Decimal("0.00"),    # ultra-short Treasury floating-rate, bond ETF
     "SGOV": Decimal("0.00"),    # 0-3M T-bill ETF
     "UGL":  Decimal("0.00"),    # 2× gold (still gold exposure → ETC-like)
+    "UGLD": Decimal("0.00"),    # Gold exposure, no equity TFS
 
     # Equity ETFs added — 30% Teilfreistellung (>51% equities under InvStG)
     "QLD":  Decimal("0.30"),    # 2× Nasdaq-100

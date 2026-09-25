@@ -1,10 +1,18 @@
 # Personal Investment Policy, Strategy Playbook & FIRE Plan
 
 **Owner:** Carl Johannes
-**Version:** 2.0
-**Stand:** 23. September 2026
+**Version:** 2.1
+**Stand:** 25. September 2026
 **Repository:** `cluttmann/multi_strategy_portfolio`
 **Zweck:** Einzige maßgebliche Quelle für Portfolio-Architektur, Hebelregeln, Broker-Strategien und FIRE-Plan.
+
+> **Änderung v2.1:** Mix8 hält für die Signale EEM/GLD/TLT nun EET/UGLD/UBT
+> (je 2× täglich); IEF bleibt 1×. Mehrere Sleeves dürfen dieselben ETFs halten.
+> Die gemeinsame Ausführung und getrennte Bestandsbuchführung sind in
+> [shared-etf-operations.md](shared-etf-operations.md) beschrieben.
+> Die Ergebnisse in Teil IV stammen weiterhin vom 23.09.2026 **vor** dieser
+> Umstellung. Die isolierten Kandidatentests ersetzen keinen neuen kanonischen
+> Gesamtdepot-Backtest; UGLD besitzt nur kurze echte Historie.
 
 > **Änderungen gegenüber v1.1 (12.09.2026):** Der Alpaca-Teil war überholt. Fünf
 > Strategien wurden zwischen dem 21. und 23.09.2026 aufgelöst (HFEA, SPXL 200-SMA,
@@ -286,10 +294,10 @@ Gewicht.
 | SPY | **SSO** | 2× S&P 500 |
 | QQQ | **QLD** | 2× Nasdaq-100 |
 | EFA | **EFO** | 2× Industrieländer ex USA |
-| EEM | **EEM** | 1× Schwellenländer |
-| GLD | **GLD** | 1× Gold |
+| EEM | **EET** | 2× Schwellenländer |
+| GLD | **UGLD** | 2× Gold |
 | IEF | **IEF** | 1× US-Treasuries 7–10 J |
-| TLT | **TLT** | 1× US-Treasuries 20+ J |
+| TLT | **UBT** | 2× US-Treasuries 20+ J |
 | KMLM | **KMLM** | 1× Managed Futures |
 
 **Defensiv:** SGOV (0–3 Monate T-Bills).
@@ -300,8 +308,8 @@ Gewicht.
 2. Momentum = Mittel aus 3-, 6- und 12-Monats-Rendite (63 / 126 / 252 Handelstage), je **1/3 gewichtet**, gerechnet auf dem Signalsymbol.
 3. **DD-Stop zuerst:** liegt der Sleeve-NAV mehr als **30 %** unter seinem Hochpunkt, alles nach SGOV, Hochpunkt zurücksetzen, Monat beenden.
 4. **Top 2** nach Score auswählen, aber nur mit **positivem** Score (`min_score = 0`). Kein positiver Kandidat → alles SGOV.
-5. **Inverse-Volatilitätsgewichtung** über die Ausgewählten, realisierte Vol über **60 Handelstage**.
-6. **Vol-Target 25 %** annualisiert: erwartete Portfoliovol aus Gewichten × Vol × Hebel; Skalierungsfaktor `min(1, 0,25 / erwartete Vol)`.
+5. **Inverse-Volatilitätsgewichtung** über die Ausgewählten, realisierte Vol der **gehaltenen Produkte** über **60 Handelstage**. Fehlende Produktvolatilität stoppt die Ausführung.
+6. **Vol-Target 25 %** annualisiert: erwartete Portfoliovol aus Gewichten × Produktvol; Skalierungsfaktor `min(1, 0,25 / erwartete Vol)`. Der Produkthebel ist darin enthalten und wird nicht nochmals multipliziert.
 7. Rest nach **SGOV**.
 8. Trades unter **5 $** werden übersprungen.
 
@@ -336,9 +344,10 @@ Rotatoren nicht identisch verhalten.
 - Defensiv **SHV** statt SGOV.
 - Alles übrige identisch: DD-Stop 30 %, `min_score = 0`, Inverse-Vol über 60 Tage, Vol-Target 25 %, Toleranz 5 $.
 
-**Ticker-Abgrenzung:** UGL (2× Gold) gehört **ausschließlich** AAA. World-Trend
-nutzt UGLD für dieselbe Exposure, weil jeder ETF nur einmal im Depot vorkommen
-darf.
+**Gemeinsame ETFs:** AAA behält UGL als Goldprodukt. EET und UBT können zugleich
+in AAA und Mix8 liegen; UGLD zugleich in World-Trend und Mix8. Das Account-Ledger
+führt Mengen, wirtschaftlichen Einstand und Cash je Sleeve getrennt; der Broker
+hält die Summe. Steuerliches FIFO bleibt auf Konto-/Ticker-Ebene.
 
 ---
 
@@ -414,9 +423,9 @@ und ruft alle Sleeve-Funktionen **in einem Prozess** auf. Er prüft die
 Margin-Gates **einmal**, berechnet die Budgetaufteilung **einmal** und übergibt
 jedem Sleeve sein vorab zugeteiltes Budget.
 
-> **Einzelne `monthly_buy_*`-Funktionen niemals nacheinander für einen
-> Produktionslauf aufrufen.** Sie zählen die Kaufkraft doppelt und überziehen das
-> Konto. Sie existieren nur für manuelles Debugging.
+> Für Produktionsläufe immer `monthly_invest_all` verwenden. Die verbleibenden
+> manuellen Monatsrouten delegieren ebenfalls an den gemeinsamen, idempotenten
+> Orchestrator; eigene Brokerorders außerhalb des Ledgers sind gesperrt.
 
 **Beitrags-Tilt (11 Monate im Jahr).** Neue Einzahlungen werden Richtung
 untergewichteter Sleeves gekippt (`rebalance_config`):

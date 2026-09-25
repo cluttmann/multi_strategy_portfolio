@@ -148,6 +148,10 @@ SYMBOL_TO_ISIN = {
     "UBT":  "US74347R1721",
     "UST":  "US74347R1804",
     "UGL":  "US74347W6012",
+    # Direxion Gold Bull 2X launched 2026-05-27; CUSIP 25461H549.
+    # https://www.direxion.com/product/daily-gold-bull-2x-etf
+    # ISIN confirmed by Trackinsight /en/fund/UGLD/characteristics.
+    "UGLD": "US25461H5494",
     "NTSD": "US97717Y2467",
 }
 

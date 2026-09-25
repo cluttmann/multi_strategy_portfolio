@@ -13,14 +13,19 @@ trading API, deployed to Google Cloud (`europe-west3`, project `trading-436516`)
 
 ## Portfolio Allocation
 
-**Vier aktive Sleeves** (Stand 2026-09-23, Summe 100 %):
+**Vier aktive Sleeves** (Stand 2026-09-25, Summe 100 %):
 
 | Sleeve | Gewicht | Regel | Ticker |
 |---|---:|---|---|
-| **Mix8 Top-2** | 42,50 % | Monatlich Top-2 nach 3/6/12-Monats-Momentum, Inverse-Vol, Vol-Target 25 %, DD-Stop 30 % | SSO QLD EFO EEM GLD IEF TLT KMLM → SGOV |
+| **Mix8 Top-2** | 42,50 % | Monatlich Top-2 nach 3/6/12-Monats-Momentum, Inverse-Vol, Vol-Target 25 %, DD-Stop 30 % | SSO QLD EFO EET UGLD IEF UBT KMLM → SGOV |
 | **7-Asset-Rotator (AAA)** | 21,25 % | Monatlich Top-3 nach 6-Monats-Momentum, sonst wie Mix8 | NTSD SAA EET UBT UST UGL DBC → SHV |
 | **World-Trend** | 21,25 % | Täglich, je 50 % WLDU und UGLD solange der ungehebelte Index (EODHD) über seiner 150-Tage-SMA steht, 1 %-Band, 3 Bestätigungstage | WLDU UGLD → USFR |
 | **S&P-Trend 3×** | 15,00 % | Täglich, SPXL solange SPY über seiner 200-Tage-SMA steht, 1 %-Band, 1 Bestätigungstag | SPXL → BIL |
+
+Seit 25.09.2026 können Sleeves dieselben ETFs halten. Eigentum, Cash und
+Orderausführung laufen über das gemeinsame [Execution-Ledger](docs/shared-etf-operations.md).
+Die folgenden Backtests beziehen sich auf den **Stand vor der Mix8-2×-Umstellung**;
+sie sind kein neu gerechneter Nachweis für EET/UGLD/UBT in Mix8.
 
 **Kennzahlen des Depots** (kanonischer Lauf 2026-09-23, Lot-Ledger, Spreads gegen
 die echten ETFs geeicht, deutsche Steuer mit FIFO und Teilfreistellung):
