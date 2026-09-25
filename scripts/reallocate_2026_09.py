@@ -142,6 +142,8 @@ def build_dry_run(api, env="live", use_margin=False):
 
 
 def _close_position(api, symbol):
+    if api.get("EXECUTION_V2"):
+        raise RuntimeError("Retired allocation script cannot close shared positions; use execution ledger")
     response = bot.alpaca_request_with_retry(
         "DELETE", f"{api['BASE_URL']}/v2/positions/{symbol}",
         headers=bot.get_auth_headers(api), label=f"close {symbol}", raise_on_fail=True)

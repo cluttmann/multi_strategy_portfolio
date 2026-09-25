@@ -28,9 +28,10 @@ steps:
         rm -rf fn-light
         mkdir -p fn-light
 
-        # main.py hat keine lokalen Modulimporte, main.py + requirements.txt
-        # ist daher eine vollstaendige Quelle.
+        # Trading entry points depend on the journalled execution package.
         cp main.py fn-light/main.py
+        mkdir -p fn-light/execution
+        cp execution/*.py fn-light/execution/
         cp requirements.txt fn-light/requirements.txt
         : > fn-light/.gcloudignore
 
@@ -172,12 +173,45 @@ steps:
     waitFor:
       - 'deploy-aaa'
 
+  - name: 'gcr.io/cloud-builders/gcloud'
+    id: 'deploy-shared-reconcile'
+    args:
+    - functions
+    - deploy
+    - shared_etf_reconcile
+    - --source=fn-light
+    - --trigger-http
+    - --region=europe-west3
+    - --runtime=python310
+    - --timeout=540s
+    - --entry-point=shared_etf_reconcile_route
+    - --memory=512MB
+    - --set-env-vars=GOOGLE_CLOUD_PROJECT=1098661711782,GOOGLE_CLOUD_PROJECT_ID=trading-436516
+    waitFor: ['deploy-aaa']
+
 # ─────────────────────────────────────────────────────────────────────────────
 # WAVE D — Cloud Scheduler (re)creation. Schedulers don't trigger inner Cloud
 # Builds, so they can all run in parallel once Wave C is done. Gated on the
 # last Wave C step so a scheduler is never created pointing at a function URL
 # that hasn't been deployed yet.
 # ─────────────────────────────────────────────────────────────────────────────
+
+  - name: 'gcr.io/cloud-builders/gcloud'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        gcloud scheduler jobs update http shared_etf_reconcile \
+          --schedule='*/10 9-16 * * 1-5' \
+          --uri='https://europe-west3-trading-436516.cloudfunctions.net/shared_etf_reconcile' \
+          --http-method='POST' --time-zone='America/New_York' --location='europe-west3' \
+          --oidc-service-account-email='1098661711782-compute@developer.gserviceaccount.com' \
+        || gcloud scheduler jobs create http shared_etf_reconcile \
+          --schedule='*/10 9-16 * * 1-5' \
+          --uri='https://europe-west3-trading-436516.cloudfunctions.net/shared_etf_reconcile' \
+          --http-method='POST' --time-zone='America/New_York' --location='europe-west3' \
+          --oidc-service-account-email='1098661711782-compute@developer.gserviceaccount.com'
+    waitFor: ['deploy-shared-reconcile']
 
   # Cloud Scheduler job for 'monthly_invest_all' ORCHESTRATOR (runs all 6 monthly strategies)
   - name: 'gcr.io/cloud-builders/gcloud'

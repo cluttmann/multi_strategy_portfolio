@@ -28,11 +28,10 @@ def test_target_allocation():
 def test_registry_matches_weights_and_tickers():
     assert {allo for allo, _ in main.SLEEVES.values()} == set(main.strategy_allocations)
     assert set(main.SLEEVES) == set(main.STRATEGY_SYMBOLS)
-    seen = {}
+    # Universes may overlap. Ownership is tested against actual ledger shares
+    # in test_shared_integration, rather than inferred from membership.
     for key, syms in main.STRATEGY_SYMBOLS.items():
-        for t in syms:
-            assert t not in seen, f"{t} gehoert {seen[t]} und {key}"
-            seen[t] = key
+        assert len(syms) == len(set(syms))
 
 
 def test_dual_momentum_is_retired():
@@ -213,8 +212,8 @@ def test_daily_world_trend_data_error_means_no_orders(monkeypatch):
 # ── Rotator: Sizing und Datenfehler ──────────────────────────────────────────
 def test_rotator_sizing_is_weighted_sum_and_normalized(monkeypatch):
     cfg = main.mix8_config
-    scores = {"SSO": 0.30, "QLD": 0.25, "EFO": 0.10, "EEM": 0.05, "GLD": -0.1,
-              "IEF": 0.0, "TLT": -0.2, "KMLM": 0.01}
+    scores = {"SSO": 0.30, "QLD": 0.25, "EFO": 0.10, "EET": 0.05, "UGLD": -0.1,
+              "IEF": 0.0, "UBT": -0.2, "KMLM": 0.01}
     by_signal = {sig: scores[pos] for sig, pos in cfg["candidates"]}
     monkeypatch.setattr(main, "_rotator_momentum", lambda api, s, lbs, ws: by_signal[s])
     vols = {"SSO": 0.40, "QLD": 0.50}

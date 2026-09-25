@@ -8,6 +8,9 @@ import time
 import pandas as pd
 import pandas_market_calendars as mcal
 import datetime
+import sys
+from execution.controller import get_controller
+from execution.ledger import SafetyStop
 from google.cloud import firestore
 
 
@@ -37,18 +40,18 @@ strategy_allocations = {
 }
 
 
-# Strategy Ticker Ownership
+# Strategy allowed universes (ownership lives in execution ledger)
 # Each strategy has clear ticker ownership for simplified margin calculations and position tracking:
 # - 7-Asset Rotator (AAA family): NTSD, SAA, EET, UBT, UST, UGL, DBC (top-3 selected monthly), SHV (defensive)
 # - World-Trend: WLDU, UGLD, USFR (defensive)
 # - Mix8 Top-2: SSO, QLD, EFO, EEM, GLD, IEF, TLT, KMLM (top-2 monthly), SGOV (defensive)
 # - S&P-Trend 3x: SPXL, BIL (defensive)
 
-# Strategy ticker ownership mapping for cost basis recalculation
+# Old Mix8 symbols are retained solely for complete migration/liquidation.
 STRATEGY_SYMBOLS = {
     "aaa": ["NTSD", "SAA", "EET", "UBT", "UST", "UGL", "DBC", "SHV"],
     "world_trend": ["WLDU", "UGLD", "USFR"],
-    "mix8": ["SSO", "QLD", "EFO", "EEM", "GLD", "IEF", "TLT", "KMLM", "SGOV"],
+    "mix8": ["SSO", "QLD", "EFO", "EET", "UGLD", "IEF", "UBT", "KMLM", "SGOV", "EEM", "GLD", "TLT"],
     "spx_trend": ["SPXL", "BIL"],
 }
 
@@ -106,8 +109,9 @@ aaa_config = {
 }
 
 # Mix8 Top-2 — live since 2026-09-23. Same engine as AAA (make_monthly_buys_rotator),
-# broader menu, blended 3/6/12m momentum, top-2. Backtested with EXACTLY this sizing
-# logic: 1994-2026 16.7 % CAGR pre-tax, Sharpe 0.61 after German tax, max DD -33.7 %.
+# broader menu, blended 3/6/12m momentum, top-2. The historical 16.7% CAGR
+# baseline used EEM/GLD/TLT at 1x. From 2026-09-25 these map to EET/UGLD/UBT;
+# IEF stays 1x. Prior baseline performance is not a claim for the new mix.
 # Managed futures via KMLM, not DBMF: the backtest's managed-futures series IS KMLM,
 # and KMLM became free when HFEA was retired on 2026-09-22.
 mix8_config = {
@@ -118,10 +122,10 @@ mix8_config = {
         ("SPY", "SSO"),
         ("QQQ", "QLD"),
         ("EFA", "EFO"),
-        ("EEM", "EEM"),
-        ("GLD", "GLD"),
+        ("EEM", "EET"),
+        ("GLD", "UGLD"),
         ("IEF", "IEF"),
-        ("TLT", "TLT"),
+        ("TLT", "UBT"),
         ("KMLM", "KMLM"),
     ],
     "defensive": "SGOV",
@@ -451,6 +455,19 @@ def get_alpaca_historical_bars(api, symbol, days=400, raw=False, adjustment="spl
     return [bar['c'] for bar in bars]
 
 
+def _managed_run(api, env, action, **kwargs):
+    try:
+        return get_controller(sys.modules[__name__], api, env).execute(action, **kwargs)
+    except Exception as exc:
+        send_telegram_message(f"❗ Shared ETF execution ({env}) stopped: {exc}")
+        raise
+
+
+def get_execution_price(api, symbol, env="live", require_fresh=False):
+    from execution.quotes import get_price
+    return get_price(sys.modules[__name__], api, symbol, env, require_fresh)
+
+
 def get_latest_trade(api, symbol):
     """Get latest trade price from Alpaca. Raises on failure."""
     symbol = symbol.upper()
@@ -529,6 +546,8 @@ def cancel_order(api, order_id):
     return response.json()
 
 def submit_order(api, symbol, qty, side):
+    if api.get("API_KEY") or api.get("EXECUTION_V2"):
+        raise SafetyStop("Direct order path disabled; use the shared account executor")
     url = f"{api['BASE_URL']}/v2/orders"
     data = {
         "symbol": symbol,
@@ -590,7 +609,8 @@ def set_alpaca_environment(env, use_secret_manager=True):
         API_KEY = os.getenv(f"ALPACA_API_KEY_{suffix}")
         SECRET_KEY = os.getenv(f"ALPACA_SECRET_KEY_{suffix}")
 
-    return {"API_KEY": API_KEY, "SECRET_KEY": SECRET_KEY, "BASE_URL": base_url}
+    return {"API_KEY": API_KEY, "SECRET_KEY": SECRET_KEY, "BASE_URL": base_url,
+            "EXECUTION_V2": True, "ENV": env}
 
 
 def get_telegram_secrets(chat_id_secret="TELEGRAM_CHAT_ID"):
@@ -1083,8 +1103,12 @@ def calculate_annual_rebalance(api, total_investing):
 
     Liest die Positionen direkt und wirft bei einem Fehler. get_all_strategy_values
     liefert bei Fehlern Nullen - ein Rebalancing darauf hielte jede Sleeve fuer leer."""
-    positions = {p["symbol"]: float(p["market_value"]) for p in list_positions(api)}
-    values = {key: sum(positions.get(s, 0.0) for s in STRATEGY_SYMBOLS[key]) for key in SLEEVES}
+    if api.get("EXECUTION_V2"):
+        values = get_all_strategy_values(api)
+        values = {k: values[k] for k in SLEEVES}
+    else:
+        positions = {p["symbol"]: float(p["market_value"]) for p in list_positions(api)}
+        values = {key: sum(positions.get(s, 0.0) for s in STRATEGY_SYMBOLS[key]) for key in SLEEVES}
     invested = sum(values.values())
     if invested <= 0:
         raise ValueError("keine Sleeve-Positionen gefunden")
@@ -1259,6 +1283,11 @@ def should_run_monthly_orchestrator(env="live", today=None):
 
 
 def recalculate_all_strategies_cost_basis(api, env="live", silent=False):
+    if api.get("EXECUTION_V2"):
+        controller = get_controller(sys.modules[__name__], api, env)
+        controller.executor.run()
+        controller.publish()
+        return {"success": True, "source": "execution-ledger", "total_invested_unchanged": True}
     """
     Recalculate cost basis for ALL strategies from Alpaca positions and update Firestore.
     Uses actual cost_basis from Alpaca as the source of truth.
@@ -2319,6 +2348,10 @@ def check_unified_index_alert(request, env=None):
 
 
 def get_all_strategy_values(api):
+    if api.get("EXECUTION_V2"):
+        vals = get_controller(sys.modules[__name__], api).values()
+        out = {k: vals[k]["net_value"] for k in SLEEVES}
+        return {**out, "total": sum(out.values())}
     """
     Current market value of every sleeve from Alpaca positions, plus "total".
     Used for contribution rebalancing to see how far each sleeve is from target.
@@ -2731,6 +2764,8 @@ def _rotator_realized_vol(api, symbol, window=60):
 
 
 def get_rotator_position_value(api, cfg):
+    if api.get("EXECUTION_V2"):
+        return get_controller(sys.modules[__name__], api).owned(cfg)
     """Total value + per-symbol breakdown for one rotator's ticker universe."""
     symbols = STRATEGY_SYMBOLS[cfg["strategy_key"]]
     try:
@@ -2775,12 +2810,11 @@ def plan_rotator_weights(api, cfg):
             if v is not None and v > 0:
                 invvols[pos] = 1.0 / v
                 realized_vols[pos] = v
-        if not invvols:
-            # Vol data unavailable — equal-weight the picks
-            raw = {pos: 1.0 / len(picks) for pos in picks}
-        else:
-            tot = sum(invvols.values())
-            raw = {pos: invvols.get(pos, 0.0) / tot for pos in picks}
+        if len(invvols) != len(picks):
+            missing = sorted(set(picks) - set(invvols))
+            raise RotatorDataError(f"Produktvolatilitaet fehlt fuer {missing}; keine Ersatzgewichte")
+        tot = sum(invvols.values())
+        raw = {pos: invvols[pos] / tot for pos in picks}
         # Portfolio vol estimate (weighted sum of underlying vols — conservative)
         est_vol = sum(raw[pos] * realized_vols.get(pos, cfg["target_vol"]) for pos in picks)
         scale = min(1.0, cfg["target_vol"] / est_vol) if est_vol > 0 else 1.0
@@ -2793,6 +2827,8 @@ def plan_rotator_weights(api, cfg):
 
 def make_monthly_buys_rotator(api, cfg, force_execute=False, investment_calc=None,
                               margin_result=None, skip_order_wait=False, env="live"):
+    if api.get("EXECUTION_V2"):
+        return _managed_run(api, env, "monthly", force=force_execute)
     """
     Monthly execution for a momentum rotator (7-Asset Rotator, Mix8). Each call:
       1. Add this month's contribution to the sleeve's pool.
@@ -3181,6 +3217,8 @@ def _wt_signal_summary(cfg, signals):
 
 
 def daily_trend_sleeve(api, cfg, env="live", force=False, skip_order_wait=False):
+    if api.get("EXECUTION_V2"):
+        return _managed_run(api, env, "daily", force=force)
     """Taeglicher Check einer Trend-Sleeve. Handelt nur, wenn ein Bein
     umschaltet oder der Bestand nicht zum Signal passt - nicht auf Drift,
     genau wie der Backtest."""
@@ -3226,6 +3264,8 @@ def daily_world_trend(api, env="live", force=False, skip_order_wait=False):
 
 
 def daily_trend_sleeves(api, env="live", force=False, skip_order_wait=False):
+    if api.get("EXECUTION_V2"):
+        return _managed_run(api, env, "daily", force=force)
     """Alle Trend-Sleeves nacheinander. Ein Datenfehler in einer blockiert die
     andere nicht; das Gesamtergebnis ist ❌, sobald eine gescheitert ist."""
     results = []
@@ -3278,6 +3318,8 @@ def _trend_rebalance_sell(api, cfg, dollars, skip_order_wait, env, pct_label):
 
 def make_monthly_buys_trend(api, cfg, force_execute=False, investment_calc=None,
                             margin_result=None, skip_order_wait=False, env="live"):
+    if api.get("EXECUTION_V2"):
+        return _managed_run(api, env, "monthly", force=force_execute)
     """Monatszufuehrung einer Trend-Sleeve: der Beitrag geht nach dem aktuellen
     Signal auf die Beine, ohne den Bestand umzuschichten (das tut nur der
     Tagesjob bei Signalwechsel)."""
@@ -3367,6 +3409,8 @@ def wait_for_order_fill(api, order_id, timeout=300, poll_interval=5):
 
 def monthly_invest_all_strategies(api, force_execute=False, skip_order_wait=False, env="live",
                                   annual_rebalance=None):
+    if api.get("EXECUTION_V2"):
+        return _managed_run(api, env, "monthly", force=force_execute, annual=annual_rebalance)
     """
     Orchestrator function that runs every active monthly investment strategy.
     Calculates budgets ONCE and distributes them to ensure exact percentage splits.
@@ -3591,12 +3635,36 @@ def monthly_buy_aaa(request):
     return make_monthly_buys_aaa(api, env=alpaca_environment)
 
 
+@app.route("/shared_etf_reconcile", methods=["POST"])
+def shared_etf_reconcile_route(request):
+    api = set_alpaca_environment(env=alpaca_environment)
+    try:
+        result = get_controller(sys.modules[__name__], api, alpaca_environment).reconcile()
+        return jsonify(result), 200
+    except Exception as exc:
+        send_telegram_message(f"❗ Shared ETF executor stopped: {exc}")
+        raise
+
+
 @app.route("/index_alert", methods=["POST"])
 def index_alert(request):
     return check_unified_index_alert(request, env=alpaca_environment)
 
 
 def audit_monthly_run(api, env="live", lookback_days=14):
+    if api.get("EXECUTION_V2"):
+        state = get_controller(sys.modules[__name__], api, env).store.read()
+        month = current_month_id()
+        done = state['last_completed'].get('monthly') == month
+        lines = [f"🛎 Monthly Run Audit — {month}",
+                 "✅ Ledger run completed" if done else "❌ No completed ledger run this month",
+                 f"Active plan: {(state.get('active') or {}).get('id', 'none')}"]
+        for key, (_, label) in SLEEVES.items():
+            positions = state['portfolios'][key]['positions']
+            lines.append(f"{label}: " + ', '.join(f"{q} {sym}" for sym, q in positions.items() if float(q)))
+        message = '\n'.join(lines)
+        send_telegram_message(message)
+        return message
     """
     Verify that this month's orchestrator actually ran and that each strategy
     has produced expected activity. Sends one consolidated Telegram alert.
