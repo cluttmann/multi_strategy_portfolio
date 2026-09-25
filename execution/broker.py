@@ -146,6 +146,10 @@ class Executor:
                 if row['status'] in TERMINAL:
                     raise SafetyStop(f"Order {row['client_order_id']} {row['status']}; partial fills booked, plan needs repair")
                 if row['status']=='planned':
+                    planned_at=active.get('planned_at')
+                    if planned_at:
+                        age=(dt.datetime.now(dt.timezone.utc)-dt.datetime.fromisoformat(planned_at.replace('Z','+00:00'))).total_seconds()
+                        if age>300: raise SafetyStop('Remaining plan is stale; reconcile and refresh before submitting')
                     # Persist claim BEFORE POST. A crash here blocks until explicit
                     # resolution, rather than risking a duplicate order.
                     row=self.ledger.mark_submitting(t,i)

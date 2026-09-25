@@ -20,8 +20,12 @@ def snapshot(broker,db,env):
     first=broker.open_orders()
     positions=broker.positions();account=broker.account();clock=broker.clock()
     second=broker.open_orders()
+    activities=broker.activities(clock['timestamp'][:10]+'T00:00:00Z')
+    final_account=broker.account();final_positions=broker.positions()
+    if final_account['cash']!=account['cash'] or {p['symbol']:p['qty'] for p in final_positions}!={p['symbol']:p['qty'] for p in positions}:
+        raise SafetyStop('Broker changed during snapshot; capture again')
     if first or second: raise SafetyStop('Open orders must be resolved before migration')
-    return {'account':account,'positions':positions,'open_orders':second,'clock':clock,
+    return {'account':account,'positions':positions,'open_orders':second,'clock':clock,'activities':activities,
             'old_states':{d.id:d.to_dict() for d in db.collection(f'strategy-balances-{env}').stream()}}
 
 
@@ -35,6 +39,7 @@ def run(args):
         (directory/f'{args.env}-{at}-broker.json').write_text(json.dumps(snap,indent=2,default=str))
         state=bootstrap_state(snap['account'],snap['positions'],snap['open_orders'],OLD_UNIVERSES,
                               snap['old_states'],args.env,snap['clock']['timestamp'])
+        state['activity_ids']=[a['id'] for a in snap['activities']]
         (directory/f'{args.env}-{at}-ledger.json').write_text(json.dumps(state,indent=2,default=str))
         if args.action=='initialize':
             store=FirestoreStore(db,snap['account']['id'],args.env)
