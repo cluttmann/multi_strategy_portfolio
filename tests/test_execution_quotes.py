@@ -19,3 +19,8 @@ def test_current_quote_midpoint_preserves_decimal_precision():
 def test_quote_uses_existing_five_minute_cache_window_for_quiet_etfs():
     assert quote_price({'bp':100,'ap':100.1,'t':'2026-09-25T19:46:00Z'},NOW,True)>100
     with pytest.raises(SafetyStop): quote_price({'bp':100,'ap':100.1,'t':'2026-09-25T19:44:59Z'},NOW,True)
+
+
+@pytest.mark.parametrize('stamp',['2026-09-25T19:49:55.978124906Z','2026-09-25T15:49:55.9-04:00'])
+def test_alpaca_fractional_timestamp_precision_on_cloud_python(stamp):
+    assert str(quote_price({'bp':111.75,'ap':112.26,'t':stamp},NOW,True))=='112.005'

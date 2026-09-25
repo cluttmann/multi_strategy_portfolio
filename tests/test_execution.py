@@ -164,3 +164,15 @@ def test_stale_persisted_plan_cannot_submit_new_orders():
     l.release(t)
     with pytest.raises(SafetyStop,match='stale'):Executor(l,broker).run()
     assert broker.submits==0
+
+
+def test_broker_nanosecond_migration_timestamp_replays_utc_midnight_fees():
+    s=seeded()
+    s['started_at']='2026-09-25T15:55:42.978124906-04:00'
+    s['activity_through']='2026-09-25T19:58:59.123456789Z'
+    broker=FakeBroker();queries=[]
+    broker.activities=lambda after:queries.append(after) or []
+    result=Executor(Ledger(MemoryStore(s)),broker).run()
+    assert result=={'status':'reconciled'}
+    assert queries==['2026-09-25T00:00:00+00:00']
+    assert broker.submits==0

@@ -5,6 +5,7 @@ IEX is the subscribed real-time feed. No delayed SIP or last-trade fallback.
 """
 import datetime as dt
 from .ledger import dec,SafetyStop
+from .timestamps import parse_timestamp
 import requests
 
 
@@ -13,7 +14,7 @@ def quote_price(quote,now,require_fresh):
     if bid<=0 or ask<bid: raise SafetyStop('Missing or crossed bid/ask')
     mid=(bid+ask)/2
     if require_fresh:
-        stamp=dt.datetime.fromisoformat(quote['t'].replace('Z','+00:00'))
+        stamp=parse_timestamp(quote['t'])
         age=(now-stamp).total_seconds()
         if age < -5 or age>300: raise SafetyStop(f'Quote stale ({age:.0f}s)')
         if (ask-bid)/mid>dec('.009'): raise SafetyStop('Quote spread exceeds 0.9%')
@@ -27,7 +28,7 @@ def get_price(bot,api,symbol,env,require_fresh=False):
     data=bot.get_all_market_data(symbol,env) or {}
     quote=data.get('execution_quote')
     if quote:
-        stamp=dt.datetime.fromisoformat(quote['t'].replace('Z','+00:00'))
+        stamp=parse_timestamp(quote['t'])
         if 0<=(now-stamp).total_seconds()<30:
             return quote_price(quote,now,require_fresh)
     response=requests.get(f'https://data.alpaca.markets/v2/stocks/{symbol}/quotes/latest',

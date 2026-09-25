@@ -6,6 +6,7 @@ import time
 import requests
 from .ledger import SafetyStop, dec, text, reconcile_state, TERMINAL
 from .fees import accrue_regulatory_fees, settle_fee
+from .timestamps import parse_timestamp
 
 class AlpacaBroker:
     def __init__(self, api):
@@ -112,8 +113,10 @@ class Executor:
         unknown=[o['id'] for o in self.broker.open_orders() if o['client_order_id'] not in active_cids]
         if unknown: raise SafetyStop(f'Unmanaged open broker orders: {unknown}')
         # Replay with overlap to catch late same-day settlement/cash entries.
-        through=dt.datetime.fromisoformat(s['activity_through'].replace('Z','+00:00'))
-        floor=dt.datetime.fromisoformat(s['started_at'].replace('Z','+00:00')).replace(hour=0,minute=0,second=0,microsecond=0)
+        through=parse_timestamp(s['activity_through'])
+        # Fee activity dates are midnight UTC, even when the broker clock that
+        # seeded the ledger carried a New York offset.
+        floor=parse_timestamp(s['started_at']).astimezone(dt.timezone.utc).replace(hour=0,minute=0,second=0,microsecond=0)
         after=max(floor,through-dt.timedelta(days=7)).isoformat()
         activities=self.broker.activities(after)
         positions=self.broker.positions()
@@ -148,7 +151,7 @@ class Executor:
                 if row['status']=='planned':
                     planned_at=active.get('planned_at')
                     if planned_at:
-                        age=(dt.datetime.now(dt.timezone.utc)-dt.datetime.fromisoformat(planned_at.replace('Z','+00:00'))).total_seconds()
+                        age=(dt.datetime.now(dt.timezone.utc)-parse_timestamp(planned_at)).total_seconds()
                         if age>300: raise SafetyStop('Remaining plan is stale; reconcile and refresh before submitting')
                     # Persist claim BEFORE POST. A crash here blocks until explicit
                     # resolution, rather than risking a duplicate order.
