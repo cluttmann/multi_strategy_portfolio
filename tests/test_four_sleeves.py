@@ -308,7 +308,8 @@ def test_cloudbuild_deploys_and_schedules_the_new_sleeves():
     block = cb[cb.index("jobs describe daily_trend_sleeves"):]
     block = block[:block.index("waitFor")]
     assert "jobs create http daily_trend_sleeves" in block      # neuer Job: create-Zweig
-    assert "--schedule='50 15 * * 1-5'" in block and "America/New_York" in block
+    assert "--schedule='52 15 * * 1-5'" in block and "America/New_York" in block
+    assert block.count('--max-retry-attempts=2')==2
     assert "id: 'deploy-dm'" not in cb
     assert "gcloud functions delete monthly_dual_momentum" in cb
     assert "gcloud scheduler jobs delete daily_world_trend" in cb
@@ -345,4 +346,3 @@ def test_spx_contribution_follows_the_signal(monkeypatch, on, expect):
     margin = {"target_margin": 0, "metrics": {"leverage": 1.0}}
     main.make_monthly_buys_spx_trend({}, force_execute=True, investment_calc=calc, margin_result=margin, env="paper")
     assert [s for s, _ in bought] == [expect]
-

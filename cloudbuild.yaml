@@ -375,7 +375,8 @@ steps:
       - |
         if gcloud scheduler jobs describe daily_trend_sleeves --location=europe-west3 >/dev/null 2>&1; then
           gcloud scheduler jobs update http daily_trend_sleeves \
-            --schedule='50 15 * * 1-5' \
+            --schedule='52 15 * * 1-5' \
+            --max-retry-attempts=2 --min-backoff=15s --max-backoff=30s \
             --uri='https://europe-west3-trading-436516.cloudfunctions.net/daily_trend_sleeves' \
             --http-method='POST' \
             --time-zone='America/New_York' \
@@ -383,7 +384,8 @@ steps:
             --oidc-service-account-email='1098661711782-compute@developer.gserviceaccount.com'
         else
           gcloud scheduler jobs create http daily_trend_sleeves \
-            --schedule='50 15 * * 1-5' \
+            --schedule='52 15 * * 1-5' \
+            --max-retry-attempts=2 --min-backoff=15s --max-backoff=30s \
             --uri='https://europe-west3-trading-436516.cloudfunctions.net/daily_trend_sleeves' \
             --http-method='POST' \
             --time-zone='America/New_York' \

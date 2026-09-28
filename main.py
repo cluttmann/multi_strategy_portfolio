@@ -458,7 +458,17 @@ def get_alpaca_historical_bars(api, symbol, days=400, raw=False, adjustment="spl
 
 def _managed_run(api, env, action, **kwargs):
     try:
-        return get_controller(sys.modules[__name__], api, env).execute(action, **kwargs)
+        # The ten-minute reconcile may briefly own the account when the daily
+        # scheduler starts. Retry only that lease collision; all other safety
+        # stops still fail immediately and keep their alert.
+        for attempt in range(3 if action == "daily" else 1):
+            try:
+                return get_controller(sys.modules[__name__], api, env).execute(action, **kwargs)
+            except SafetyStop as exc:
+                if (action != "daily" or str(exc) != "Another executor owns this account"
+                        or attempt == 2):
+                    raise
+                time.sleep(5)
     except Exception as exc:
         send_telegram_message(f"❗ Shared ETF execution ({env}) stopped: {exc}")
         raise
@@ -3624,7 +3634,7 @@ def monthly_buy_mix8(request):
 
 @app.route("/daily_trend_sleeves", methods=["POST"])
 def daily_trend_sleeves_route(request):
-    """Taeglicher Check aller Trend-Sleeves (Scheduler 15:50 ET). Datenfehler => 500."""
+    """Taeglicher Check aller Trend-Sleeves (Scheduler 15:52 ET). Datenfehler => 500."""
     api = set_alpaca_environment(env=alpaca_environment)
     result = daily_trend_sleeves(api, env=alpaca_environment)
     return result, (500 if str(result).startswith("❌") else 200)

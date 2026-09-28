@@ -63,3 +63,50 @@ def test_reconcile_route_sends_one_failure_and_one_recovery(monkeypatch,_no_outs
     assert len(_no_outside_world)==2
     assert '$0.24' in _no_outside_world[0][1]
     assert 'reconciled' in _no_outside_world[1][1].lower()
+
+
+def test_daily_run_waits_for_short_reconcile_lease_without_alert(monkeypatch,_no_outside_world):
+    attempts=[]; waits=[]
+    class Controller:
+        def execute(self,action,**kwargs):
+            attempts.append(action)
+            if len(attempts)==1:
+                raise main.SafetyStop('Another executor owns this account')
+            return {'status':'complete'}
+    monkeypatch.setattr(main,'get_controller',lambda *args:Controller())
+    monkeypatch.setattr(main.time,'sleep',lambda seconds:waits.append(seconds))
+
+    assert main._managed_run({},'live','daily')=={'status':'complete'}
+    assert attempts==['daily','daily']
+    assert waits==[5]
+    assert _no_outside_world==[]
+
+
+def test_daily_run_reports_lease_after_bounded_retries(monkeypatch,_no_outside_world):
+    attempts=[]; waits=[]
+    class Controller:
+        def execute(self,action,**kwargs):
+            attempts.append(action)
+            raise main.SafetyStop('Another executor owns this account')
+    monkeypatch.setattr(main,'get_controller',lambda *args:Controller())
+    monkeypatch.setattr(main.time,'sleep',lambda seconds:waits.append(seconds))
+
+    with pytest.raises(main.SafetyStop,match='Another executor'):
+        main._managed_run({},'live','daily')
+    assert attempts==['daily']*3
+    assert waits==[5,5]
+    assert len(_no_outside_world)==1
+
+
+def test_daily_run_does_not_retry_other_safety_stops(monkeypatch,_no_outside_world):
+    attempts=[]
+    class Controller:
+        def execute(self,action,**kwargs):
+            attempts.append(action)
+            raise main.SafetyStop('Unexplained broker cash: -1')
+    monkeypatch.setattr(main,'get_controller',lambda *args:Controller())
+
+    with pytest.raises(main.SafetyStop,match='Unexplained broker cash'):
+        main._managed_run({},'live','daily')
+    assert attempts==['daily']
+    assert len(_no_outside_world)==1

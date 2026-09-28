@@ -369,7 +369,7 @@ Live seit 23.09.2026.
 
 **Regeln.**
 
-1. **Täglich** auswerten, 15:50 New Yorker Zeit, Montag bis Freitag.
+1. **Täglich** auswerten, 15:52 New Yorker Zeit, Montag bis Freitag.
 2. Je Bein: Signal auf dem **ungehebelten** Index gegen dessen **150-Tage-SMA**.
 3. **1-%-Band** um die SMA und **3 aufeinanderfolgende Bestätigungstage**, bevor der Zustand kippt.
 4. Bein an → seine 50 % in das gehebelte Produkt. Bein aus → seine 50 % in **USFR**.
@@ -456,7 +456,7 @@ Drawdown laufen, wenn die Gewichte am weitesten verrutscht sind.
 Das hält die Kostenbasis-Zuordnung eindeutig und verhindert, dass zwei Strategien
 dieselbe Position gegeneinander handeln.
 
-**Tägliche Trendprüfung.** `daily_trend_sleeves` feuert **15:50 New Yorker Zeit,
+**Tägliche Trendprüfung.** `daily_trend_sleeves` feuert **15:52 New Yorker Zeit,
 Mo–Fr** und wertet World-Trend und S&P-Trend aus.
 
 **Wächter.** `audit_monthly_run` feuert **14:00 New Yorker Zeit an Tag 8** und
