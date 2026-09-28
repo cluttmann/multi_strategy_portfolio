@@ -176,3 +176,15 @@ def test_broker_nanosecond_migration_timestamp_replays_utc_midnight_fees():
     assert result=={'status':'reconciled'}
     assert queries==['2026-09-25T00:00:00+00:00']
     assert broker.submits==0
+
+
+def test_live_recover_reconciles_daily_accrued_fee_without_order():
+    state=seeded();state['env']='live'
+    state['account_fee_tracker']={'accrued_fees':'5.23','pending':'5.23'}
+    broker=FakeBroker()
+    broker.account=lambda:{'id':'account','cash':'99.76','accrued_fees':'5.47'}
+    store=MemoryStore(state);executor=Executor(Ledger(store),broker)
+    assert executor.run()=={'status':'reconciled'}
+    assert executor.run()=={'status':'reconciled'}
+    assert store.read()['portfolios']['reserve']['cash']=='99.76'
+    assert broker.submits==0

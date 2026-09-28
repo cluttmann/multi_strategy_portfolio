@@ -136,6 +136,16 @@ def test_bootstrap_refuses_shared_ownership_without_evidence_and_open_orders():
     with pytest.raises(SafetyStop): bootstrap_state({'id':'a','cash':'0'},pos,[{'id':'open'}],{'aaa':['EET']},{},'paper','2026-09-25T19:00:00Z')
 
 
+def test_live_bootstrap_tracks_already_withheld_monthly_fees():
+    pos=[{'symbol':'EET','qty':'5','cost_basis':'400','market_value':'500'}]
+    account={'id':'a','cash':'-74','accrued_fees':'5.239978819444630009'}
+    s=bootstrap_state(account,pos,[],{'aaa':['EET']},{},'live','2026-09-25T19:00:00Z')
+    assert s['account_fee_tracker']['accrued_fees']==account['accrued_fees']
+    assert s['account_fee_tracker']['pending']=='5.24'
+    with pytest.raises(SafetyStop,match='accrued_fees'):
+        bootstrap_state({'id':'a','cash':'-74'},pos,[],{'aaa':['EET']},{},'live','2026-09-25T19:00:00Z')
+
+
 def test_annual_transfers_use_net_equity_with_tilted_margin_funding():
     c,store,broker=controller_fixture()
     c.bot.check_margin_conditions=lambda api,env:{'errors':[],'target_margin':.1,'allowed':True}

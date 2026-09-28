@@ -1,7 +1,7 @@
 """One-time import from the last exclusively owned portfolio. Never infer shares
 from new target weights. Unknown/retired positions remain explicit legacy assets.
 """
-from decimal import Decimal
+from decimal import Decimal,ROUND_HALF_UP
 from copy import deepcopy
 from .ledger import SafetyStop,new_state,dec,text,reconcile_state
 
@@ -44,6 +44,13 @@ def bootstrap_state(account,positions,open_orders,universes,old_states,env,as_of
             before.pop(field,None)
         meta[key]=before
     s=new_state(account['id'],env,holdings,{'reserve':text(max(Decimal(0),cash))},debt,as_of,meta)
+    if env=='live':
+        if 'accrued_fees' not in account:raise SafetyStop('Missing accrued_fees at live bootstrap')
+        accrued=dec(account['accrued_fees'])
+        if accrued<0:raise SafetyStop('Negative accrued_fees at live bootstrap')
+        s['account_fee_tracker']={'accrued_fees':text(accrued),
+                                  'pending':text(accrued.quantize(Decimal('.01'),rounding=ROUND_HALF_UP)),
+                                  'source':'broker accrued_fees at migration; included in initial cash'}
     for key in holdings:s['portfolios'][key]['basis']=basis[key]
     s['migration_policy']='exclusive holdings; retired assets legacy; initial debt proportional to actual gross value; cash reserve'
     reconcile_state(s,positions,account['cash'])

@@ -10,6 +10,7 @@ import pandas_market_calendars as mcal
 import datetime
 import sys
 from execution.controller import get_controller
+from execution.alerts import FirestoreIncidentGate, failure_message
 from execution.ledger import SafetyStop
 from google.cloud import firestore
 
@@ -3640,10 +3641,29 @@ def shared_etf_reconcile_route(request):
     api = set_alpaca_environment(env=alpaca_environment)
     try:
         result = get_controller(sys.modules[__name__], api, alpaca_environment).reconcile()
-        return jsonify(result), 200
     except Exception as exc:
-        send_telegram_message(f"❗ Shared ETF executor stopped: {exc}")
+        gate = None
+        try:
+            gate = FirestoreIncidentGate(get_firestore_client(), alpaca_environment)
+            notify = gate.failed(exc)
+        except Exception as alert_error:
+            print(f"Warning: shared ETF alert state unavailable: {alert_error}")
+            notify = True
+        if notify:
+            delivered = send_telegram_message(failure_message(exc))
+            if delivered != 200 and gate is not None:
+                try:
+                    gate.retry_notification(exc)
+                except Exception as alert_error:
+                    print(f"Warning: could not reset failed shared ETF notification: {alert_error}")
         raise
+    try:
+        gate = FirestoreIncidentGate(get_firestore_client(), alpaca_environment)
+        if gate.recovered():
+            send_telegram_message("✅ Shared ETF executor recovered: broker and ledger reconciled.")
+    except Exception as alert_error:
+        print(f"Warning: shared ETF recovery alert unavailable: {alert_error}")
+    return jsonify(result), 200
 
 
 @app.route("/index_alert", methods=["POST"])

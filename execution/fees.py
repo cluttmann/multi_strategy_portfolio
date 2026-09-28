@@ -5,8 +5,60 @@ June 2026 schedule: SEC .00002060 of proceeds, TAF .000195/share,
 rounded up cents. Never invent a cash correction: accrual requires confirmed
 sell fills AND a matching observed cash decrement. Rates outside 2026 fail closed.
 """
-from decimal import Decimal,ROUND_UP
+from decimal import Decimal,ROUND_HALF_UP,ROUND_UP
 from .ledger import dec,text,totals
+
+
+def accrue_account_fees(ledger,token,account):
+    """Book a cash debit only when Alpaca's accrued-fee change explains it.
+
+    The broker withholds these charges before its monthly INT/MGN receipt is
+    available. An absent baseline or a mismatched debit remains a safety stop.
+    """
+    state=ledger.store.read()
+    if state['env']!='live':return False
+    tracker=state.get('account_fee_tracker')
+    if not tracker or 'accrued_fees' not in account:return False
+    current=dec(account['accrued_fees']);previous=dec(tracker['accrued_fees'])
+    difference=dec(account['cash'])-totals(state)[1]
+    if current<previous:
+        if abs(difference)>dec('.02'):return False
+        def reset(s):
+            ledger.check(s,token)
+            if s.get('account_fee_tracker')!=tracker:raise RuntimeError('Fee tracker changed')
+            s['account_fee_tracker']['accrued_fees']=text(current)
+        ledger.store.mutate('account_fee_cycle',reset)
+        return True
+    delta=current-previous
+    if delta<=0 or difference>=-dec('.02'):return False
+    charge=(-difference).quantize(dec('.01'),rounding=ROUND_HALF_UP)
+    if charge<=0 or abs(charge-delta)>dec('.02') or abs(difference+charge)>dec('.02'):
+        return False
+    def accrue(s):
+        ledger.check(s,token)
+        if s.get('account_fee_tracker')!=tracker or totals(s)[1]!=totals(state)[1]:
+            raise RuntimeError('Account fee accrual state changed')
+        reserve=s['portfolios']['reserve'];net=dec(reserve['cash'])-dec(reserve['debt'])-charge
+        reserve['cash']=text(max(Decimal(0),net));reserve['debt']=text(max(Decimal(0),-net))
+        s['account_fee_tracker']['accrued_fees']=text(current)
+        s['account_fee_tracker']['pending']=text(dec(tracker['pending'])+charge)
+        s['account_fee_tracker'].setdefault('cash_debits',[]).append(
+            {'amount':text(charge),'accrued_fees_from':text(previous),
+             'accrued_fees_to':text(current),'broker_cash':text(account['cash'])})
+    ledger.store.mutate('account_fee_accrual',accrue)
+    return True
+
+
+def settle_account_fee(state,activity):
+    """Avoid booking the monthly margin-interest receipt a second time."""
+    amount=dec(activity['net_amount'])
+    tracker=state.get('account_fee_tracker')
+    if (not tracker or activity.get('activity_type')!='INT' or
+            activity.get('activity_sub_type')!='MGN' or amount>=0):return amount
+    covered=min(-amount,dec(tracker['pending']))
+    tracker['pending']=text(dec(tracker['pending'])-covered)
+    if covered:tracker.setdefault('receipt_ids',[]).append(activity['id'])
+    return amount+covered
 
 
 def accrue_regulatory_fees(ledger,token,activities,broker_cash):

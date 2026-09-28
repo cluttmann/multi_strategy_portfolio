@@ -5,7 +5,7 @@ import datetime as dt
 import time
 import requests
 from .ledger import SafetyStop, dec, text, reconcile_state, TERMINAL
-from .fees import accrue_regulatory_fees, settle_fee
+from .fees import accrue_regulatory_fees, accrue_account_fees, settle_fee, settle_account_fee
 from .timestamps import parse_timestamp
 
 class AlpacaBroker:
@@ -61,7 +61,9 @@ def sync_activities(ledger,token,activities,marks=None):
             elif typ in {'DIV','INT','FEE','CFEE','CSD','CSW','DIVNRA','DIVFT','DIVTX','DIVCGL','DIVCGS'}:
                 # Named account cash events remain in reserve; this is explicit
                 # centralized cash attribution, not fabricated record-date shares.
-                amt=settle_fee(s,a) if typ in {'FEE','CFEE'} else dec(a['net_amount'])
+                if typ in {'FEE','CFEE'}:amt=settle_fee(s,a)
+                elif typ=='INT':amt=settle_account_fee(s,a)
+                else:amt=dec(a['net_amount'])
                 r=s['portfolios']['reserve']; net=dec(r['cash'])-dec(r['debt'])+amt
                 r['cash']=text(max(Decimal(0),net));r['debt']=text(max(Decimal(0),-net))
                 # Positive account cash income first repays attributed debt;
@@ -125,6 +127,7 @@ class Executor:
         s=self.ledger.store.read(); account=self.broker.account()
         if account['id']!=s['account_id']: raise SafetyStop('Wrong broker account')
         accrue_regulatory_fees(self.ledger,token,activities,account['cash'])
+        accrue_account_fees(self.ledger,token,account)
         return reconcile_state(self.ledger.store.read(),self.broker.positions(),account['cash'])
 
     def run(self,plan=None,builder=None):

@@ -2,6 +2,7 @@ from decimal import Decimal
 import pytest
 from test_execution import MemoryStore,seeded
 from execution.ledger import Ledger,totals,SafetyStop
+from execution import fees
 from execution.fees import accrue_regulatory_fees
 from execution.broker import sync_activities
 
@@ -31,3 +32,39 @@ def test_posted_fee_is_not_double_booked_and_unused_provision_is_released():
     sync_activities(l,t,events);sync_activities(l,t,events)
     assert totals(st.read())[1]==Decimal('3138.5168074505')
     assert st.read()['fee_accruals'][0]['remaining']=='0'
+
+
+def test_daily_accrued_fee_debit_is_booked_once_against_observed_cash():
+    st,l,t=prepared()
+    def seed(s):
+        s['portfolios']['reserve']['cash']='0'
+        s['account_fee_tracker']={'accrued_fees':'5.239978819444630009','pending':'5.24'}
+    st.mutate('seed',seed)
+    cash=totals(st.read())[1]-Decimal('0.2425978659')
+    account={'cash':str(cash),'accrued_fees':'5.477286597222466201'}
+    assert fees.accrue_account_fees(l,t,account)
+    assert st.read()['portfolios']['reserve']['debt']=='0.24'
+    assert st.read()['account_fee_tracker']['pending']=='5.48'
+    assert not fees.accrue_account_fees(l,t,account)
+    assert st.read()['portfolios']['reserve']['debt']=='0.24'
+
+
+def test_unmatched_accrued_fee_change_still_stops_cash_reconciliation():
+    st,l,t=prepared()
+    st.mutate('seed',lambda s:s.update(account_fee_tracker={'accrued_fees':'5.23','pending':'5.23'}))
+    account={'cash':str(totals(st.read())[1]-Decimal('2.24')),'accrued_fees':'5.47'}
+    assert not fees.accrue_account_fees(l,t,account)
+    assert st.read()['portfolios']['reserve']['debt']=='0'
+    assert st.read()['account_fee_tracker']['accrued_fees']=='5.23'
+
+
+def test_monthly_margin_interest_receipt_consumes_existing_provision():
+    st,l,t=prepared()
+    st.mutate('seed',lambda s:s.update(account_fee_tracker={'accrued_fees':'5.48','pending':'5.48'}))
+    before=totals(st.read())[1]
+    activity={'id':'margin-interest','activity_type':'INT','activity_sub_type':'MGN',
+              'date':'2026-10-01','net_amount':'-5.48'}
+    sync_activities(l,t,[activity])
+    sync_activities(l,t,[activity])
+    assert totals(st.read())[1]==before
+    assert Decimal(st.read()['account_fee_tracker']['pending'])==0

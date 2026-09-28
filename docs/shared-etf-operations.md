@@ -73,6 +73,23 @@ Unmatched cash movements still stop. The accrual rates apply April–December 20
 update against the published fee schedule before extending them to later dates.
 Parqet exports only posted broker fees; never export an estimated ledger accrual.
 
+Alpaca also withholds account fees, including margin interest, in `cash` before
+the monthly `INT/MGN` activity is posted. The live bootstrap records the broker's
+then-current `accrued_fees` as a baseline and a pending amount already included
+in initial cash. On each run, a later increase is provisioned in the account
+reserve only when the observed broker cash debit matches within the two-cent
+broker rounding tolerance.
+The posted `INT/MGN` receipt consumes the provision instead of debiting twice.
+If the baseline is missing or the cash movement does not match, reconciliation
+still stops. Each provision records the broker cash and the before/after fee
+counter in the immutable ledger journal.
+
+The reconcile route sends one Telegram stop alert per unresolved error class,
+then one recovery alert when the broker and ledger agree again. It continues to
+return HTTP 500 on every failed run so Cloud Scheduler and logs retain the
+failure signal. A changed cash discrepancy remains the same alert incident;
+the full amount stays in Cloud Run logs.
+
 ## Commands
 
 Run from the repository with the existing local credentials; output directories
