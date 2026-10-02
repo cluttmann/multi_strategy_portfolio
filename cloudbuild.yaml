@@ -226,7 +226,7 @@ steps:
       - '-c'
       - |
         gcloud scheduler jobs update http monthly_invest_all \
-          --schedule='5,35 10-15 1-7 *' \
+          --schedule='5,35 10-15 1-7 * *' \
           --uri='https://europe-west3-trading-436516.cloudfunctions.net/monthly_invest_all' \
           --http-method='POST' \
           --time-zone='America/New_York' \
@@ -234,7 +234,7 @@ steps:
           --max-retry-attempts=2 --min-backoff=15s --max-backoff=30s \
           --oidc-service-account-email='1098661711782-compute@developer.gserviceaccount.com' \
         || gcloud scheduler jobs create http monthly_invest_all \
-          --schedule='5,35 10-15 1-7 *' \
+          --schedule='5,35 10-15 1-7 * *' \
           --uri='https://europe-west3-trading-436516.cloudfunctions.net/monthly_invest_all' \
           --http-method='POST' \
           --time-zone='America/New_York' \

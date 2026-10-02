@@ -67,7 +67,7 @@ remaining risks and commit SHA to the task report path supplied by root.
 ### Task 2: Runtime integration and infrastructure (root)
 
 Wire any new quote getter / retry statuses to main. Repeated monthly scheduler:
-5,35 10-15 1-7 * America/New_York (off reconcile's ten-minute schedule, first eligible
+5,35 10-15 1-7 * * America/New_York (off reconcile's ten-minute schedule, first eligible
 at 10:35 to avoid opening noise), bounded lease collision retry for monthly/daily.
 Update reporting/operational docs. Preserve deployment waves and no manual
 Cloud Build submission. Use free IEX; the user rejected the 99 USD/month SIP tariff. Wider venue spreads may expire pending entries.
