@@ -108,3 +108,20 @@ requests, Firestore writes, deploy, or subagents. Root owns docs/rollout. This
 addition follows the explicit request to implement everything and the user's
 new order-based cost constraint. The cost of this conservative choice is a
 possibly unfilled EET allocation; cash remains available after expiry.
+
+### Task 5: Repair first scheduled production run
+
+The first real monthly call at 17:05 Berlin failed before storing a plan or
+funding: Controller.valuation_prices supplied three positional arguments to
+main.update_market_data, whose contract is (symbol, env='live'). Correct that
+contract and cover cache misses with a strict adapter regression. Audit adjacent
+bot calls for the same mismatch without widening the strategy scope.
+
+The simultaneous five-minute reconcile hit the account lease and incorrectly
+created a failed incident. Only the exact SafetyStop 'Another executor owns this
+account' should return pending/account_busy HTTP 200 without failed or recovered
+incident state or Telegram. Other errors remain visible HTTP 500; keep fencing
+and the current Scheduler timings. The next background tick performs the real
+reconciliation. Implementer owns controller, main and relevant regression tests;
+root owns docs, deployment and GET-only live verification. RED/GREEN, full suite,
+independent review and a new immutable commit are required before the push.
