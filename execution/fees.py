@@ -113,6 +113,21 @@ def _known_receipt(days,activity):
     return False
 
 
+def validate_daily_activity_identity(state,activity):
+    """Check durable daily IDs before overlap filtering or any cash handling."""
+    days=state.get('regulatory_fee_days',{})
+    aid=activity.get('id')
+    for date,row in days.items():
+        _check_day(date,row)
+        if aid in row['fills']:
+            if activity.get('activity_type')!='FILL':
+                raise SafetyStop('Regulatory fee fill activity type changed')
+            fact=_fill_fact(activity,state.get('order_owners',{}),state['portfolios'])
+            if row['fills'][aid]!=fact:
+                raise SafetyStop('Conflicting regulatory fee fill identity')
+    _known_receipt(days,activity)
+
+
 def accrue_account_fees(ledger,token,account):
     """Book a cash debit only when Alpaca's accrued-fee change explains it.
 
@@ -224,6 +239,7 @@ def accrue_regulatory_fees(ledger,token,activities,broker_cash):
     legacy_seen={fid for a in state.get('fee_accruals',[]) for fid in a['fill_ids']}
     legacy=[]
     for fill in activities:
+        validate_daily_activity_identity(state,fill)
         if _known_receipt(days,fill):continue
         if (fill.get('activity_type') in {'FEE','CFEE'} and
                 fill.get('activity_sub_type') in FEE_TYPES):

@@ -5,7 +5,8 @@ import datetime as dt
 import time
 import requests
 from .ledger import SafetyStop, dec, text, reconcile_state, TERMINAL
-from .fees import accrue_regulatory_fees, accrue_account_fees, settle_fee, settle_account_fee
+from .fees import (accrue_regulatory_fees, accrue_account_fees, settle_fee,
+                   settle_account_fee, validate_daily_activity_identity)
 from .timestamps import parse_timestamp
 
 def definitive_order_rejection(error):
@@ -83,6 +84,7 @@ def sync_activities(ledger,token,activities,marks=None):
         ledger.check(s,token)
         seen=set(s.get('activity_ids',[])); owners=s.get('order_owners',{})
         for a in activities:
+            validate_daily_activity_identity(s,a)
             aid=a['id']
             if aid in seen: continue
             typ=a.get('activity_type')

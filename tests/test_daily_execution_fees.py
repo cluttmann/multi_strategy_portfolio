@@ -276,13 +276,15 @@ def test_recover_ingests_real_fill_evidence_then_explains_october_cash_without_p
     assert len(day(store)['fills']) == 8
 
 
-def test_accrual_audits_changed_receipt_even_when_global_activity_ids_skip_it():
+def test_changed_receipt_is_rejected_at_ingestion_and_accrual_with_retained_ids():
     store, ledger, token = prepared()
     event = receipt('sec', 'REG', '-.03')
     sync_activities(ledger, token, [event])
     changed = event | {'net_amount': '-.04'}
-    sync_activities(ledger, token, [changed])  # The general overlap path skips it.
     before = store.read()
+    with pytest.raises(SafetyStop, match='receipt'):
+        sync_activities(ledger, token, [changed])
+    assert store.read() == before
     with pytest.raises(SafetyStop, match='receipt'):
         accrue_regulatory_fees(ledger, token, [changed] + OCTOBER_FILLS, '-.05')
     assert store.read() == before
@@ -373,4 +375,41 @@ def test_unknown_daily_policy_cannot_be_used_for_another_cash_accrual():
     before = store.read()
     with pytest.raises(SafetyStop, match='policy'):
         accrue_regulatory_fees(ledger, token, OCTOBER_FILLS, '-.05')
+    assert store.read() == before
+
+
+@pytest.mark.parametrize('known_kind', ['fill', 'receipt'])
+@pytest.mark.parametrize('pruned', [False, True])
+def test_changed_daily_activity_type_is_rejected_before_cash_or_overlap_write(known_kind, pruned):
+    store, ledger, token = prepared(reserve_cash='100')
+    sync_activities(ledger, token, OCTOBER_FILLS)
+    assert accrue_regulatory_fees(ledger, token, OCTOBER_FILLS, '99.95')
+    if known_kind == 'receipt':
+        sync_activities(ledger, token, [receipt('sec', 'REG', '-.03')])
+        aid = 'sec'
+    else:
+        aid = 'dbc-1'
+    if pruned:
+        store.mutate('overlap_pruned', lambda s: s.update(activity_ids=[]))
+    before = store.read()
+    events_before = len(store.events)
+    changed = dict(id=aid, activity_type='DIV', date='2026-10-02', net_amount='.10')
+    # A legitimate earlier event in the page must also remain uncommitted.
+    earlier = dict(id='unrelated-dividend', activity_type='DIV', date='2026-10-02', net_amount='.20')
+    with pytest.raises(SafetyStop, match=known_kind):
+        sync_activities(ledger, token, [earlier, changed])
+    assert store.read() == before
+    assert len(store.events) == events_before
+
+
+@pytest.mark.parametrize('pruned', [False, True])
+def test_changed_fill_quantity_is_rejected_before_activity_ingestion(pruned):
+    store, ledger, token = prepared(reserve_cash='100')
+    sync_activities(ledger, token, OCTOBER_FILLS)
+    assert accrue_regulatory_fees(ledger, token, OCTOBER_FILLS, '99.95')
+    if pruned:
+        store.mutate('overlap_pruned', lambda s: s.update(activity_ids=[]))
+    before = store.read()
+    with pytest.raises(SafetyStop, match='fill'):
+        sync_activities(ledger, token, [OCTOBER_FILLS[0] | {'qty': '31'}])
     assert store.read() == before
