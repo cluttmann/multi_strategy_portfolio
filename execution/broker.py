@@ -29,6 +29,9 @@ class AlpacaBroker:
         return self.request('POST','/v2/orders',json={k:row[k] for k in ('symbol','qty','side','limit_price','client_order_id')} |
                             {'type':'limit','time_in_force':'day'})
     def cancel(self,order_id): return self.request('DELETE',f'/v2/orders/{order_id}')
+    def trading_days(self,start,end):
+        return self.request('GET','/v2/calendar',params={'start':start,'end':end})
+
     def activities(self,after):
         rows=[]; token=None
         while True:
@@ -98,8 +101,10 @@ def sync_activities(ledger,token,activities,marks=None):
 
 
 class Executor:
-    def __init__(self,ledger,broker,poll_seconds=2,timeout=90):
+    def __init__(self,ledger,broker,poll_seconds=2,timeout=90,quote_getter=None,margin_validator=None,now=None):
         self.ledger=ledger;self.broker=broker;self.poll_seconds=poll_seconds;self.timeout=timeout
+        self.quote_getter=quote_getter;self.margin_validator=margin_validator
+        self.now=now or (lambda:dt.datetime.now(dt.timezone.utc))
 
     def recover(self,token):
         s=self.ledger.store.read(); active=s.get('active')
@@ -130,19 +135,56 @@ class Executor:
         accrue_account_fees(self.ledger,token,account)
         return reconcile_state(self.ledger.store.read(),self.broker.positions(),account['cash'])
 
-    def run(self,plan=None,builder=None):
+    def run(self,plan=None,builder=None,interrupt_builder=None):
         t=self.ledger.acquire()
         try:
-            self.recover(t)
+            try:self.recover(t)
+            except Exception as exc:
+                failed=self.ledger.store.read().get('active')
+                if failed and failed.get('execution_policy')=='monthly-iex-v1':
+                    def error(s):self.ledger.check(s,t);s['active']['last_error']=str(exc)
+                    self.ledger.store.mutate('monthly_recovery_error',error)
+                    return {'status':'data_error','run_id':failed['id'],'errors':[str(exc)]}
+                raise
+            state=self.ledger.store.read()
+            if not state['active'] and state.get('suspended_monthly') and plan is None:
+                def resume_before_signals(s):
+                    self.ledger.check(s,t);s['active']=s.pop('suspended_monthly')
+                self.ledger.store.mutate('monthly_resume',resume_before_signals)
+                state=self.ledger.store.read()
+            if state.get('active',{} ) and state['active'].get('execution_policy')=='monthly-iex-v1' and interrupt_builder:
+                daily=interrupt_builder(state,self.broker)
+                if daily is not None:
+                    from .monthly import cancel_open
+                    if not cancel_open(self,t):return {'status':'pending','reason':'daily_risk_cancel_unconfirmed','run_id':state['active']['id']}
+                    self.recover(t)
+                    # Cancels can carry late fills. Rebuild daily quantities from
+                    # those confirmed holdings, never the pre-cancel snapshot.
+                    daily=interrupt_builder(self.ledger.store.read(),self.broker)
+                    if daily is None:return {'status':'pending','reason':'daily_already_complete','run_id':state['active']['id']}
+                    def suspend(s):
+                        self.ledger.check(s,t)
+                        monthly=s['active']
+                        off={(key,sym) for key,meta in daily.get('metadata',{}).items() for sym,on in meta.get('leg_states',{}).items() if not on}
+                        for intent in monthly['intents']:
+                            if intent['side']=='buy' and (intent['strategy'],intent['symbol']) in off:
+                                intent.update(status='invalidated',reason='daily_risk_off')
+                        for key,meta in daily.get('metadata',{}).items():monthly['metadata'][key]=deepcopy(meta)
+                        s['suspended_monthly']=monthly;s['active']=None
+                    self.ledger.store.mutate('monthly_suspend_for_daily',suspend)
+                    plan=daily;builder=None
             state=self.ledger.store.read()
             if not state['active']:
                 if builder: plan=builder(state,self.broker)
                 if plan is None: return {'status':'reconciled'}
-                if plan['orders'] and not self.broker.clock()['is_open']:
+                if plan.get('execution_policy')!='monthly-iex-v1' and plan['orders'] and not self.broker.clock()['is_open']:
                     return {'status':'awaiting_market'}
                 self.ledger.start(t,plan)
             active=self.ledger.store.read()['active']
             if active is None: return {'status':'already_complete'}
+            if active.get('execution_policy')=='monthly-iex-v1':
+                from .monthly import run_monthly
+                return run_monthly(self,t)
             if not self.broker.clock()['is_open'] and active['orders']:
                 return {'status':'awaiting_market','run_id':active['id']}
             for i in range(len(active['orders'])):

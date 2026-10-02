@@ -5,6 +5,7 @@ import datetime as dt
 from zoneinfo import ZoneInfo
 from .ledger import dec, text, SafetyStop, Ledger, FirestoreStore
 from .broker import AlpacaBroker, Executor
+from .quotes import get_quote
 
 VERSION='shared-etf-2026-09-v1'
 ZERO=Decimal(0)
@@ -63,7 +64,9 @@ class Controller:
         if account.get('trading_blocked') or account.get('account_blocked'):
             raise SafetyStop('Broker account trading blocked')
         self.store=store or FirestoreStore(bot.get_firestore_client(),account['id'],env)
-        self.ledger=Ledger(self.store);self.executor=Executor(self.ledger,self.broker)
+        self.ledger=Ledger(self.store);self.executor=Executor(
+            self.ledger,self.broker,quote_getter=lambda symbol:get_quote(self.bot,self.api,symbol,self.env),
+            margin_validator=lambda state:self.bot.check_margin_conditions(self.api,env=self.env))
 
     def prices(self,state,extra=None,trading=False):
         if extra is None:
@@ -77,6 +80,22 @@ class Controller:
             return {s:marks[s] for s in symbols}
         return {s:dec(self.bot.get_execution_price(self.api,s,self.env,require_fresh=trading)) for s in sorted(set(extra))}
 
+    def valuation_prices(self,state,symbols):
+        marks={p['symbol']:dec(p['current_price']) for p in self.broker.positions() if p.get('current_price')}
+        for symbol in symbols:
+            if marks.get(symbol,0)>0:continue
+            if hasattr(self.bot,'get_all_market_data'):
+                data=self.bot.get_all_market_data(symbol,self.env) or {}
+                if not data.get('price'):
+                    self.bot.update_market_data(self.api,symbol,self.env)
+                    data=self.bot.get_all_market_data(symbol,self.env) or {}
+                mark=dec(data.get('price',0))
+                if mark<=0:raise SafetyStop(f'{symbol}: missing valuation mark for monthly target')
+                marks[symbol]=mark
+            else:
+                marks[symbol]=dec(self.bot.get_execution_price(self.api,symbol,self.env,require_fresh=False))
+        return {s:marks[s] for s in symbols}
+
     def values(self):
         s=self.store.read(); prices=self.prices(s)
         return {k:position_value(s,k,prices) for k in self.bot.SLEEVES}
@@ -89,7 +108,7 @@ class Controller:
 
     def build(self,state,action,period,annual=False):
         bot=self.bot
-        if state['last_completed'].get(action,'')>=period: return None
+        if max(state['last_completed'].get(action,''),state.get('last_expired',{}).get(action,''))>=period: return None
         configs={c['strategy_key']:c for c in [bot.aaa_config,bot.mix8_config]+bot.TREND_SLEEVES}
         monthly=action in ('monthly','monthly-funding')
         keys=list(configs) if monthly else (['mix8'] if action=='mix8-upgrade' else [c['strategy_key'] for c in bot.TREND_SLEEVES])
@@ -178,18 +197,28 @@ class Controller:
             meta['last_signal_check_date']=period;metadata[k]=meta
         symbols={s for tgt in targets.values() for s,v in tgt.items() if dec(v)>0}
         symbols|={s for k in targets for s,q in state['portfolios'][k]['positions'].items() if dec(q)>0}
-        prices.update(self.prices(state,symbols,trading=True))
+        prices.update(self.valuation_prices(state,symbols) if monthly else self.prices(state,symbols,trading=True))
         assets={s:self.broker.asset(s) for s in symbols}
         # Zero target entries with no holdings do not require an asset/price.
         targets={k:{s:v for s,v in tgt.items() if s in symbols} for k,tgt in targets.items()}
         orders=target_orders(state,targets,prices,assets,funding,transfers)
         for row in orders:
             metadata[row['strategy']]['last_trade_date']=dt.datetime.now(ZoneInfo('America/New_York')).date().isoformat()
-        return {'action':action,'period':period,'version':VERSION,'orders':orders,'funding':funding,
+        result={'action':action,'period':period,'version':VERSION,'orders':orders,'funding':funding,
                 'margin_budget':text(margin),'funding_debt':funding_debt,'transfers':transfers,'metadata':metadata,
                 'margin_retry':bool((gate or {}).get('errors')),
                 'targets':targets,'prices':{s:text(prices[s]) for s in symbols},'margin_gate':gate,
                 'planned_at':dt.datetime.now(dt.timezone.utc).isoformat()}
+        if monthly:
+            result['execution_policy']='monthly-iex-v1'
+            result['intents']=[{'id':f"{i}-{r['strategy']}-{r['symbol']}-{r['side']}",
+                               'strategy':r['strategy'],'symbol':r['symbol'],'side':r['side'],
+                               'budget':text(dec(r['qty'])*dec(r['limit_price'])), 'qty':r['qty'],
+                               'fractionable':bool(assets[r['symbol']].get('fractionable')),
+                               'full_liquidation':r['side']=='sell' and dec(targets[r['strategy']].get(r['symbol'],0))==0,
+                               'risk_exit':r['side']=='sell' and (bool(metadata[r['strategy']].get('last_momentum_check',{}).get('dd_triggered')) or metadata[r['strategy']].get('leg_states',{}).get(r['symbol']) is False),
+                               'status':'pending'} for i,r in enumerate(orders)]
+        return result
 
     def execute(self,action,force=False,annual=None,period=None):
         self.bot.validate_force_environment(self.env,force)
@@ -210,8 +239,11 @@ class Controller:
             if not self.broker.clock()['is_open']:
                 return {'status':'awaiting_market'}
         annual=(now.month==self.bot.rebalance_config['annual_rebalance_month']) if annual is None else annual
-        result=self.executor.run(builder=lambda s,b:self.build(s,action,period,annual))
+        result=self.executor.run(builder=lambda s,b:self.build(s,action,period,annual),
+                                 interrupt_builder=(lambda s,b:self.build(s,'daily',period,False)) if action=='daily' else None)
         self.publish()
+        if result['status'] in ('expired','data_error'):
+            self.bot.send_telegram_message(('⚠️ Monthly execution remainder expired' if result['status']=='expired' else '❗ Monthly execution data error')+' ('+self.env+'): '+str(result.get('errors') or result.get('run_id') or period))
         if result['status']=='complete':
             run=result['run']
             if run['action'] in ('monthly','monthly-funding'):

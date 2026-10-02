@@ -1,7 +1,7 @@
 """Quote timestamp/spread validation, sharing the existing market-data cache.
 
 The quote has its OWN timestamps: refreshing it must not freshen cached SMAs.
-IEX is the subscribed real-time feed. No delayed SIP or last-trade fallback.
+Execution uses IEX. No delayed SIP, SIP subscription or last-trade fallback.
 """
 import datetime as dt
 from .ledger import dec,SafetyStop
@@ -22,20 +22,74 @@ def quote_price(quote,now,require_fresh):
 
 
 def get_price(bot,api,symbol,env,require_fresh=False):
-    now=dt.datetime.now(dt.timezone.utc)
-    # Read the canonical cache. A missing/old general cache is not usable for
-    # alerts, but the independently stamped quote can still be fresh.
-    data=bot.get_all_market_data(symbol,env) or {}
-    quote=data.get('execution_quote')
-    if quote:
-        stamp=parse_timestamp(quote['t'])
-        if 0<=(now-stamp).total_seconds()<30:
-            return quote_price(quote,now,require_fresh)
+    quote=get_quote(bot,api,symbol,env)
+    mid=validate_quote(quote)
+    if require_fresh and (dec(quote['ap'])-dec(quote['bp']))/mid>dec('.009'):
+        raise SafetyStop(f'{symbol}: quote spread exceeds 0.9%')
+    return mid
+
+
+EET_SPREAD_SOFT=dec('.003')
+EET_SPREAD_HARD=dec('.005')
+EET_FIRST_CONCESSION=dec('.001')
+EET_LATER_CONCESSION=dec('.0015')
+
+
+class QuoteDeferred(RuntimeError):
+    """A valid market whose spread is temporarily outside the entry policy."""
+
+
+def validate_quote(quote,now=None):
+    now=now or dt.datetime.now(dt.timezone.utc)
+    if quote.get('source')!='iex':raise SafetyStop('Execution quote source must be IEX')
+    bid,ask=dec(quote.get('bp',0)),dec(quote.get('ap',0))
+    if bid<=0 or ask<=0 or ask<bid or dec(quote.get('bs',0))<=0 or dec(quote.get('as',0))<=0:
+        raise SafetyStop('Missing, crossed or zero-depth IEX market')
+    try:age=(now-parse_timestamp(quote['t'])).total_seconds()
+    except (KeyError,ValueError,TypeError) as exc:raise SafetyStop('Malformed IEX quote timestamp') from exc
+    if age< -5 or age>30:raise SafetyStop(f'IEX quote stale ({age:.0f}s)')
+    return (bid+ask)/2
+
+
+def execution_limit(quote,symbol,side,attempt=0,now=None,risk_exit=False):
+    from decimal import Decimal,ROUND_DOWN,ROUND_UP
+    mid=validate_quote(quote,now)
+    bid,ask=dec(quote['bp']),dec(quote['ap'])
+    spread=(ask-bid)/mid
+    if symbol=='EET' and not risk_exit:
+        if spread>EET_SPREAD_HARD:raise QuoteDeferred('spread_above_hard_limit')
+        concession=EET_FIRST_CONCESSION if attempt==0 else EET_LATER_CONCESSION
+    else:
+        if spread>dec('.009'):raise QuoteDeferred('spread_above_hard_limit')
+        concession=dec('.005')
+    # Even below the soft EET spread threshold the concession bound applies.
+    # At .003-.005 the bounded price deliberately rests inside the market.
+    if side=='buy':return min(ask,mid*(1+concession)).quantize(Decimal('.01'),rounding=ROUND_DOWN)
+    if side=='sell':return max(bid,mid*(1-concession)).quantize(Decimal('.01'),rounding=ROUND_UP)
+    raise SafetyStop('Invalid execution side')
+
+
+def get_quote(bot,api,symbol,env='live',use_cache=True,persist=True,now=None):
+    """Read an actual fresh IEX market; persist=False is a read-only preflight.
+
+    Quote source and source timestamp are independent of the valuation/SMA cache.
+    A cached SIP quote never satisfies an IEX request. No provider fallback exists.
+    """
+    injected_now=now
+    now=now or dt.datetime.now(dt.timezone.utc)
+    data=(bot.get_all_market_data(symbol,env) or {}) if use_cache else {}
+    cached=data.get('execution_quote')
+    if cached and cached.get('source')=='iex':
+        try:validate_quote(cached,now);return cached
+        except SafetyStop:pass
     response=requests.get(f'https://data.alpaca.markets/v2/stocks/{symbol}/quotes/latest',
                           headers=bot.get_auth_headers(api),params={'feed':'iex'},timeout=(5,20))
-    response.raise_for_status();quote=response.json()['quote']
-    try: price=quote_price(quote,now,require_fresh)
-    except SafetyStop as exc: raise SafetyStop(f'{symbol}: {exc}') from exc
-    bot.get_firestore_client().collection(f'market-data-{env}').document(bot.normalize_symbol(symbol)).set(
-        {'execution_quote':quote,'execution_quote_downloaded_at':now},merge=True)
-    return price
+    response.raise_for_status()
+    try:quote={**response.json()['quote'],'source':'iex'}
+    except (KeyError,TypeError,ValueError) as exc:raise SafetyStop(f'{symbol}: malformed IEX response') from exc
+    downloaded_at=injected_now or dt.datetime.now(dt.timezone.utc)
+    validate_quote(quote,downloaded_at)
+    if persist:
+        bot.get_firestore_client().collection(f'market-data-{env}').document(bot.normalize_symbol(symbol)).set(
+            {'execution_quote':quote,'execution_quote_source':'iex','execution_quote_downloaded_at':downloaded_at},merge=True)
+    return quote

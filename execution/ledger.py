@@ -182,10 +182,13 @@ class Ledger:
                 if (s['active']['action'],s['active']['period'])!=(plan['action'],plan['period']):
                     raise SafetyStop('Prior plan must finish before another can start')
                 return
-            if s['last_completed'].get(plan['action'],'')>=plan['period']: return
+            if max(s['last_completed'].get(plan['action'],''),s.get('last_expired',{}).get(plan['action'],''))>=plan['period']: return
             p=deepcopy(plan)
             p['id']=hashlib.sha256(f"{s['account_id']}|{s['env']}|{p['action']}|{p['period']}".encode()).hexdigest()[:32]
             p['created_at']=utcnow()
+            if p.get('execution_policy')=='monthly-iex-v1':
+                p['valuation_order_preview']=p['orders']
+                p['orders']=[]
             for i,row in enumerate(p['orders']):
                 port=s['portfolios'][row['strategy']]
                 if row['side'] not in ('sell','buy') or dec(row['qty'])<=0 or dec(row['limit_price'])<=0:
@@ -212,7 +215,7 @@ class Ledger:
             s['active']=p
         return self.store.mutate('start',start)
 
-    def mark_submitting(self,token,index):
+    def mark_submitting(self,token,index,submitted_at=None):
         def mark(s):
             self.check(s,token); row=s['active']['orders'][index]
             if row['status']!='planned': raise SafetyStop('Intent already claimed')
@@ -221,7 +224,7 @@ class Ledger:
                 raise SafetyStop('Insufficient owned shares')
             if row['side']=='buy' and dec(row['qty'])*dec(row['limit_price'])>dec(p['cash']):
                 raise SafetyStop('Insufficient strategy cash; confirmed proceeds only')
-            row['status']='submitting';row['submitted_at']=utcnow()
+            row['status']='submitting';row['submitted_at']=submitted_at or utcnow()
             return deepcopy(row)
         return self.store.mutate('intent',mark)
 
