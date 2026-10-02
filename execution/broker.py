@@ -110,7 +110,7 @@ class Executor:
         s=self.ledger.store.read(); active=s.get('active')
         if active:
             for i,row in enumerate(active['orders']):
-                if row['status']=='planned': continue
+                if row['status']=='planned' or row.get('never_submitted'): continue
                 order=self.broker.by_client_id(row['client_order_id'])
                 if order is None:
                     raise SafetyStop(f"Submission ambiguous; no second POST: {row['client_order_id']}")
@@ -165,10 +165,13 @@ class Executor:
                     def suspend(s):
                         self.ledger.check(s,t)
                         monthly=s['active']
-                        off={(key,sym) for key,meta in daily.get('metadata',{}).items() for sym,on in meta.get('leg_states',{}).items() if not on}
+                        states={(key,sym):bool(on) for key,meta in daily.get('metadata',{}).items() for sym,on in meta.get('leg_states',{}).items()}
                         for intent in monthly['intents']:
-                            if intent['side']=='buy' and (intent['strategy'],intent['symbol']) in off:
+                            signal=states.get((intent['strategy'],intent['symbol']))
+                            if intent['side']=='buy' and signal is False:
                                 intent.update(status='invalidated',reason='daily_risk_off')
+                            elif intent['side']=='sell' and intent.get('risk_exit') and signal is True:
+                                intent.update(status='invalidated',reason='daily_risk_on')
                         for key,meta in daily.get('metadata',{}).items():monthly['metadata'][key]=deepcopy(meta)
                         s['suspended_monthly']=monthly;s['active']=None
                     self.ledger.store.mutate('monthly_suspend_for_daily',suspend)

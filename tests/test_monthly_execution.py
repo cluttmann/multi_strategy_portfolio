@@ -245,3 +245,131 @@ def test_daily_signal_runs_even_when_monthly_plan_is_suspended():
     assert ex.run(interrupt_builder=build)['status']=='complete'
     assert calls==['monthly','monthly']
     assert store.read()['last_completed']['daily']=='2026-10-03'
+
+def test_crash_after_atomic_attempt_claim_never_leaves_planned_or_reposts():
+    ex,store,broker,p=fixture();original=store.mutate;crashed=[False]
+    def crash(kind,fn):
+        result=original(kind,fn)
+        if kind=='monthly_attempt' and not crashed[0]:
+            crashed[0]=True
+            raise RuntimeError('crash immediately after durable claim')
+        return result
+    store.mutate=crash
+    result=ex.run(p)
+    assert result['status']=='data_error'
+    first=store.read()['active']['orders'][0]
+    assert first['status']=='submitting' and first['submitted_at']
+    before=broker.submits
+    assert ex.run(p)['status']=='data_error'
+    assert broker.submits==before
+
+
+def test_reconcile_finalizes_monthly_completion_once():
+    from test_shared_integration import controller_fixture
+    c,store,broker=controller_fixture();messages=[];audit=[]
+    run={'id':'completed-run','action':'monthly','period':'2026-10','orders':[]}
+    c.executor.run=lambda:{'status':'complete','run':run}
+    c.publish=lambda:None
+    c.bot.send_telegram_message=lambda message:messages.append(message)
+    c.bot.mark_monthly_run_complete=lambda env,clean:audit.append((env,clean))
+    c.reconcile();c.reconcile()
+    assert len(messages)==1 and audit==[('paper',True)]
+
+
+def test_reconcile_expiry_reports_real_remainder_without_clean_marker():
+    from test_shared_integration import controller_fixture
+    c,store,broker=controller_fixture();messages=[];audit=[]
+    run={'id':'expired-run','action':'monthly','period':'2026-10','orders':[],
+         'intents':[{'id':'x','strategy':'aaa','symbol':'EET','side':'buy','budget':'123.45','status':'expired','reason':'three_trading_day_expiry'}]}
+    c.executor.run=lambda:{'status':'expired','run':run}
+    c.publish=lambda:None;c.bot.send_telegram_message=lambda message:messages.append(message)
+    c.bot.mark_monthly_run_complete=lambda env,clean:audit.append((env,clean))
+    c.reconcile()
+    assert '$123.45' in messages[0] and 'EET' in messages[0] and not audit
+
+def test_slow_margin_validation_cannot_submit_old_quote():
+    ex,store,broker,p=fixture();time=[NOW];ex.now=lambda:time[0]
+    ex.quote_getter=lambda symbol:quote(stamp=time[0].isoformat())
+    def slow_margin(state):time[0]+=dt.timedelta(seconds=31);return True
+    ex.margin_validator=slow_margin
+    ages=[];submit=broker.submit
+    def checked(row):ages.append((time[0]-dt.datetime.fromisoformat(row['quote']['t'])).total_seconds());return submit(row)
+    broker.submit=checked
+    ex.run(p)
+    assert ages==[0,0]
+
+
+def test_slow_claim_write_aborts_before_post_and_is_recoverable():
+    ex,store,broker,p=fixture();time=[NOW];ex.now=lambda:time[0]
+    ex.quote_getter=lambda symbol:quote(stamp=time[0].isoformat())
+    original=store.mutate
+    def slow_claim(kind,fn):
+        result=original(kind,fn)
+        if kind=='monthly_attempt':time[0]+=dt.timedelta(seconds=31)
+        return result
+    store.mutate=slow_claim
+    assert ex.run(p)['status']=='data_error'
+    assert broker.submits==0
+    assert all(row['never_submitted'] and row['status']=='canceled' for row in store.read()['active']['orders'])
+    # Restore a healthy database and advance the scheduled retry.
+    store.mutate=original;time[0]+=dt.timedelta(minutes=5)
+    assert ex.run(p)['status']=='pending' and broker.submits==2
+
+def test_daily_risk_on_invalidates_obsolete_pending_monthly_sell():
+    ex,store,broker,p=fixture();p['metadata']={'a':{}}
+    store.state['portfolios']['a']['positions']={'EET':'1'}
+    broker.qty={'EET':Decimal(1)}
+    p['intents']=[{'id':'sell','strategy':'a','symbol':'EET','side':'sell','qty':'1','fractionable':True,'risk_exit':True}]
+    ex.run(p)
+    daily={'action':'daily','period':'2026-10-02','orders':[],'metadata':{'a':{'leg_states':{'EET':True}}}}
+    ex.run(interrupt_builder=lambda state,broker:daily)
+    intent=store.read()['suspended_monthly']['intents'][0]
+    assert intent['status']=='invalidated' and intent['reason']=='daily_risk_on'
+    assert ex.run()['status']=='expired'
+    assert broker.submits==1 and store.read()['portfolios']['a']['positions']['EET']=='1'
+
+
+def test_confirmed_daily_fills_credit_original_monthly_budget():
+    ex,store,broker,p=fixture();p['metadata']={'a':{}}
+    ex.run(p)
+    daily={'action':'daily','period':'2026-10-02',
+           'orders':[{'strategy':'a','symbol':'EET','side':'buy','qty':'.2','limit_price':'100'}],
+           'metadata':{'a':{'leg_states':{'EET':True}}}}
+    submit=broker.submit
+    def filled_daily(row):
+        o=submit(row)
+        if row.get('intent_id') is None:
+            o.update(status='filled',filled_qty=row['qty'],filled_avg_price='100')
+            broker.qty['EET']=broker.qty.get('EET',Decimal(0))+Decimal(row['qty'])
+            broker.cash-=Decimal(row['qty'])*100
+        return o
+    broker.submit=filled_daily
+    assert ex.run(interrupt_builder=lambda state,broker:daily)['status']=='complete'
+    suspended=store.read()['suspended_monthly']
+    assert Decimal(suspended['intents'][0]['external_booked_value'])==20
+    assert store.read()['portfolios']['a']['cash']=='30.0'
+    ex.now=lambda:NOW+dt.timedelta(seconds=301);ex.quote_getter=lambda s:quote(stamp=ex.now().isoformat())
+    ex.run()
+    latest=store.read()['active']['orders'][-2]
+    assert latest['symbol']=='EET' and Decimal(latest['qty'])*Decimal(latest['limit_price'])<=30
+
+def test_expiry_after_risk_exit_does_not_attempt_unfunded_annual_transfer():
+    ex,store,broker,p=fixture();store.state['portfolios']['a']['positions']={'EET':'1'}
+    broker.qty={'EET':Decimal(1)}
+    p['transfers']={'a':'-200','b':'200'}
+    p['intents']=[{'id':'exit','strategy':'a','symbol':'EET','side':'sell','qty':'1','fractionable':True,'full_liquidation':True,'risk_exit':True},
+                  {'id':'entry','strategy':'b','symbol':'UBT','side':'buy','budget':'50','fractionable':True}]
+    ex.run(p)
+    ex.now=lambda:dt.datetime(2026,10,7,15,tzinfo=dt.timezone.utc)
+    ex.quote_getter=lambda s:quote(stamp=ex.now().isoformat())
+    submit=broker.submit
+    def filled_exit(row):
+        o=submit(row);o.update(status='filled',filled_qty='1',filled_avg_price='100')
+        broker.qty['EET']=Decimal(0);broker.cash+=100
+        return o
+    broker.submit=filled_exit
+    result=ex.run(p)
+    assert result['status']=='expired' and store.read()['active'] is None
+    assert store.read()['portfolios']['a']['cash']=='150'
+    assert store.read()['portfolios']['b']['cash']=='50'
+    assert not result['run'].get('transfers_done')

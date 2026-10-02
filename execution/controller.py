@@ -242,27 +242,51 @@ class Controller:
         result=self.executor.run(builder=lambda s,b:self.build(s,action,period,annual),
                                  interrupt_builder=(lambda s,b:self.build(s,'daily',period,False)) if action=='daily' else None)
         self.publish()
-        if result['status'] in ('expired','data_error'):
-            self.bot.send_telegram_message(('⚠️ Monthly execution remainder expired' if result['status']=='expired' else '❗ Monthly execution data error')+' ('+self.env+'): '+str(result.get('errors') or result.get('run_id') or period))
-        if result['status']=='complete':
-            run=result['run']
+        self.finalize_result(result,notify_data_errors=True)
+        return result
+
+    def finalize_result(self,result,notify_data_errors=False):
+        status=result['status']
+        if status=='data_error':
+            if notify_data_errors:
+                self.bot.send_telegram_message('❗ Monthly execution data error ('+self.env+'): '+'; '.join(result.get('errors',[])))
+            return
+        if status not in ('complete','expired'):return
+        run=result['run'];run_id=run['id']
+        if run_id in self.store.read().get('reported_runs',[]):return
+        if status=='complete':
             if run['action'] in ('monthly','monthly-funding'):
                 self.bot.mark_monthly_run_complete(self.env,clean=not run.get('margin_retry'))
             fills=[f"{r['strategy']}: {r['side']} {r['booked_qty']} {r['symbol']} (${float(dec(r['booked_value'])):.2f})" for r in run['orders']]
-            self.bot.send_telegram_message('✅ Shared ETF execution ('+self.env+'): '+run['action']+' '+run['period']+'\n'+'\n'.join(fills or ['Keine Trades nötig.'])+'\nBroker und Strategiebestände abgeglichen.')
-        return result
+            message='✅ Shared ETF execution ('+self.env+'): '+run['action']+' '+run['period']+'\n'+'\n'.join(fills or ['Keine Trades nötig.'])+'\nBroker und Strategiebestände abgeglichen.'
+        else:
+            from .monthly import remaining
+            remainder=[]
+            for intent in run.get('intents',[]):
+                left=remaining(run,intent)
+                if left>0 and intent.get('status') in ('expired','invalidated'):
+                    amount=f"${left:.2f}" if intent['side']=='buy' else f"{text(left)} shares"
+                    remainder.append(f"{intent['strategy']}: {intent['side']} {intent['symbol']} {amount} ({intent.get('reason','expired')})")
+            message='⚠️ Monthly execution remainder expired ('+self.env+'): '+run['period']+'\n'+'\n'.join(remainder or ['Unfilled monthly remainder stopped.'])+'\nConfirmed holdings and sleeve cash preserved; month not marked clean.'
+        delivered=self.bot.send_telegram_message(message)
+        if delivered is False:raise SafetyStop('Execution result Telegram delivery failed')
+        def reported(state):
+            rows=state.setdefault('reported_runs',[])
+            if run_id not in rows:rows.append(run_id)
+            state['reported_runs']=rows[-100:]
+        self.store.mutate('execution_result_reported',reported)
 
     def reconcile(self):
+        result=self.executor.run()
+        self.publish()
+        # Reconciliation is the normal asynchronous monthly completion path.
+        # The root HTTP route handles data-error IncidentGate transitions.
+        self.finalize_result(result)
         state=self.store.read()
-        if state.get('active'):
-            result=self.executor.run()
-        else:
-            result=self.executor.run()
-            state=self.store.read()
+        if not state.get('active'):
             for action,period in state.get('pending_actions',{}).items():
                 if action!='mix8-upgrade': raise SafetyStop('Unknown pending action')
                 result=self.execute(action,period=period)
-        self.publish()
         return result
 
     def publish(self):

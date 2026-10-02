@@ -255,6 +255,16 @@ class Ledger:
                 raise SafetyStop('Plan has unfinished or incompletely executed orders')
             for key,updates in p.get('metadata',{}).items():
                 s['portfolios'][key]['metadata'].update(updates)
+            if p['action']=='daily' and s.get('suspended_monthly'):
+                # Daily trades may consume already-funded monthly cash or fulfill
+                # an outstanding rotation. Credit actual fills against the fixed
+                # intent cap; do not allocate any fresh monthly funding.
+                for row in p['orders']:
+                    for intent in s['suspended_monthly'].get('intents',[]):
+                        if (intent['strategy'],intent['symbol'],intent['side'])==(row['strategy'],row['symbol'],row['side']):
+                            for field in ('booked_qty','booked_value'):
+                                key='external_'+field
+                                intent[key]=text(dec(intent.get(key,0))+dec(row.get(field,0)))
             s['last_completed'][p['action']]=p['period']
             if p['action']=='monthly' and p.get('margin_retry'):
                 from zoneinfo import ZoneInfo

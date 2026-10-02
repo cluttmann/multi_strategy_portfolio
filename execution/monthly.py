@@ -4,7 +4,7 @@ import datetime as dt
 from decimal import Decimal, ROUND_DOWN
 from zoneinfo import ZoneInfo
 from .ledger import SafetyStop, dec, text, TERMINAL
-from .quotes import execution_limit, QuoteDeferred, EET_SPREAD_SOFT
+from .quotes import execution_limit, validate_quote, QuoteDeferred, EET_SPREAD_SOFT
 from .timestamps import parse_timestamp
 
 POLICY='monthly-iex-v1'
@@ -15,7 +15,7 @@ def remaining(plan,intent):
     rows=[r for r in plan['orders'] if r.get('intent_id')==intent['id']]
     field='booked_value' if intent['side']=='buy' else 'booked_qty'
     cap=dec(intent['budget'] if intent['side']=='buy' else intent['qty'])
-    return max(Decimal(0),cap-sum((dec(r.get(field,0)) for r in rows),Decimal(0)))
+    return max(Decimal(0),cap-dec(intent.get('external_'+field,0))-sum((dec(r.get(field,0)) for r in rows),Decimal(0)))
 
 
 def reservations(plan,strategy=None):
@@ -40,7 +40,7 @@ def cancel_open(ex,token,predicate=lambda row:True):
     """No cash reuse until broker confirms terminal and all cumulative fills book."""
     pending=False
     for index,row in enumerate(ex.ledger.store.read()['active']['orders']):
-        if row['status'] in TERMINAL or not predicate(row):continue
+        if row['status'] in TERMINAL or row.get('never_submitted') or not predicate(row):continue
         order=ex.broker.by_client_id(row['client_order_id'])
         if order is None:raise SafetyStop('Submission ambiguous; no second POST')
         ex.ledger.record(token,index,order)
@@ -117,8 +117,6 @@ def run_monthly(ex,token):
             if left<=0 or (intent['side']=='buy' and left<1):
                 defer(ex,token,intent['id'],'remainder_below_minimum','complete');continue
             try:
-                quote=ex.quote_getter(intent['symbol'])
-                limit=execution_limit(quote,intent['symbol'],intent['side'],len(rows),ex.now(),intent.get('risk_exit',False))
                 quantum=Decimal('.000001') if intent.get('fractionable') else Decimal(1)
                 state=ex.ledger.store.read();port=state['portfolios'][intent['strategy']]
                 if intent['side']=='buy':
@@ -129,9 +127,9 @@ def run_monthly(ex,token):
                                 defer(ex,token,intent['id'],'awaiting_confirmed_transfer_proceeds');continue
                         else:
                             ex.ledger.transfer(token);state=ex.ledger.store.read();port=state['portfolios'][intent['strategy']]
+                    permission=ex.margin_validator(state) if ex.margin_validator else False
                     account=ex.broker.account()
                     if account.get('trading_blocked') or account.get('account_blocked'):raise SafetyStop('Broker account trading blocked')
-                    permission=ex.margin_validator(state) if ex.margin_validator else False
                     allowed=bool(permission.get('allowed')) and not permission.get('errors') if isinstance(permission,dict) else bool(permission)
                     transfer_reserve=max(Decimal(0),-dec(transfers.get(intent['strategy'],0))) if not state['active'].get('transfers_done') else Decimal(0)
                     sleeve=max(Decimal(0),dec(port['cash'])-reservations(state['active'],intent['strategy'])-transfer_reserve)
@@ -146,6 +144,8 @@ def run_monthly(ex,token):
                         used=max(Decimal(0),-dec(account['cash']))
                         fresh_capacity=max(Decimal(0),dec(account['cash']))+max(Decimal(0),current_cap-used)
                         power=min(power,max(Decimal(0),fresh_capacity-reservations(state['active'])))
+                    quote=ex.quote_getter(intent['symbol'])
+                    limit=execution_limit(quote,intent['symbol'],intent['side'],len(rows),ex.now(),intent.get('risk_exit',False))
                     qty=(min(left,sleeve,power)/limit).quantize(quantum,rounding=ROUND_DOWN)
                     if qty<=0 or qty*limit<1:
                         # A nonfractional residual too small for one share is a
@@ -155,21 +155,42 @@ def run_monthly(ex,token):
                         else:defer(ex,token,intent['id'],'awaiting_cash_or_margin_permission')
                         continue
                 else:
+                    quote=ex.quote_getter(intent['symbol'])
+                    limit=execution_limit(quote,intent['symbol'],intent['side'],len(rows),ex.now(),intent.get('risk_exit',False))
                     have=dec(port['positions'].get(intent['symbol'],0))
                     qty=min(left,have)
                     if not intent.get('full_liquidation'):qty=qty.quantize(quantum,rounding=ROUND_DOWN)
                     if qty<=0:defer(ex,token,intent['id'],'remainder_below_minimum','complete');continue
                 def append(state,active):
+                    validate_quote(quote,ex.now())
                     index=len(active['orders'])
                     row={'strategy':intent['strategy'],'symbol':intent['symbol'],'side':intent['side'],
                          'qty':text(qty),'limit_price':text(limit),'intent_id':intent['id'],
-                         'client_order_id':f"se-{active['id']}-{index:03d}",'status':'planned','booked_qty':'0','booked_value':'0',
+                         'client_order_id':f"se-{active['id']}-{index:03d}",'status':'submitting',
+                         'submitted_at':ex.now().isoformat(),'booked_qty':'0','booked_value':'0',
                          'quote':deepcopy(quote),'attempt_number':len(rows),'risk_exit':bool(intent.get('risk_exit')),
                          'quote_band':'above_soft' if intent['symbol']=='EET' and (dec(quote['ap'])-dec(quote['bp']))/((dec(quote['ap'])+dec(quote['bp']))/2)>EET_SPREAD_SOFT else 'within_soft'}
+                    port=state['portfolios'][intent['strategy']]
+                    if qty<=0 or limit<=0:raise SafetyStop('Invalid attempt intent')
+                    if intent['side']=='sell' and qty>dec(port['positions'].get(intent['symbol'],0)):
+                        raise SafetyStop('Attempt exceeds owned shares')
+                    if intent['side']=='buy' and qty*limit>dec(port['cash'])-reservations(active,intent['strategy']):
+                        raise SafetyStop('Attempt exceeds unreserved sleeve cash')
                     active['orders'].append(row)
                     return index
+                # The attempt and submission claim are one atomic write. A crash
+                # before/after POST leaves a recoverable exact client id, never
+                # an orphan planned row with no submission timestamp.
                 index=mutate(ex,token,'monthly_attempt',append)
-                row=ex.ledger.mark_submitting(token,index,submitted_at=ex.now().isoformat())
+                row=ex.ledger.store.read()['active']['orders'][index]
+                try:validate_quote(quote,ex.now())
+                except SafetyStop:
+                    # The POST has definitely not started. Persist that proof so
+                    # slow database writes cannot trap this id in ambiguous recovery.
+                    def aborted(state,active):
+                        active['orders'][index].update(status='canceled',never_submitted=True,abort_reason='quote_stale_before_post')
+                    mutate(ex,token,'monthly_prepost_abort',aborted)
+                    raise
                 # An exception cannot lead to a second POST: submitting remains
                 # durable and recovery resolves this exact client order id.
                 order=ex.broker.submit(row);ex.ledger.record(token,index,order)
@@ -186,8 +207,9 @@ def run_monthly(ex,token):
                 if left<=0 or (intent['side']=='buy' and left<1):defer(ex,token,intent['id'],'filled','complete')
         plan=ex.ledger.store.read()['active']
         if all(i.get('status') in ('complete','invalidated','expired') for i in plan['intents']):
-            ex.ledger.transfer(token)
-            return finish(ex,token,'expired' if any(i.get('status') in ('invalidated','expired') for i in plan['intents']) else 'complete')
+            stopped=any(i.get('status') in ('invalidated','expired') for i in plan['intents'])
+            if not stopped:ex.ledger.transfer(token)
+            return finish(ex,token,'expired' if stopped else 'complete')
         return {'status':'data_error' if data_errors else 'pending','run_id':plan['id'],
                 'errors':data_errors,'intents':deepcopy(plan['intents'])}
     except Exception as exc:
