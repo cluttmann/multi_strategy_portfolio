@@ -4,7 +4,7 @@ import datetime as dt
 from decimal import Decimal, ROUND_DOWN
 from zoneinfo import ZoneInfo
 from .ledger import SafetyStop, dec, text, TERMINAL
-from .quotes import execution_limit, validate_quote, QuoteDeferred, EET_SPREAD_SOFT
+from .quotes import execution_limit, execution_price_policy, validate_quote, QuoteDeferred, EET_SPREAD_SOFT, EET_BUY_PRICE_POLICY
 from .timestamps import parse_timestamp
 
 POLICY='monthly-iex-v1'
@@ -130,6 +130,8 @@ def run_monthly(ex,token):
             if left<=0 or (intent['side']=='buy' and left<1):
                 defer(ex,token,intent['id'],'remainder_below_minimum','complete');continue
             try:
+                policy_options={'eet_buy_price_policy':plan['eet_buy_price_policy']} if 'eet_buy_price_policy' in plan else {}
+                price_policy=execution_price_policy(intent['symbol'],intent['side'],intent.get('risk_exit',False),**policy_options)
                 quantum=Decimal('.000001') if intent.get('fractionable') else Decimal(1)
                 state=ex.ledger.store.read();port=state['portfolios'][intent['strategy']]
                 if intent['side']=='buy':
@@ -158,7 +160,7 @@ def run_monthly(ex,token):
                         fresh_capacity=max(Decimal(0),dec(account['cash']))+max(Decimal(0),current_cap-used)
                         power=min(power,max(Decimal(0),fresh_capacity-reservations(state['active'])))
                     quote=ex.quote_getter(intent['symbol'])
-                    limit=execution_limit(quote,intent['symbol'],intent['side'],len(rows),ex.now(),intent.get('risk_exit',False))
+                    limit=execution_limit(quote,intent['symbol'],intent['side'],len(rows),ex.now(),intent.get('risk_exit',False),**policy_options)
                     qty=(min(left,sleeve,power)/limit).quantize(quantum,rounding=ROUND_DOWN)
                     if qty<=0 or qty*limit<1:
                         # A nonfractional residual too small for one share is a
@@ -169,7 +171,7 @@ def run_monthly(ex,token):
                         continue
                 else:
                     quote=ex.quote_getter(intent['symbol'])
-                    limit=execution_limit(quote,intent['symbol'],intent['side'],len(rows),ex.now(),intent.get('risk_exit',False))
+                    limit=execution_limit(quote,intent['symbol'],intent['side'],len(rows),ex.now(),intent.get('risk_exit',False),**policy_options)
                     have=dec(port['positions'].get(intent['symbol'],0))
                     qty=min(left,have)
                     if not intent.get('full_liquidation'):qty=qty.quantize(quantum,rounding=ROUND_DOWN)
@@ -182,6 +184,9 @@ def run_monthly(ex,token):
                          'client_order_id':f"se-{active['id']}-{index:03d}",'status':'submitting',
                          'submitted_at':ex.now().isoformat(),'booked_qty':'0','booked_value':'0',
                          'quote':deepcopy(quote),'attempt_number':len(rows),'risk_exit':bool(intent.get('risk_exit')),
+                         'price_policy':price_policy,
+                         'price_reference':{'source':quote['source'],'kind':'bid' if price_policy==EET_BUY_PRICE_POLICY else 'midpoint',
+                                            'price':text(dec(quote['bp']) if price_policy==EET_BUY_PRICE_POLICY else (dec(quote['bp'])+dec(quote['ap']))/2)},
                          'quote_band':'above_soft' if intent['symbol']=='EET' and (dec(quote['ap'])-dec(quote['bp']))/((dec(quote['ap'])+dec(quote['bp']))/2)>EET_SPREAD_SOFT else 'within_soft'}
                     port=state['portfolios'][intent['strategy']]
                     if qty<=0 or limit<=0:raise SafetyStop('Invalid attempt intent')

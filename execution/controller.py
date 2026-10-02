@@ -5,7 +5,7 @@ import datetime as dt
 from zoneinfo import ZoneInfo
 from .ledger import dec, text, SafetyStop, Ledger, FirestoreStore
 from .broker import AlpacaBroker, Executor
-from .quotes import get_quote
+from .quotes import get_quote, EET_BUY_PRICE_POLICY
 
 VERSION='shared-etf-2026-09-v1'
 ZERO=Decimal(0)
@@ -211,6 +211,7 @@ class Controller:
                 'planned_at':dt.datetime.now(dt.timezone.utc).isoformat()}
         if monthly:
             result['execution_policy']='monthly-iex-v1'
+            result['eet_buy_price_policy']=EET_BUY_PRICE_POLICY
             result['intents']=[{'id':f"{i}-{r['strategy']}-{r['symbol']}-{r['side']}",
                                'strategy':r['strategy'],'symbol':r['symbol'],'side':r['side'],
                                'budget':text(dec(r['qty'])*dec(r['limit_price'])), 'qty':r['qty'],
