@@ -247,40 +247,72 @@ class Controller:
 
     def finalize_result(self,result,notify_data_errors=False):
         status=result['status']
-        if status=='data_error':
-            if notify_data_errors:
-                self.bot.send_telegram_message('❗ Monthly execution data error ('+self.env+'): '+'; '.join(result.get('errors',[])))
-            return
-        if status not in ('complete','expired'):return
-        run=result['run'];run_id=run['id']
-        if run_id in self.store.read().get('reported_runs',[]):return
-        if status=='complete':
-            if run['action'] in ('monthly','monthly-funding'):
-                self.bot.mark_monthly_run_complete(self.env,clean=not run.get('margin_retry'))
-            fills=[f"{r['strategy']}: {r['side']} {r['booked_qty']} {r['symbol']} (${float(dec(r['booked_value'])):.2f})" for r in run['orders']]
-            message='✅ Shared ETF execution ('+self.env+'): '+run['action']+' '+run['period']+'\n'+'\n'.join(fills or ['Keine Trades nötig.'])+'\nBroker und Strategiebestände abgeglichen.'
-        else:
-            from .monthly import remaining
-            remainder=[]
-            for intent in run.get('intents',[]):
-                left=remaining(run,intent)
-                if left>0 and intent.get('status') in ('expired','invalidated'):
-                    amount=f"${left:.2f}" if intent['side']=='buy' else f"{text(left)} shares"
-                    remainder.append(f"{intent['strategy']}: {intent['side']} {intent['symbol']} {amount} ({intent.get('reason','expired')})")
-            message='⚠️ Monthly execution remainder expired ('+self.env+'): '+run['period']+'\n'+'\n'.join(remainder or ['Unfilled monthly remainder stopped.'])+'\nConfirmed holdings and sleeve cash preserved; month not marked clean.'
-        delivered=self.bot.send_telegram_message(message)
-        if delivered is False:raise SafetyStop('Execution result Telegram delivery failed')
-        def reported(state):
-            rows=state.setdefault('reported_runs',[])
-            if run_id not in rows:rows.append(run_id)
-            state['reported_runs']=rows[-100:]
-        self.store.mutate('execution_result_reported',reported)
+        if status in ('complete','expired'):
+            from .notifications import queue_result
+            # Real executor runs queue atomically with archival; this also
+            # accommodates injected adapters returning an already-archived run.
+            self.store.mutate('execution_result_queued',lambda state:queue_result(state,result['run'],status))
+        if status=='data_error' and notify_data_errors:
+            try:self.bot.send_telegram_message('❗ Monthly execution data error ('+self.env+'): '+'; '.join(result.get('errors',[])))
+            except Exception:pass  # The structured result remains visible to HTTP/IncidentGate.
+        errors=self.deliver_pending_notifications()
+        if errors:
+            result['notification_errors']=errors
+            result['execution_status']=status
+            result['status']='data_error'
+            result.setdefault('errors',[]).extend(errors)
+
+    def deliver_pending_notifications(self):
+        import uuid
+        errors=[]
+        for run_id,notice in self.store.read().get('pending_notifications',{}).items():
+            token=uuid.uuid4().hex;now=dt.datetime.now(dt.timezone.utc).timestamp()
+            def claim(state):
+                row=state.get('pending_notifications',{}).get(run_id)
+                if row is None:return False
+                if row.get('delivery_lease',{}).get('until',0)>now:return False
+                row['delivery_lease']={'token':token,'until':now+90}
+                row['attempts']=row.get('attempts',0)+1
+                return True
+            if not self.store.mutate('execution_notification_claim',claim):continue
+            error=None;audit_marked=bool(notice.get('audit_marked'))
+            try:
+                # Only this month's audit marker can use the legacy marker API,
+                # which derives its period from the current date.
+                if notice['status']=='complete' and notice['action'] in ('monthly','monthly-funding') and notice['period']==dt.datetime.now(ZoneInfo('America/New_York')).strftime('%Y-%m') and not notice.get('audit_marked'):
+                    self.bot.mark_monthly_run_complete(self.env,clean=notice['clean'])
+                    audit_marked=True
+                delivered=self.bot.send_telegram_message(notice['message'])
+                if delivered is not True and not (type(delivered) is int and delivered==200):
+                    error=f'Telegram delivery not confirmed for {run_id} (status {delivered!r})'
+            except Exception as exc:
+                # Do not persist exception URLs that might contain bot tokens.
+                error=f'Telegram delivery failed for {run_id}: {type(exc).__name__}'
+            def acknowledge(state):
+                row=state.get('pending_notifications',{}).get(run_id)
+                if row is None or row.get('delivery_lease',{}).get('token')!=token:return
+                if error:
+                    row['last_error']=error;row.pop('delivery_lease',None)
+                    if audit_marked:row['audit_marked']=True
+                else:
+                    state['pending_notifications'].pop(run_id)
+                    reported=state.setdefault('reported_runs',[])
+                    if run_id not in reported:reported.append(run_id)
+                    state['reported_runs']=reported[-100:]
+            self.store.mutate('execution_notification_result',acknowledge)
+            if error:errors.append(error)
+        return errors
 
     def reconcile(self):
-        result=self.executor.run()
+        state=self.store.read()
+        monthly=state.get('active') or state.get('suspended_monthly') or {}
+        if monthly.get('daily_interruption',{}).get('status')=='needs_recovery':
+            period=dt.datetime.now(ZoneInfo('America/New_York')).date().isoformat()
+            result=self.executor.run(interrupt_builder=lambda state,broker:self.build(state,'daily',period,False))
+        else:result=self.executor.run()
         self.publish()
-        # Reconciliation is the normal asynchronous monthly completion path.
-        # The root HTTP route handles data-error IncidentGate transitions.
+        # Send/retry notices only after financial execution, so a Telegram outage
+        # cannot delay daily risk exits or monthly cancellations.
         self.finalize_result(result)
         state=self.store.read()
         if not state.get('active'):

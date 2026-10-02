@@ -40,7 +40,7 @@ def cancel_open(ex,token,predicate=lambda row:True):
     """No cash reuse until broker confirms terminal and all cumulative fills book."""
     pending=False
     for index,row in enumerate(ex.ledger.store.read()['active']['orders']):
-        if row['status'] in TERMINAL or row.get('never_submitted') or not predicate(row):continue
+        if row['status'] in TERMINAL or row.get('never_submitted') or row.get('no_order_proven') or not predicate(row):continue
         order=ex.broker.by_client_id(row['client_order_id'])
         if order is None:raise SafetyStop('Submission ambiguous; no second POST')
         ex.ledger.record(token,index,order)
@@ -75,6 +75,8 @@ def finish(ex,token,status):
                 state['monthly_retry']={'period':plan['period'],'after':tomorrow.isoformat()}
             else:state.pop('monthly_retry',None)
         else:state.setdefault('last_expired',{})[plan['action']]=plan['period']
+        from .notifications import queue_result
+        queue_result(state,plan,status)
         state['active']=None
         return deepcopy(plan)
     run=mutate(ex,token,'complete',archive)
@@ -85,6 +87,8 @@ def run_monthly(ex,token):
     data_errors=[]
     try:
         plan=ex.ledger.store.read()['active']
+        if plan.get('daily_interruption',{}).get('status')=='needs_recovery':
+            return {'status':'pending','reason':'daily_recovery_required','run_id':plan['id']}
         expiry=expiry_reason(ex,plan)
         if expiry:
             if not cancel_open(ex,token,lambda row:not row.get('risk_exit')):
@@ -113,6 +117,15 @@ def run_monthly(ex,token):
             rows=[r for r in plan['orders'] if r.get('intent_id')==intent['id']]
             if intent.get('next_attempt_at') and ex.now()<parse_timestamp(intent['next_attempt_at']) and not intent.get('risk_exit'):continue
             if any(r['status'] not in TERMINAL for r in rows):continue
+            opposing=lambda row:row['symbol']==intent['symbol'] and row['side']!=intent['side'] and row['status'] not in TERMINAL
+            if any(opposing(row) for row in plan['orders']):
+                if intent.get('risk_exit') and intent['side']=='sell':
+                    if not cancel_open(ex,token,opposing):
+                        defer(ex,token,intent['id'],'opposing_cancel_unconfirmed');continue
+                    ex.recover(token)
+                    plan=ex.ledger.store.read()['active']
+                else:
+                    defer(ex,token,intent['id'],'opposing_order_open');continue
             left=remaining(plan,intent)
             if left<=0 or (intent['side']=='buy' and left<1):
                 defer(ex,token,intent['id'],'remainder_below_minimum','complete');continue
@@ -193,7 +206,15 @@ def run_monthly(ex,token):
                     raise
                 # An exception cannot lead to a second POST: submitting remains
                 # durable and recovery resolves this exact client order id.
-                order=ex.broker.submit(row);ex.ledger.record(token,index,order)
+                try:order=ex.broker.submit(row)
+                except Exception as error:
+                    from .broker import definitive_order_rejection
+                    evidence=definitive_order_rejection(error)
+                    if evidence is not None:
+                        ex.ledger.reject(token,index,evidence)
+                        raise SafetyStop(f"Broker rejected order: {evidence['http_status']} code {evidence['code']}: {evidence['message']}") from error
+                    raise
+                ex.ledger.record(token,index,order)
                 defer(ex,token,intent['id'],'order_submitted')
             except QuoteDeferred as exc:defer(ex,token,intent['id'],str(exc))
             except Exception as exc:

@@ -270,7 +270,7 @@ def test_reconcile_finalizes_monthly_completion_once():
     run={'id':'completed-run','action':'monthly','period':'2026-10','orders':[]}
     c.executor.run=lambda:{'status':'complete','run':run}
     c.publish=lambda:None
-    c.bot.send_telegram_message=lambda message:messages.append(message)
+    c.bot.send_telegram_message=lambda message:messages.append(message) or True
     c.bot.mark_monthly_run_complete=lambda env,clean:audit.append((env,clean))
     c.reconcile();c.reconcile()
     assert len(messages)==1 and audit==[('paper',True)]
@@ -282,7 +282,7 @@ def test_reconcile_expiry_reports_real_remainder_without_clean_marker():
     run={'id':'expired-run','action':'monthly','period':'2026-10','orders':[],
          'intents':[{'id':'x','strategy':'aaa','symbol':'EET','side':'buy','budget':'123.45','status':'expired','reason':'three_trading_day_expiry'}]}
     c.executor.run=lambda:{'status':'expired','run':run}
-    c.publish=lambda:None;c.bot.send_telegram_message=lambda message:messages.append(message)
+    c.publish=lambda:None;c.bot.send_telegram_message=lambda message:messages.append(message) or True
     c.bot.mark_monthly_run_complete=lambda env,clean:audit.append((env,clean))
     c.reconcile()
     assert '$123.45' in messages[0] and 'EET' in messages[0] and not audit
@@ -373,3 +373,185 @@ def test_expiry_after_risk_exit_does_not_attempt_unfunded_annual_transfer():
     assert store.read()['portfolios']['a']['cash']=='150'
     assert store.read()['portfolios']['b']['cash']=='50'
     assert not result['run'].get('transfers_done')
+
+
+def test_opposing_shared_etf_order_waits_for_terminal_but_other_symbol_trades():
+    ex,store,broker,p=fixture();store.state['portfolios']['a']['positions']={'EET':'1'};broker.qty={'EET':Decimal(1)}
+    p['intents']=[{'id':'sell','strategy':'a','symbol':'EET','side':'sell','qty':'1','fractionable':True},
+                  {'id':'buy','strategy':'b','symbol':'EET','side':'buy','budget':'25','fractionable':True},
+                  {'id':'other','strategy':'b','symbol':'UBT','side':'buy','budget':'25','fractionable':True}]
+    ex.run(p)
+    assert [(o['symbol'],o['side']) for o in broker.orders.values()]==[('EET','sell'),('UBT','buy')]
+    assert store.read()['active']['intents'][1]['reason']=='opposing_order_open'
+
+
+def broker_rejection(status=403,json_body=None,content_type='application/json'):
+    import requests
+    response=requests.Response();response.status_code=status
+    response.headers['Content-Type']=content_type
+    response.url='https://paper-api.alpaca.markets/v2/orders'
+    response.request=requests.Request('POST',response.url).prepare()
+    import json
+    response._content=json.dumps(json_body or {'code':40310000,'message':'asset not fractionable'}).encode()
+    return requests.HTTPError('broker rejected order',response=response)
+
+
+def test_definitive_broker_rejection_tombstone_recovers_without_false_ambiguity():
+    ex,store,broker,p=fixture();submit=broker.submit
+    def reject(row):
+        if row['symbol']=='EET':raise broker_rejection()
+        return submit(row)
+    broker.submit=reject
+    result=ex.run(p)
+    row=store.read()['active']['orders'][0]
+    assert result['status']=='data_error' and row['status']=='rejected' and row['no_order_proven']
+    assert row['rejection']['http_status']==403 and row['rejection']['code']==40310000
+    assert ex.run(p)['status']=='pending'
+    assert broker.submits==1
+
+
+def test_daily_risk_off_is_persisted_when_second_signal_read_fails():
+    ex,store,broker,p=fixture();p['metadata']={'a':{}};ex.run(p)
+    calls=[]
+    def daily(state,broker):
+        calls.append(True)
+        if len(calls)>1:raise SafetyStop('daily feed unavailable after cancellation')
+        return {'action':'daily','period':'2026-10-02','orders':[],'metadata':{'a':{'leg_states':{'EET':False}}}}
+    with pytest.raises(SafetyStop):ex.run(interrupt_builder=daily)
+    active=store.read()['active']
+    assert active['intents'][0]['status']=='invalidated'
+    assert active['daily_interruption']['status']=='needs_recovery'
+    before=broker.submits
+    assert ex.run()['status'] in ('pending','data_error')
+    assert broker.submits==before
+
+
+@pytest.mark.parametrize('delivery',[None,503,False])
+def test_failed_telegram_delivery_stays_durable_after_archive_and_retries(delivery):
+    from test_shared_integration import controller_fixture
+    c,store,broker=controller_fixture();messages=[]
+    c.publish=lambda:None;c.bot.mark_monthly_run_complete=lambda env,clean:None
+    run={'id':'notice-run','action':'monthly','period':'2026-10','orders':[]}
+    c.bot.send_telegram_message=lambda message:messages.append(message) or delivery
+    c.executor.run=lambda:{'status':'complete','run':run}
+    first=c.reconcile()
+    assert 'notice-run' not in store.read().get('reported_runs',[])
+    assert store.read()['pending_notifications']['notice-run']
+    assert first.get('notification_errors')
+    c.executor.run=lambda:{'status':'reconciled'}
+    c.bot.send_telegram_message=lambda message:messages.append(message) or 200
+    c.reconcile()
+    assert len(messages)==2 and 'notice-run' in store.read()['reported_runs']
+    assert not store.read()['pending_notifications']
+    c.reconcile();assert len(messages)==2
+
+
+@pytest.mark.parametrize('status',[400,401,403,422])
+def test_only_known_broker_json_order_rejections_are_definitive(status):
+    from execution.broker import definitive_order_rejection
+    error=broker_rejection(status,{'code':status*100000+10000,'message':'invalid order quantity'})
+    assert definitive_order_rejection(error)['http_status']==status
+
+
+@pytest.mark.parametrize('kind',['html_proxy','wrong_host','wrong_method','wrong_code','duplicate_id','server_error','timeout'])
+def test_proxy_or_transport_uncertainty_never_proves_no_order(kind):
+    from execution.broker import definitive_order_rejection
+    error=broker_rejection()
+    if kind=='html_proxy':error.response.headers['Content-Type']='text/html'
+    elif kind=='wrong_host':error.response.request.url='https://proxy.example/v2/orders'
+    elif kind=='wrong_method':error.response.request.method='GET'
+    elif kind=='wrong_code':error=broker_rejection(json_body={'code':123,'message':'proxy error'})
+    elif kind=='duplicate_id':error=broker_rejection(json_body={'code':40310000,'message':'duplicate client_order_id'})
+    elif kind=='server_error':error=broker_rejection(status=503)
+    elif kind=='timeout':error=TimeoutError('POST response missing')
+    assert definitive_order_rejection(error) is None
+
+
+def test_urgent_exit_cancels_opposing_buy_and_confirms_before_post():
+    ex,store,broker,p=fixture();store.state['portfolios']['a']['positions']={'EET':'1'};broker.qty={'EET':Decimal(1)}
+    p['intents']=[{'id':'buy','strategy':'b','symbol':'EET','side':'buy','budget':'50','fractionable':True}]
+    ex.run(p)
+    store.state['active']['intents'].append({'id':'exit','strategy':'a','symbol':'EET','side':'sell','qty':'1','fractionable':True,'risk_exit':True})
+    ex.run()
+    orders=list(broker.orders.values())
+    assert orders[0]['status']=='canceled' and orders[1]['side']=='sell'
+    assert broker.submits==2
+
+
+def test_urgent_exit_does_not_post_until_opposing_cancel_is_confirmed():
+    ex,store,broker,p=fixture();store.state['portfolios']['a']['positions']={'EET':'1'};broker.qty={'EET':Decimal(1)}
+    p['intents']=[{'id':'buy','strategy':'b','symbol':'EET','side':'buy','budget':'50','fractionable':True}]
+    ex.run(p);broker.cancel=lambda oid:None
+    store.state['active']['intents'].append({'id':'exit','strategy':'a','symbol':'EET','side':'sell','qty':'1','fractionable':True,'risk_exit':True})
+    assert ex.run()['status']=='pending' and broker.submits==1
+    assert store.read()['active']['intents'][1]['reason']=='opposing_cancel_unconfirmed'
+
+
+def test_notifications_are_queued_in_the_same_financial_archive_mutation():
+    ex,store,broker,p=fixture()
+    for intent in p['intents']:intent['fractionable']=False
+    ex.run(p)
+    complete=[state for kind,state in store.events if kind=='complete'][0]
+    assert complete['active'] is None
+    assert complete['pending_notifications']
+
+
+def test_daily_failure_barrier_clears_only_after_successful_daily_recovery():
+    ex,store,broker,p=fixture();p['metadata']={'a':{}};ex.run(p)
+    calls=[]
+    daily={'action':'daily','period':'2026-10-02','orders':[],'metadata':{'a':{'leg_states':{'EET':False}}}}
+    def fail_second(state,broker):
+        calls.append(True)
+        if len(calls)==2:raise SafetyStop('feed failure')
+        return daily
+    with pytest.raises(SafetyStop):ex.run(interrupt_builder=fail_second)
+    assert ex.run()['reason']=='daily_recovery_required'
+    assert ex.run(interrupt_builder=lambda state,broker:daily)['status']=='complete'
+    assert store.read()['suspended_monthly']['daily_interruption']['status']=='recovered'
+
+
+def test_reconcile_supplies_fresh_daily_recovery_before_monthly_resume():
+    from test_shared_integration import controller_fixture
+    c,store,broker=controller_fixture();calls=[]
+    store.state['active']={'action':'monthly','daily_interruption':{'status':'needs_recovery'}}
+    c.publish=lambda:None
+    c.build=lambda state,action,period,annual:calls.append(action) or {'action':'daily'}
+    def run(**kwargs):
+        assert kwargs['interrupt_builder'](store.read(),broker)['action']=='daily'
+        return {'status':'pending'}
+    c.executor.run=run
+    assert c.reconcile()['status']=='pending' and calls==['daily']
+
+
+def test_telegram_exception_is_retryable_without_persisting_secret_url():
+    from test_shared_integration import controller_fixture
+    c,store,broker=controller_fixture();c.publish=lambda:None
+    c.bot.mark_monthly_run_complete=lambda env,clean:None
+    c.executor.run=lambda:{'status':'complete','run':{'id':'exception-run','action':'daily','period':'2026-10-02','orders':[]}}
+    def broken(message):raise RuntimeError('https://api.telegram.org/botSECRET/sendMessage')
+    c.bot.send_telegram_message=broken
+    result=c.reconcile()
+    assert result['status']=='data_error' and 'exception-run' in store.read()['pending_notifications']
+    assert 'SECRET' not in str(store.read()) and 'SECRET' not in str(result)
+
+
+def test_definitive_rejection_of_daily_legacy_order_is_known_not_ambiguous():
+    from test_execution import seeded,FakeBroker
+    store=MemoryStore(seeded());broker=FakeBroker();attempts=[]
+    def rejected(row):attempts.append(row['client_order_id']);raise broker_rejection()
+    broker.submit=rejected
+    ex=Executor(Ledger(store),broker)
+    plan={'action':'daily','period':'2026-10-02','orders':[{'strategy':'mix8','symbol':'UBT','side':'sell','qty':'2','limit_price':'9'}]}
+    with pytest.raises(SafetyStop,match='rejected'):ex.run(plan)
+    row=store.read()['active']['orders'][0]
+    assert row['no_order_proven'] and row['status']=='rejected'
+    with pytest.raises(SafetyStop,match='rejected'):ex.run()
+    assert len(attempts)==1
+
+
+def test_rejection_evidence_redacts_any_echoed_request_credentials():
+    from execution.broker import definitive_order_rejection
+    error=broker_rejection(json_body={'code':40310000,'message':'key TOPSECRET refused'})
+    error.response.request.headers['APCA-API-KEY-ID']='TOPSECRET'
+    evidence=definitive_order_rejection(error)
+    assert 'TOPSECRET' not in evidence['message'] and '[redacted]' in evidence['message']

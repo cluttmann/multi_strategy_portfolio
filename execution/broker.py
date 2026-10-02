@@ -8,6 +8,34 @@ from .ledger import SafetyStop, dec, text, reconcile_state, TERMINAL
 from .fees import accrue_regulatory_fees, accrue_account_fees, settle_fee, settle_account_fee
 from .timestamps import parse_timestamp
 
+def definitive_order_rejection(error):
+    """Only a broker JSON response to the order POST proves no order was made.
+
+    Transport exceptions, proxy/HTML errors, other endpoints, and duplicate-id
+    responses remain ambiguous. Do not include headers, URLs or credentials in
+    durable evidence.
+    """
+    from urllib.parse import urlparse
+    if not isinstance(error,requests.HTTPError):return None
+    response=error.response
+    if response is None or response.status_code not in (400,401,403,422):return None
+    request=response.request
+    if request is None or request.method!='POST':return None
+    url=urlparse(request.url)
+    if url.scheme!='https' or url.hostname not in ('api.alpaca.markets','paper-api.alpaca.markets') or url.path!='/v2/orders':return None
+    if 'application/json' not in response.headers.get('Content-Type','').lower():return None
+    try:
+        body=response.json();code=body['code'];message=body['message']
+        if isinstance(code,bool) or not isinstance(code,int) or code//100000!=response.status_code:return None
+        if not isinstance(message,str) or not message.strip():return None
+        if 'client_order_id' in message.lower() or 'duplicate' in message.lower():return None
+    except (ValueError,TypeError,KeyError):return None
+    for name in ('APCA-API-KEY-ID','APCA-API-SECRET-KEY','Authorization'):
+        secret=request.headers.get(name)
+        if secret:message=message.replace(secret,'[redacted]')
+    return {'http_status':response.status_code,'code':code,'message':message[:1000]}
+
+
 class AlpacaBroker:
     def __init__(self, api):
         self.base=api['BASE_URL'].rstrip('/')
@@ -110,13 +138,13 @@ class Executor:
         s=self.ledger.store.read(); active=s.get('active')
         if active:
             for i,row in enumerate(active['orders']):
-                if row['status']=='planned' or row.get('never_submitted'): continue
+                if row['status']=='planned' or row.get('never_submitted') or row.get('no_order_proven'): continue
                 order=self.broker.by_client_id(row['client_order_id'])
                 if order is None:
                     raise SafetyStop(f"Submission ambiguous; no second POST: {row['client_order_id']}")
                 self.ledger.record(token,i,order)
         s=self.ledger.store.read()
-        active_cids={r['client_order_id'] for r in (s.get('active') or {}).get('orders',[])}
+        active_cids={r['client_order_id'] for r in (s.get('active') or {}).get('orders',[]) if not r.get('never_submitted') and not r.get('no_order_proven')}
         unknown=[o['id'] for o in self.broker.open_orders() if o['client_order_id'] not in active_cids]
         if unknown: raise SafetyStop(f'Unmanaged open broker orders: {unknown}')
         # Replay with overlap to catch late same-day settlement/cash entries.
@@ -156,6 +184,17 @@ class Executor:
                 daily=interrupt_builder(state,self.broker)
                 if daily is not None:
                     from .monthly import cancel_open
+                    def remember_interruption(s):
+                        self.ledger.check(s,t)
+                        monthly=s['active']
+                        latest={(key,sym):bool(on) for key,meta in daily.get('metadata',{}).items() for sym,on in meta.get('leg_states',{}).items()}
+                        monthly['daily_interruption']={'status':'needs_recovery','period':daily['period'],'observed_at':self.now().isoformat()}
+                        for intent in monthly['intents']:
+                            signal=latest.get((intent['strategy'],intent['symbol']))
+                            if intent['side']=='buy' and signal is False:intent.update(status='invalidated',reason='daily_risk_off')
+                            elif intent['side']=='sell' and intent.get('risk_exit') and signal is True:intent.update(status='invalidated',reason='daily_risk_on')
+                        for key,meta in daily.get('metadata',{}).items():monthly.setdefault('metadata',{})[key]=deepcopy(meta)
+                    self.ledger.store.mutate('daily_interruption_observed',remember_interruption)
                     if not cancel_open(self,t):return {'status':'pending','reason':'daily_risk_cancel_unconfirmed','run_id':state['active']['id']}
                     self.recover(t)
                     # Cancels can carry late fills. Rebuild daily quantities from
@@ -204,7 +243,13 @@ class Executor:
                     # Persist claim BEFORE POST. A crash here blocks until explicit
                     # resolution, rather than risking a duplicate order.
                     row=self.ledger.mark_submitting(t,i)
-                    order=self.broker.submit(row)
+                    try:order=self.broker.submit(row)
+                    except Exception as error:
+                        evidence=definitive_order_rejection(error)
+                        if evidence is not None:
+                            self.ledger.reject(t,i,evidence)
+                            raise SafetyStop(f"Broker rejected order: {evidence['http_status']} code {evidence['code']}: {evidence['message']}") from error
+                        raise
                     self.ledger.record(t,i,order)
                 deadline=time.monotonic()+self.timeout
                 while True:

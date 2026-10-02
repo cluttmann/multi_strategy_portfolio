@@ -228,6 +228,14 @@ class Ledger:
             return deepcopy(row)
         return self.store.mutate('intent',mark)
 
+    def reject(self,token,index,evidence):
+        def rejected(state):
+            self.check(state,token);row=state['active']['orders'][index]
+            if row['status']!='submitting' or dec(row.get('booked_qty',0))!=0:
+                raise SafetyStop('Rejection proof does not match an unfilled submission claim')
+            row.update(status='rejected',no_order_proven=True,rejection=deepcopy(evidence))
+        self.store.mutate('broker_order_rejected',rejected)
+
     def record(self,token,index,order):
         def record(s):
             self.check(s,token); apply_order(s,s['active']['orders'][index],order)
@@ -256,6 +264,7 @@ class Ledger:
             for key,updates in p.get('metadata',{}).items():
                 s['portfolios'][key]['metadata'].update(updates)
             if p['action']=='daily' and s.get('suspended_monthly'):
+                s['suspended_monthly']['daily_interruption']={'status':'recovered','period':p['period'],'recovered_at':utcnow()}
                 # Daily trades may consume already-funded monthly cash or fulfill
                 # an outstanding rotation. Credit actual fills against the fixed
                 # intent cap; do not allocate any fresh monthly funding.
@@ -274,6 +283,9 @@ class Ledger:
                 s.pop('monthly_retry',None)
             if s.get('pending_actions',{}).get(p['action'])==p['period']:
                 s['pending_actions'].pop(p['action'])
-            p['completed_at']=utcnow(); s['active']=None
+            p['completed_at']=utcnow()
+            from .notifications import queue_result
+            queue_result(s,p,'complete')
+            s['active']=None
             return p
         return self.store.mutate('complete',complete)
