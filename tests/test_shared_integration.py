@@ -76,6 +76,50 @@ def test_monthly_plan_keeps_shared_ownership_and_funding_sums_once():
     assert store.read()['portfolios']['mix8']['cash']=='42.500000'
 
 
+def test_monthly_cache_miss_uses_real_market_refresh_contract(monkeypatch):
+    """Run real cache helpers; broad mock signatures cannot hide adapter drift."""
+    from types import SimpleNamespace
+    c,store,broker=controller_fixture();cached={};downloads=[]
+    class Document:
+        def __init__(self,key):self.key=key
+        def get(self):
+            return SimpleNamespace(exists=self.key in cached,to_dict=lambda:dict(cached[self.key]))
+        def set(self,data):cached[self.key]=dict(data)
+    class Collection:
+        def __init__(self,name):self.name=name
+        def document(self,symbol):return Document((self.name,symbol))
+    class Database:
+        def collection(self,name):return Collection(name)
+    def environment(env='live'):return {'ENV':env}
+    def historical(api,symbol,days=365,raw=False):
+        assert api['ENV']=='paper' and days==500 and not raw
+        downloads.append(symbol)
+        return [100.]*300
+    def latest(api,symbol):
+        assert api['ENV']=='paper'
+        return 123.45
+    def weights(api,cfg):
+        return {'weights':{'UBT':1},'cash_weight':0,'picks':['UBT'],'realized_vols':{'UBT':.2}}
+    monkeypatch.setattr(main,'get_firestore_client',lambda:Database())
+    monkeypatch.setattr(main,'set_alpaca_environment',environment)
+    monkeypatch.setattr(main,'get_alpaca_historical_bars',historical)
+    monkeypatch.setattr(main,'get_latest_trade',latest)
+    c.bot.get_all_market_data=main.get_all_market_data
+    c.bot.update_market_data=main.update_market_data
+    c.bot.plan_rotator_weights=weights
+    plan=c.build(store.read(),'monthly','2026-10')
+    assert set(downloads)=={'UBT','WLDU'}
+    assert plan['prices']['UBT']=='123.45' and plan['prices']['WLDU']=='123.45'
+    assert set(cached)=={('market-data-paper','UBT'),('market-data-paper','WLDU')}
+    assert all(data['price']==123.45 for data in cached.values())
+    assert any(row['symbol']=='UBT' and row['side']=='buy' for row in plan['orders'])
+    # Planning neither starts orders nor repeats refreshes while the cache is fresh.
+    assert store.read()['active'] is None and broker.submits==0
+    assert store.read()['portfolios']['reserve']['cash']=='100'
+    c.build(store.read(),'monthly','2026-10')
+    assert len(downloads)==2
+
+
 def test_daily_gold_exit_cannot_touch_mix8_gold():
     c,store,broker=controller_fixture()
     store.state['portfolios']['mix8']['positions']={'UGLD':'40'}

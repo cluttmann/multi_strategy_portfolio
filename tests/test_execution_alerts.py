@@ -65,6 +65,63 @@ def test_reconcile_route_sends_one_failure_and_one_recovery(monkeypatch,_no_outs
     assert 'reconciled' in _no_outside_world[1][1].lower()
 
 
+@pytest.mark.parametrize('prior_incident',[False,True])
+def test_busy_reconcile_is_pending_without_alert_or_fake_recovery(monkeypatch,_no_outside_world,prior_incident):
+    from test_shared_integration import controller_fixture
+    controller,store,broker=controller_fixture()
+    token=controller.ledger.acquire();before=store.read();calls=[]
+    incident={'active':prior_incident,'key':'broker_cash_mismatch','count':2}
+    original=dict(incident)
+    class Gate:
+        def __init__(self,db,env):calls.append('gate')
+        def failed(self,error):
+            calls.append('failed')
+            incident.update(active=True,key=str(error),count=3)
+            return True
+        def recovered(self):
+            calls.append('recovered');incident.update(active=False,key=None,count=0)
+            return True
+        def retry_notification(self,error):calls.append('retry_notification')
+    monkeypatch.setattr(main,'set_alpaca_environment',lambda env:{'ENV':env})
+    monkeypatch.setattr(main,'get_controller',lambda *args:controller)
+    monkeypatch.setattr(main,'get_firestore_client',lambda:calls.append('firestore') or None)
+    monkeypatch.setattr(main,'FirestoreIncidentGate',Gate)
+    try:
+        with main.app.app_context():result,status=main.shared_etf_reconcile_route(None)
+        assert status==200 and result.json=={'status':'pending','reason':'account_busy'}
+        assert store.read()==before and store.read()['lease']['token']==token
+        assert incident==original and calls==[]
+        assert _no_outside_world==[] and broker.submits==0
+    finally:controller.ledger.release(token)
+
+
+@pytest.mark.parametrize('error',[
+    main.SafetyStop('Executor lease expired or fenced'),
+    main.SafetyStop('Another executor owns this account '),
+    ValueError('Another executor owns this account'),
+])
+def test_reconcile_other_errors_remain_http_500_and_notify(monkeypatch,_no_outside_world,error):
+    from flask import Flask
+    from werkzeug.test import Client
+    calls=[]
+    class Controller:
+        def reconcile(self):raise error
+    class Gate:
+        def __init__(self,db,env):pass
+        def failed(self,failure):calls.append(failure);return True
+        def recovered(self):raise AssertionError('A failed reconcile is not recovery')
+    monkeypatch.setattr(main,'set_alpaca_environment',lambda env:{})
+    monkeypatch.setattr(main,'get_controller',lambda *args:Controller())
+    monkeypatch.setattr(main,'get_firestore_client',lambda:None)
+    monkeypatch.setattr(main,'FirestoreIncidentGate',Gate)
+    monkeypatch.setattr(main,'send_telegram_message',lambda message:_no_outside_world.append(message) or 200)
+    app=Flask('reconcile-error-test')
+    app.add_url_rule('/reconcile',view_func=lambda:main.shared_etf_reconcile_route(None),methods=['POST'])
+    response=Client(app).post('/reconcile')
+    assert response.status_code==500
+    assert calls==[error] and len(_no_outside_world)==1
+
+
 @pytest.mark.parametrize('action', ['daily', 'monthly', 'monthly-funding'])
 def test_strategy_run_waits_for_short_reconcile_lease_without_alert(monkeypatch,_no_outside_world,action):
     attempts=[]; waits=[]
@@ -115,10 +172,11 @@ def test_strategy_run_does_not_retry_other_safety_stops(monkeypatch,_no_outside_
     assert len(_no_outside_world)==1
 
 
-def test_reconcile_data_error_does_not_report_recovery(monkeypatch,_no_outside_world):
+@pytest.mark.parametrize('error',['EET: Quote stale','Another executor owns this account'])
+def test_reconcile_data_error_does_not_report_recovery(monkeypatch,_no_outside_world,error):
     class Controller:
         def reconcile(self):
-            return {'status':'data_error','errors':['EET: Quote stale']}
+            return {'status':'data_error','errors':[error]}
     class Gate:
         def __init__(self,*args):pass
         def failed(self,error):return True
@@ -128,7 +186,7 @@ def test_reconcile_data_error_does_not_report_recovery(monkeypatch,_no_outside_w
     monkeypatch.setattr(main,'get_firestore_client',lambda:None)
     monkeypatch.setattr(main,'FirestoreIncidentGate',Gate)
     monkeypatch.setattr(main,'send_telegram_message',lambda message:(_no_outside_world.append(message) or 200))
-    with pytest.raises(main.SafetyStop,match='Quote stale'):
+    with pytest.raises(main.SafetyStop,match=error):
         main.shared_etf_reconcile_route(None)
     assert len(_no_outside_world)==1
 

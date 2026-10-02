@@ -87,7 +87,7 @@ class Controller:
             if hasattr(self.bot,'get_all_market_data'):
                 data=self.bot.get_all_market_data(symbol,self.env) or {}
                 if not data.get('price'):
-                    self.bot.update_market_data(self.api,symbol,self.env)
+                    self.bot.update_market_data(symbol,env=self.env)
                     data=self.bot.get_all_market_data(symbol,self.env) or {}
                 mark=dec(data.get('price',0))
                 if mark<=0:raise SafetyStop(f'{symbol}: missing valuation mark for monthly target')

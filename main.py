@@ -3658,7 +3658,13 @@ def monthly_buy_aaa(request):
 def shared_etf_reconcile_route(request):
     api = set_alpaca_environment(env=alpaca_environment)
     try:
-        result = get_controller(sys.modules[__name__], api, alpaca_environment).reconcile()
+        try:
+            result = get_controller(sys.modules[__name__], api, alpaca_environment).reconcile()
+        except SafetyStop as exc:
+            # A held account lease is normal contention, not failed reconciliation.
+            if str(exc) == 'Another executor owns this account':
+                return jsonify({'status': 'pending', 'reason': 'account_busy'}), 200
+            raise
         if result.get('status') == 'data_error':
             raise SafetyStop('; '.join(result.get('errors') or ['Monthly execution data error']))
     except Exception as exc:
