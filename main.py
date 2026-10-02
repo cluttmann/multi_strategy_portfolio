@@ -458,14 +458,14 @@ def get_alpaca_historical_bars(api, symbol, days=400, raw=False, adjustment="spl
 
 def _managed_run(api, env, action, **kwargs):
     try:
-        # The ten-minute reconcile may briefly own the account when the daily
-        # scheduler starts. Retry only that lease collision; all other safety
-        # stops still fail immediately and keep their alert.
-        for attempt in range(3 if action == "daily" else 1):
+        # Reconcile can briefly own the account when a scheduled strategy starts.
+        # Retry only that lease collision, preserving every other safety stop.
+        retry_lease = action in {"daily", "monthly", "monthly-funding"}
+        for attempt in range(3 if retry_lease else 1):
             try:
                 return get_controller(sys.modules[__name__], api, env).execute(action, **kwargs)
             except SafetyStop as exc:
-                if (action != "daily" or str(exc) != "Another executor owns this account"
+                if (not retry_lease or str(exc) != "Another executor owns this account"
                         or attempt == 2):
                     raise
                 time.sleep(5)
@@ -477,6 +477,13 @@ def _managed_run(api, env, action, **kwargs):
 def get_execution_price(api, symbol, env="live", require_fresh=False):
     from execution.quotes import get_price
     return get_price(sys.modules[__name__], api, symbol, env, require_fresh)
+
+
+def get_execution_quote(api, symbol, env="live", use_cache=True, persist=True):
+    """Source-tagged IEX bid/ask; disable cache and persistence for a preflight."""
+    from execution.quotes import get_quote
+    return get_quote(sys.modules[__name__], api, symbol, env,
+                     use_cache=use_cache, persist=persist)
 
 
 def get_latest_trade(api, symbol):
@@ -3651,6 +3658,8 @@ def shared_etf_reconcile_route(request):
     api = set_alpaca_environment(env=alpaca_environment)
     try:
         result = get_controller(sys.modules[__name__], api, alpaca_environment).reconcile()
+        if result.get('status') == 'data_error':
+            raise SafetyStop('; '.join(result.get('errors') or ['Monthly execution data error']))
     except Exception as exc:
         gate = None
         try:
@@ -3686,9 +3695,16 @@ def audit_monthly_run(api, env="live", lookback_days=14):
         state = get_controller(sys.modules[__name__], api, env).store.read()
         month = current_month_id()
         done = state['last_completed'].get('monthly') == month
+        expired = state.get('last_expired', {}).get('monthly') == month
+        active = state.get('active') or state.get('suspended_monthly') or {}
         lines = [f"🛎 Monthly Run Audit — {month}",
-                 "✅ Ledger run completed" if done else "❌ No completed ledger run this month",
-                 f"Active plan: {(state.get('active') or {}).get('id', 'none')}"]
+                 "✅ Ledger run completed" if done else (
+                     "⚠️ Monthly remainder expired" if expired else "❌ No completed ledger run this month"),
+                 f"Active plan: {active.get('id', 'none')}"]
+        for intent in active.get('intents', []):
+            if intent.get('status') != 'complete':
+                lines.append(f"{intent['strategy']} {intent['symbol']}: "
+                             f"{intent.get('status', 'pending')} — {intent.get('reason', 'awaiting execution')}")
         for key, (_, label) in SLEEVES.items():
             positions = state['portfolios'][key]['positions']
             lines.append(f"{label}: " + ', '.join(f"{q} {sym}" for sym, q in positions.items() if float(q)))

@@ -11,6 +11,9 @@ trading API, deployed to Google Cloud (`europe-west3`, project `trading-436516`)
 > FIRE-Plan. Alles darunter in dieser README ist entweder eine Kurzfassung davon
 > oder historisch.
 
+Die Regeln für Quotes, Spread-Limits und wiederholbare Monatsausführung stehen
+in [docs/monthly_execution.md](docs/monthly_execution.md).
+
 ## Portfolio Allocation
 
 **Vier aktive Sleeves** (Stand 2026-09-25, Summe 100 %):

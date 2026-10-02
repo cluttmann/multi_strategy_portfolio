@@ -65,7 +65,8 @@ def test_reconcile_route_sends_one_failure_and_one_recovery(monkeypatch,_no_outs
     assert 'reconciled' in _no_outside_world[1][1].lower()
 
 
-def test_daily_run_waits_for_short_reconcile_lease_without_alert(monkeypatch,_no_outside_world):
+@pytest.mark.parametrize('action', ['daily', 'monthly', 'monthly-funding'])
+def test_strategy_run_waits_for_short_reconcile_lease_without_alert(monkeypatch,_no_outside_world,action):
     attempts=[]; waits=[]
     class Controller:
         def execute(self,action,**kwargs):
@@ -76,13 +77,14 @@ def test_daily_run_waits_for_short_reconcile_lease_without_alert(monkeypatch,_no
     monkeypatch.setattr(main,'get_controller',lambda *args:Controller())
     monkeypatch.setattr(main.time,'sleep',lambda seconds:waits.append(seconds))
 
-    assert main._managed_run({},'live','daily')=={'status':'complete'}
-    assert attempts==['daily','daily']
+    assert main._managed_run({},'live',action)=={'status':'complete'}
+    assert attempts==[action,action]
     assert waits==[5]
     assert _no_outside_world==[]
 
 
-def test_daily_run_reports_lease_after_bounded_retries(monkeypatch,_no_outside_world):
+@pytest.mark.parametrize('action', ['daily', 'monthly', 'monthly-funding'])
+def test_strategy_run_reports_lease_after_bounded_retries(monkeypatch,_no_outside_world,action):
     attempts=[]; waits=[]
     class Controller:
         def execute(self,action,**kwargs):
@@ -92,13 +94,14 @@ def test_daily_run_reports_lease_after_bounded_retries(monkeypatch,_no_outside_w
     monkeypatch.setattr(main.time,'sleep',lambda seconds:waits.append(seconds))
 
     with pytest.raises(main.SafetyStop,match='Another executor'):
-        main._managed_run({},'live','daily')
-    assert attempts==['daily']*3
+        main._managed_run({},'live',action)
+    assert attempts==[action]*3
     assert waits==[5,5]
     assert len(_no_outside_world)==1
 
 
-def test_daily_run_does_not_retry_other_safety_stops(monkeypatch,_no_outside_world):
+@pytest.mark.parametrize('action', ['daily', 'monthly', 'monthly-funding'])
+def test_strategy_run_does_not_retry_other_safety_stops(monkeypatch,_no_outside_world,action):
     attempts=[]
     class Controller:
         def execute(self,action,**kwargs):
@@ -107,6 +110,24 @@ def test_daily_run_does_not_retry_other_safety_stops(monkeypatch,_no_outside_wor
     monkeypatch.setattr(main,'get_controller',lambda *args:Controller())
 
     with pytest.raises(main.SafetyStop,match='Unexplained broker cash'):
-        main._managed_run({},'live','daily')
-    assert attempts==['daily']
+        main._managed_run({},'live',action)
+    assert attempts==[action]
+    assert len(_no_outside_world)==1
+
+
+def test_reconcile_data_error_does_not_report_recovery(monkeypatch,_no_outside_world):
+    class Controller:
+        def reconcile(self):
+            return {'status':'data_error','errors':['EET: Quote stale']}
+    class Gate:
+        def __init__(self,*args):pass
+        def failed(self,error):return True
+        def recovered(self):raise AssertionError('A data error is not recovery')
+    monkeypatch.setattr(main,'set_alpaca_environment',lambda env:{})
+    monkeypatch.setattr(main,'get_controller',lambda *args:Controller())
+    monkeypatch.setattr(main,'get_firestore_client',lambda:None)
+    monkeypatch.setattr(main,'FirestoreIncidentGate',Gate)
+    monkeypatch.setattr(main,'send_telegram_message',lambda message:(_no_outside_world.append(message) or 200))
+    with pytest.raises(main.SafetyStop,match='Quote stale'):
+        main.shared_etf_reconcile_route(None)
     assert len(_no_outside_world)==1
