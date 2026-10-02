@@ -42,7 +42,7 @@ steps:
     waitFor: ['-']
 
 # ─────────────────────────────────────────────────────────────────────────────
-# WAVE A — compatible background executor first, then the orchestrator.
+# WAVE A — compatible background executors in parallel, then the orchestrator.
 #
 # Cloud Build has a per-project concurrent-build quota; each `gcloud functions
 # deploy` spawns ITS OWN inner Cloud Build to construct the container image.
@@ -73,6 +73,23 @@ steps:
     - --set-env-vars=GOOGLE_CLOUD_PROJECT=1098661711782,GOOGLE_CLOUD_PROJECT_ID=trading-436516
     waitFor: ['prep-sources']
 
+  # Daily trends must understand durable intents before a new monthly plan exists.
+  - name: 'gcr.io/cloud-builders/gcloud'
+    id: 'deploy-trend-sleeves'
+    args:
+    - functions
+    - deploy
+    - daily_trend_sleeves
+    - --source=fn-light
+    - --trigger-http
+    - --region=europe-west3
+    - --runtime=python310
+    - --timeout=540s
+    - --entry-point=daily_trend_sleeves_route
+    - --memory=512MB
+    - --set-env-vars=GOOGLE_CLOUD_PROJECT=1098661711782,GOOGLE_CLOUD_PROJECT_ID=trading-436516
+    waitFor: ['prep-sources']
+
   # Deploy the monthly_invest_all orchestrator
   - name: 'gcr.io/cloud-builders/gcloud'
     id: 'deploy-orchestrator'
@@ -88,10 +105,10 @@ steps:
     - --entry-point=monthly_invest_all
     - --memory=512MB
     - --set-env-vars=GOOGLE_CLOUD_PROJECT=1098661711782,GOOGLE_CLOUD_PROJECT_ID=trading-436516
-    waitFor: ['deploy-shared-reconcile']
+    waitFor: ['deploy-shared-reconcile', 'deploy-trend-sleeves']
 
 # ─────────────────────────────────────────────────────────────────────────────
-# WAVE B — Mix8 and the trend sleeves in parallel, then the 7-Asset Rotator (after Wave A).
+# WAVE B — Mix8 manual/debug deployment (after Wave A).
 # ─────────────────────────────────────────────────────────────────────────────
 
   # Deploy the monthly_buy_mix8 Function (manual/debug — the orchestrator runs Mix8 in-process)
@@ -111,27 +128,13 @@ steps:
     - --set-env-vars=GOOGLE_CLOUD_PROJECT=1098661711782,GOOGLE_CLOUD_PROJECT_ID=trading-436516
     waitFor: ['deploy-orchestrator']
 
-  # Deploy daily_trend_sleeves (World-Trend + S&P-Trend daily SMA check, own scheduler below)
-  - name: 'gcr.io/cloud-builders/gcloud'
-    id: 'deploy-trend-sleeves'
-    args:
-    - functions
-    - deploy
-    - daily_trend_sleeves
-    - --source=fn-light
-    - --trigger-http
-    - --region=europe-west3
-    - --runtime=python310
-    - --timeout=540s
-    - --entry-point=daily_trend_sleeves_route
-    - --memory=512MB
-    - --set-env-vars=GOOGLE_CLOUD_PROJECT=1098661711782,GOOGLE_CLOUD_PROJECT_ID=trading-436516
-    waitFor: ['deploy-orchestrator']
-
   # Steps 4e + 4f (monthly_buy_rssb_wtip + rebalance_rssb_wtip) removed 2026-05-12 —
   # RSSB/WTIP strategy discontinued for poor performance. The deployed Cloud Functions
   # and the Cloud Scheduler job will be deleted from GCP separately (see ops cleanup).
 
+# ─────────────────────────────────────────────────────────────────────────────
+# WAVE C1 — 7-Asset Rotator (after Mix8 and the compatible daily executor).
+# ─────────────────────────────────────────────────────────────────────────────
 
   # Deploy the monthly_buy_aaa Function (7-Asset Rotator)
   - name: 'gcr.io/cloud-builders/gcloud'
