@@ -3629,7 +3629,7 @@ def monthly_invest_all(request):
     """
     api = set_alpaca_environment(env=alpaca_environment)
     results = monthly_invest_all_strategies(api)
-    return jsonify(results), 200
+    return jsonify(results), (500 if isinstance(results, dict) and results.get('status') == 'data_error' else 200)
 
 
 @app.route("/monthly_buy_mix8", methods=["POST"])
@@ -3644,7 +3644,8 @@ def daily_trend_sleeves_route(request):
     """Taeglicher Check aller Trend-Sleeves (Scheduler 15:52 ET). Datenfehler => 500."""
     api = set_alpaca_environment(env=alpaca_environment)
     result = daily_trend_sleeves(api, env=alpaca_environment)
-    return result, (500 if str(result).startswith("❌") else 200)
+    failed = (isinstance(result, dict) and result.get('status') == 'data_error') or str(result).startswith("❌")
+    return result, (500 if failed else 200)
 
 @app.route("/monthly_buy_aaa", methods=["POST"])
 def monthly_buy_aaa(request):

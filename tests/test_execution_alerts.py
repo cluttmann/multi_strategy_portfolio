@@ -131,3 +131,18 @@ def test_reconcile_data_error_does_not_report_recovery(monkeypatch,_no_outside_w
     with pytest.raises(main.SafetyStop,match='Quote stale'):
         main.shared_etf_reconcile_route(None)
     assert len(_no_outside_world)==1
+
+
+@pytest.mark.parametrize('route', ['monthly', 'daily'])
+@pytest.mark.parametrize('execution_status,http_status', [('data_error',500),('pending',200),('expired',200),('complete',200)])
+def test_strategy_http_status_distinguishes_data_error_from_waiting(monkeypatch,route,execution_status,http_status):
+    result={'status':execution_status,'errors':['stale quote'] if execution_status=='data_error' else []}
+    monkeypatch.setattr(main,'set_alpaca_environment',lambda env:{})
+    if route=='monthly':
+        monkeypatch.setattr(main,'monthly_invest_all_strategies',lambda api:result)
+        monkeypatch.setattr(main,'jsonify',lambda value:value)
+        response=main.monthly_invest_all(None)
+    else:
+        monkeypatch.setattr(main,'daily_trend_sleeves',lambda *args,**kwargs:result)
+        response=main.daily_trend_sleeves_route(None)
+    assert response==(result,http_status)
