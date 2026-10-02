@@ -125,3 +125,32 @@ and the current Scheduler timings. The next background tick performs the real
 reconciliation. Implementer owns controller, main and relevant regression tests;
 root owns docs, deployment and GET-only live verification. RED/GREEN, full suite,
 independent review and a new immutable commit are required before the push.
+
+### Task 6: Recover actual trade fees using the current broker contract
+
+The 17:35 scheduled run submitted seven real limit orders and six filled;
+EET remains resting at 105.58 USD. Recovery then stops on an observed 0.047874
+USD cash debit. The current fee code rounds SEC/TAF on each FILL and omits CAT.
+Alpaca's brokerage fee schedule, revised September 17, 2026, instead aggregates
+each fee type daily per account using exact fractional quantities, then rounds
+each type up to cents. Today's owned fills give REG .03 + TAF .01 + CAT .01 =
+.05 USD, leaving only .002126 USD cent rounding against actual broker cash.
+Source: https://files.alpaca.markets/disclosures/library/BrokFeeSched.pdf,
+pages 3–4; corroborated by the official Regulatory Fees documentation.
+
+Implement a narrow new daily fee policy for fills dated 2026-10-02 through
+2026-12-31. Preserve historical per-fill accrual and receipt state. New account
+fees are explicit reserve cash/debt events; fixed monthly funding is unchanged.
+Require owned confirmed fills and a matching observed cash debit under the
+unchanged .02 reconciliation gate. Persist daily raw/rounded targets, charged
+amounts, outstanding receipts and IDs for incremental fills and replay safety.
+TAF cap applies per trade before daily aggregation; CAT applies to buys and sells.
+New receipt coverage must preserve date/type and prevent double booking, while
+legacy settlements remain compatible. No cash reset, tolerance increase, extra
+funding, manual order/cancel, or production ledger mutation by the implementer.
+
+Cover actual split DBC fills and SHV plus purchases, replay, partial/late fills,
+cent boundaries, buy-only CAT, capped split TAF, unknown or missing ownership,
+unexplained cash, date bounds, old accrued rows, and delayed fee receipts.
+RED/GREEN, full suite, immutable commit and independent review precede root's
+authorized automatic deployment and GET-only live recovery verification.
