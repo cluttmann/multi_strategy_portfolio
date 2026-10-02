@@ -42,7 +42,7 @@ steps:
     waitFor: ['-']
 
 # ─────────────────────────────────────────────────────────────────────────────
-# WAVE A — orchestrator deploy (no dependency).
+# WAVE A — compatible background executor first, then the orchestrator.
 #
 # Cloud Build has a per-project concurrent-build quota; each `gcloud functions
 # deploy` spawns ITS OWN inner Cloud Build to construct the container image.
@@ -55,6 +55,23 @@ steps:
 
 
 
+
+  # Reconcile must understand durable attempts before a new monthly plan exists.
+  - name: 'gcr.io/cloud-builders/gcloud'
+    id: 'deploy-shared-reconcile'
+    args:
+    - functions
+    - deploy
+    - shared_etf_reconcile
+    - --source=fn-light
+    - --trigger-http
+    - --region=europe-west3
+    - --runtime=python310
+    - --timeout=540s
+    - --entry-point=shared_etf_reconcile_route
+    - --memory=512MB
+    - --set-env-vars=GOOGLE_CLOUD_PROJECT=1098661711782,GOOGLE_CLOUD_PROJECT_ID=trading-436516
+    waitFor: ['prep-sources']
 
   # Deploy the monthly_invest_all orchestrator
   - name: 'gcr.io/cloud-builders/gcloud'
@@ -71,7 +88,7 @@ steps:
     - --entry-point=monthly_invest_all
     - --memory=512MB
     - --set-env-vars=GOOGLE_CLOUD_PROJECT=1098661711782,GOOGLE_CLOUD_PROJECT_ID=trading-436516
-    waitFor: ['prep-sources']
+    waitFor: ['deploy-shared-reconcile']
 
 # ─────────────────────────────────────────────────────────────────────────────
 # WAVE B — Mix8 and the trend sleeves in parallel, then the 7-Asset Rotator (after Wave A).
@@ -173,21 +190,6 @@ steps:
     waitFor:
       - 'deploy-aaa'
 
-  - name: 'gcr.io/cloud-builders/gcloud'
-    id: 'deploy-shared-reconcile'
-    args:
-    - functions
-    - deploy
-    - shared_etf_reconcile
-    - --source=fn-light
-    - --trigger-http
-    - --region=europe-west3
-    - --runtime=python310
-    - --timeout=540s
-    - --entry-point=shared_etf_reconcile_route
-    - --memory=512MB
-    - --set-env-vars=GOOGLE_CLOUD_PROJECT=1098661711782,GOOGLE_CLOUD_PROJECT_ID=trading-436516
-    waitFor: ['deploy-aaa']
 
 # ─────────────────────────────────────────────────────────────────────────────
 # WAVE D — Cloud Scheduler (re)creation. Schedulers don't trigger inner Cloud

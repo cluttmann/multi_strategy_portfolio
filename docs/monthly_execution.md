@@ -20,18 +20,28 @@ Es gibt keinen Rückfall auf Last-Trade-Preise oder verzögerte SIP-Quotes.
 IEX bildet nur einen Handelsplatz ab. Seine Spreads können deutlich weiter als
 die marktweiten SIP-Spreads sein: Im untersuchten Beispiel vom 01.10.2026
 standen 3,44 % auf IEX einem SIP-Spread von 0,43 % gegenüber. Eine korrekte
-Wiederholung ersetzt deshalb keine marktweite Quote. EET-Käufe können weiterhin
-offen bleiben und auslaufen, selbst wenn andere Handelsplätze engere Quotes
-stellen.
+Wiederholung ersetzt deshalb keine marktweite Quote. Die neue Kaufregel schützt
+einen gewählten Höchstpreis, ohne einen marktweiten Spread vorzutäuschen.
+EET-Käufe können offen bleiben und auslaufen.
 
 ## EET-Limits und Wiederholungen
 
-Für normale monatliche EET-Orders gilt eine Spread-Zielgröße von 0,30 % und
-eine harte Grenze von 0,50 % über den vollständigen Bid/Ask-Spread. Die erste
-Order weicht höchstens 0,10 % vom Quote-Mittelpunkt ab, spätere Versuche
-höchstens 0,15 %. Kauf-Limits werden abgerundet, Verkaufs-Limits aufgerundet.
-Eine Order kann innerhalb des Spreads stehen bleiben. Ein Fill ist nicht
-garantiert. Risikoverkäufe folgen dem bestehenden Ausstiegspfad.
+Neue Monatspläne speichern die Kaufregel `iex-bid-cap-v1`. Für normale
+EET-Käufe gilt: höchstens der kleinere Wert aus aktueller IEX-Ask und
+IEX-Bid × 1,001, auf Cent abgerundet. Beispiel: Bid 109,83 USD und Ask
+114,14 USD ergeben ein Kauf-Limit von 109,93 USD. Eine hohe Ask zieht dieses
+Limit nicht nach oben; der breite IEX-Spread allein verhindert die passive
+Order nicht. Jeder Wiederholungsversuch bleibt bei derselben 0,10-%-Grenze
+zum dann frischen Bid. Der absolute Preis kann sich mit dem Bid bewegen.
+Die 0,10 % sind eine Preiszugabe zum beobachteten Bid, kein gemessener
+marktweiter Spread und keine garantierte Ausführung.
+
+Bestehende Pläne ohne diesen gespeicherten Marker behalten ihre ursprüngliche
+Regel: vollständiger EET-Spread höchstens 0,50 %, zunächst höchstens 0,10 %,
+später 0,15 % Abstand vom Mittelpunkt. Normale EET-Verkäufe verwenden weiterhin
+diese Regel und runden auf Cent auf. Risikoverkäufe folgen dem bestehenden
+Ausstiegspfad. Es erfolgt kein Wechsel zu einer Market-Order, wenn ein Kauf
+unbefüllt bleibt.
 
 Der Scheduler ruft den Monatsplan an den Kalendertagen 1–7 um Minute 05 und
 35 zwischen 10 und 15 Uhr New Yorker Zeit auf. Neue monatliche Einstiege

@@ -78,3 +78,33 @@ Independently review ledger safety, attempts, partial cancellation, cash and dai
 priority. Full tests; push approved main deployment; watch regional build and
 function revisions, scheduler configs and quote preflight. Snapshot production
 ledger before rollout; verify no unexplained quantities/cash after rollout.
+
+### Task 4: Free passive EET buy limits (latest user steering)
+
+The user rejects the 99 USD SIP tariff and asks to protect purchase prices with
+limit orders despite misleadingly wide IEX spreads. Root chooses a conservative
+passive EET buy policy: limit = min(fresh IEX ask, fresh IEX bid * 1.001), rounded
+DOWN to cents. This is a maximum purchase price, not a measured NBBO spread or a
+fill guarantee. Use the SAME 10-basis-point bid cap for every retry; never raise
+it toward a wide ask or midpoint. A current quote can move the absolute limit on
+a later attempt after cancellation confirmation. Do not change other symbols,
+EET sell limits, risk exits, funding, ownership, or daily interruption semantics.
+
+Own execution/quotes.py, execution/monthly.py, execution/controller.py, and a new
+tests/test_passive_eet_limits.py. Keep the execution_policy monthly-iex-v1 engine
+identifier for compatibility; newly built monthly plans persist a separate
+eet_buy_price_policy='iex-bid-cap-v1' marker BEFORE the first attempt. Old active
+plans lacking this marker retain the reviewed midpoint/spread policy. Unknown
+markers fail closed. All source/age/depth checks still apply. Persist the chosen
+price policy/reference in actual attempts. Wide but valid IEX quotes may submit
+a passive bid-based EET buy; invalid or stale quotes may not. Non-EET intents
+continue independently. Tests must prove wide-ask independence, cent rounding,
+no escalation on retry, fixed budget/partial-fill reservation, legacy behavior,
+unknown-policy refusal, plan-marker persistence, and daily interruption safety.
+
+Write failing regressions first, focused tests then full suite, commit only
+owned files and report RED/GREEN plus exact commit in task-4-report.md. No live
+requests, Firestore writes, deploy, or subagents. Root owns docs/rollout. This
+addition follows the explicit request to implement everything and the user's
+new order-based cost constraint. The cost of this conservative choice is a
+possibly unfilled EET allocation; cash remains available after expiry.
