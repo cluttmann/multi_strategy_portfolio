@@ -1,4 +1,5 @@
 import os
+import bisect
 from flask import Flask, jsonify
 from google.cloud import secretmanager
 from dotenv import load_dotenv
@@ -1830,6 +1831,15 @@ EODHD_BASE_URL = "https://eodhd.com/api"
 MAX_EOD_GAP_DAYS = 10      # beobachtete Maximalluecke bei IUSQ.XETRA: 6 (Weihnachten)
 MAX_LIVE_JUMP = 0.08       # groesserer Sprung => Tickerwechsel, Split oder Fehlprint
 
+# USD-Signal auf der XETRA-Zeitscheibe: EUR-Tracker x USD je EUR (EURUSD.FOREX).
+# Beide 2x-Produkte haben die Rendite des USD-Index im Hebel; das EUR-Signal
+# enthaelt den Wechselkurs als Rauschen (2018: 13 Wechsel statt 1). Studie:
+# output/world2x-sma-check-2026-10-06/. FX handelt an jedem Werktag, auch an
+# XETRA-Feiertagen; der Tagesbar schliesst aber erst um Mitternacht UTC.
+MAX_FX_GAP_DAYS = 5        # Wochenende + ein Feiertag; laengere Luecke => Datenproblem
+MAX_FX_LIVE_AGE_MINUTES = 60
+MAX_FX_LIVE_JUMP = 0.05    # EURUSD bewegt sich selten > 2 %/Tag
+
 
 class EodhdDataError(Exception):
     """EODHD-Daten fehlen, sind veraltet oder unplausibel.
@@ -1843,6 +1853,11 @@ class EodhdDataError(Exception):
 def _heute_iso():
     """Heutiges Datum als ISO-String. Eigene Funktion, damit Tests sie ersetzen koennen."""
     return datetime.date.today().isoformat()
+
+
+def _jetzt_utc():
+    """Aktuelle UTC-Zeit (naiv). Eigene Funktion, damit Tests sie ersetzen koennen."""
+    return datetime.datetime.utcnow()
 
 
 def _xetra_trading_day(date_iso):
@@ -1996,6 +2011,55 @@ def fetch_eodhd_realtime(symbol):
     return float(close), datetime.datetime.utcfromtimestamp(int(timestamp))
 
 
+def _fx_live(fx_symbol, fx_hist, today_iso):
+    """Live-Kurs USD je EUR, geprueft auf Frische und Plausibilitaet.
+
+    Wird erst nach dem Tracker-Kurs abgerufen: an einem XETRA-Feiertag ist
+    der schon veraltet und der Lauf endet still, bevor FX eine Rolle spielt.
+    """
+    rate, ts = fetch_eodhd_realtime(fx_symbol)
+    age = (_jetzt_utc() - ts).total_seconds() / 60
+    if ts.date().isoformat() != today_iso or age > MAX_FX_LIVE_AGE_MINUTES:
+        raise EodhdDataError(
+            f"{fx_symbol}-Live-Kurs ist {age:.0f} Minuten alt ({ts:%Y-%m-%d %H:%M} UTC)")
+    past = [r for d, r in fx_hist if d < today_iso]
+    if not past:
+        raise EodhdDataError(f"{fx_symbol}: keine Schlusskurse vor {today_iso}")
+    if abs(rate / past[-1] - 1) > MAX_FX_LIVE_JUMP:
+        raise EodhdDataError(
+            f"{fx_symbol}-Live-Kurs {rate:.4f} weicht "
+            f"{(rate / past[-1] - 1) * 100:+.2f} % vom letzten Schluss ab")
+    return rate, ts
+
+
+def _hist_in_usd(hist, fx_hist, today_iso, fx_today):
+    """EUR-Schlusskurse in USD: Kurs x USD je EUR desselben Tages.
+
+    Vergangene Tage nehmen den EODHD-FX-Tagesschluss (Mitternacht UTC; die
+    Zeitdifferenz zur 17:30-Scheibe ist Rauschen von ~0,4 %, das die SMA
+    wegmittelt). Der heutige Tag nimmt `fx_today`, weil sein FX-Bar erst um
+    Mitternacht schliesst. Fehlt FX laenger als MAX_FX_GAP_DAYS, ist das ein
+    Datenproblem - nie mit einem alten Kurs weiterrechnen.
+    """
+    fx_dates = [d for d, _ in fx_hist]
+    fx_rates = [r for _, r in fx_hist]
+    out = []
+    for d, close in hist:
+        if d == today_iso:
+            out.append((d, close * fx_today))
+            continue
+        i = bisect.bisect_right(fx_dates, d) - 1
+        if i < 0:
+            raise EodhdDataError(f"kein FX-Kurs am oder vor {d}")
+        gap = (datetime.date.fromisoformat(d)
+               - datetime.date.fromisoformat(fx_dates[i])).days
+        if gap > MAX_FX_GAP_DAYS:
+            raise EodhdDataError(
+                f"FX-Kurs fuer {d} ist {gap} Kalendertage alt ({fx_dates[i]})")
+        out.append((d, close * fx_rates[i]))
+    return out
+
+
 def get_eodhd_sma_state(index_symbol, sma_period, env="live"):
     """Letzter bekannter Crossing-Zustand eines EODHD-Index, oder None.
 
@@ -2037,16 +2101,33 @@ def save_eodhd_sma_state(index_symbol, sma_period, state, price, sma_value,
 
 def _handle_eodhd_sma_crossing(index_symbol, index_name, sma_period,
                                noise_threshold, currency_symbol, run_role, env,
-                               public_chat_secret=None):
+                               public_chat_secret=None, fx_symbol=None):
     """SMA-Crossing-Alert auf einem EUR-notierten XETRA-Tracker.
 
     Drei Rollen statt der US-Handelszeiten-Logik des Alpaca-Pfads:
       advisory  - Vorwarnung 15:00-17:00, schreibt bewusst KEINEN State
       decisive  - Handelsalarm 17:20, schreibt den State
       reconcile - Abgleich 21:00 nach EODHD-Publikation auf den echten Schluss, korrigiert den State
+
+    Mit `fx_symbol` (EURUSD.FOREX = USD je EUR) laeuft das Signal in USD:
+    Tracker x Wechselkurs, weiter auf XETRA-Zeitscheibe und XETRA-Kalender, also
+    an jedem deutschen Handelstag. Eigener State-Schluessel, damit der alte
+    EUR-Zustand nie als Vorzustand des USD-Signals gilt.
     """
     today_iso = _heute_iso()
     hist = fetch_eodhd_eod_series(index_symbol)
+    state_key = f"{index_symbol}_x_{fx_symbol}" if fx_symbol else index_symbol
+    fx_line = ""
+
+    def in_usd(eur_price):
+        """Historie und heutigen Kurs in USD umrechnen; FX-Fehler sind laut."""
+        nonlocal hist, fx_line
+        fx_hist = fetch_eodhd_eod_series(fx_symbol, calendar_days=630)
+        fx_today, fx_ts = _fx_live(fx_symbol, fx_hist, today_iso)
+        hist = _hist_in_usd(hist, fx_hist, today_iso, fx_today)
+        fx_line = (f"\nSignal in USD: {index_symbol} {eur_price:.2f} € x "
+                   f"{fx_symbol} {fx_today:.4f} ({fx_ts:%H:%M} UTC)")
+        return eur_price * fx_today
 
     if run_role == "reconcile":
         if not hist or hist[-1][0] != today_iso:
@@ -2057,6 +2138,8 @@ def _handle_eodhd_sma_crossing(index_symbol, index_name, sma_period,
             return jsonify({"message": f"{index_name}: kein XETRA-Handelstag",
                             "status": "no_trading_day",
                             "run_role": run_role}), 200
+        if fx_symbol:
+            in_usd(hist[-1][1])
         series = _eodhd_close_series(hist, sma_period, today_iso)
         current_price = series[-1]
         price_source = f"XETRA-Schluss {today_iso}"
@@ -2069,6 +2152,8 @@ def _handle_eodhd_sma_crossing(index_symbol, index_name, sma_period,
             return jsonify({"message": f"{index_name}: kein XETRA-Handelstag",
                             "status": "no_trading_day",
                             "run_role": run_role}), 200
+        if fx_symbol:
+            current_price = in_usd(current_price)
         series = _eodhd_sma_series(hist, current_price, sma_period, today_iso)
         price_source = f"live {live_ts:%H:%M} UTC"
     else:
@@ -2079,7 +2164,7 @@ def _handle_eodhd_sma_crossing(index_symbol, index_name, sma_period,
     sma_value = sum(series) / len(series)
     diff_percent = (current_price / sma_value - 1) * 100
     current_state = _sma_state_from_diff(diff_percent, noise_threshold)
-    previous_state = get_eodhd_sma_state(index_symbol, sma_period, env=env)
+    previous_state = get_eodhd_sma_state(state_key, sma_period, env=env)
     trigger = sma_value * (1 - noise_threshold / 100)
 
     def body(headline):
@@ -2089,7 +2174,8 @@ def _handle_eodhd_sma_crossing(index_symbol, index_name, sma_period,
                 f"({diff_percent:+.2f} %)\n"
                 f"Ausstiegslinie (SMA -{noise_threshold:.1f} %): "
                 f"{trigger:.2f} {currency_symbol} "
-                f"({(trigger / current_price - 1) * 100:+.2f} % vom Kurs)")
+                f"({(trigger / current_price - 1) * 100:+.2f} % vom Kurs)"
+                f"{fx_line}")
 
     message, status = None, f"{current_state}_no_change"
 
@@ -2115,7 +2201,7 @@ def _handle_eodhd_sma_crossing(index_symbol, index_name, sma_period,
                            f"{previous_state.upper()} -> {current_state.upper()} "
                            f"- noch bis 17:30 CET handelbar")
             status = f"crossover_{current_state}"
-        save_eodhd_sma_state(index_symbol, sma_period, current_state,
+        save_eodhd_sma_state(state_key, sma_period, current_state,
                              current_price, sma_value, env=env)
 
     else:  # reconcile
@@ -2123,7 +2209,7 @@ def _handle_eodhd_sma_crossing(index_symbol, index_name, sma_period,
             message = body(f"🔁 {index_name}: Korrektur nach Schlusskurs "
                            f"(SMA{sma_period}) - {previous_state} -> {current_state}")
             status = "reconciled"
-        save_eodhd_sma_state(index_symbol, sma_period, current_state,
+        save_eodhd_sma_state(state_key, sma_period, current_state,
                              current_price, sma_value, env=env)
 
     if message:
@@ -2224,7 +2310,8 @@ def check_unified_index_alert(request, env=None):
                 return _handle_eodhd_sma_crossing(
                     index_symbol, index_name, sma_period, noise_threshold,
                     currency_symbol, run_role, env,
-                    public_chat_secret=public_chat_secret)
+                    public_chat_secret=public_chat_secret,
+                    fx_symbol=request_json.get("fx_symbol"))
 
             # ── Alpaca-Pfad, unveraendert ──────────────────────────────────
             # Handle SMA crossing alerts with crossover detection
@@ -3908,6 +3995,9 @@ if __name__ == "__main__":
                              "in den nur echte Crossings gehen")
     parser.add_argument("--annual_rebalance", action="store_true",
                         help="monthly_invest_all: jaehrliches Rebalancing erzwingen (Test; sonst nur im Januar)")
+    parser.add_argument("--fx_symbol", default=None,
+                        help="index_alert, nur bei --source eodhd: Signal in USD rechnen, "
+                             "z.B. EURUSD.FOREX (USD je EUR)")
     parser.add_argument("--currency_symbol", default=None,
                         help="Default: Euro-Zeichen bei --source eodhd, sonst $")
     args = parser.parse_args()
@@ -3923,9 +4013,11 @@ if __name__ == "__main__":
             "sma_period": args.sma_period,
             "noise_threshold": args.noise_threshold,
             "public_chat_secret": args.public_chat_secret,
+            "fx_symbol": args.fx_symbol,
             "threshold_percent": args.threshold_percent,
             "currency_symbol": args.currency_symbol
-                               or ("\u20ac" if args.source == "eodhd" else "$"),
+                               or ("\u20ac" if args.source == "eodhd" and not args.fx_symbol
+                                   else "$"),
         }
 
     # Run the function locally

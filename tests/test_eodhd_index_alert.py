@@ -506,3 +506,185 @@ def test_state_wird_trotz_kanalfehler_geschrieben(monkeypatch, kanal_umgebung):
     assert code == 200
     assert main.get_eodhd_sma_state("IUSQ.XETRA", 250, env="paper") == "below"
     assert any("ging NICHT in den" in m for _, m in kanal_umgebung)
+
+
+# ── USD-Signal: Tracker x EURUSD auf der XETRA-Zeitscheibe ─────────────────
+
+def _fx_hist(n=320, rate=1.10, end_date=TODAY):
+    """FX-Bars an jedem Kalendertag bis gestern (FOREX hat auch Feiertags-Bars)."""
+    last = datetime.date.fromisoformat(end_date) - datetime.timedelta(days=1)
+    return [((last - datetime.timedelta(days=n - 1 - i)).isoformat(), rate) for i in range(n)]
+
+
+def test_hist_in_usd_multipliziert_mit_fx_desselben_tages():
+    hist = [("2026-09-03", 100.0), ("2026-09-04", 101.0)]
+    fx = [("2026-09-03", 1.10), ("2026-09-04", 1.20)]
+    assert main._hist_in_usd(hist, fx, TODAY, 1.30) == [
+        ("2026-09-03", pytest.approx(110.0)), ("2026-09-04", pytest.approx(121.2))]
+
+
+def test_hist_in_usd_heutiger_tag_nimmt_live_fx():
+    """Der FX-Tagesbar schliesst erst um Mitternacht UTC - heute zaehlt der Live-Kurs."""
+    hist = [("2026-09-04", 100.0), (TODAY, 100.0)]
+    fx = [("2026-09-04", 1.10)]
+    out = main._hist_in_usd(hist, fx, TODAY, 1.25)
+    assert out[-1] == (TODAY, pytest.approx(125.0))
+
+
+def test_hist_in_usd_ueberbrueckt_wochenende():
+    hist = [("2026-09-07", 100.0)]                     # Montag
+    fx = [("2026-09-04", 1.10)]                        # Freitag, 3 Tage alt
+    assert main._hist_in_usd(hist, fx, "2026-09-08", 1.1)[0][1] == pytest.approx(110.0)
+
+
+def test_hist_in_usd_wirft_bei_fx_luecke():
+    hist = [("2026-09-07", 100.0)]
+    fx = [("2026-08-31", 1.10)]                        # 7 Tage alt
+    with pytest.raises(main.EodhdDataError, match="Kalendertage alt"):
+        main._hist_in_usd(hist, fx, "2026-09-08", 1.1)
+
+
+def test_hist_in_usd_wirft_ohne_fx_vor_dem_datum():
+    with pytest.raises(main.EodhdDataError, match="kein FX-Kurs"):
+        main._hist_in_usd([("2026-09-01", 100.0)], [("2026-09-02", 1.1)], TODAY, 1.1)
+
+
+@pytest.fixture
+def jetzt(monkeypatch):
+    monkeypatch.setattr(main, "_jetzt_utc",
+                        lambda: datetime.datetime.fromisoformat(f"{TODAY}T15:40:00"))
+
+
+def _setze_fx_live(monkeypatch, rate, zeit=f"{TODAY}T15:36:00"):
+    ts = datetime.datetime.fromisoformat(zeit)
+    monkeypatch.setattr(main, "fetch_eodhd_realtime",
+                        lambda sym: (rate, ts) if sym == "EURUSD.FOREX"
+                        else pytest.fail(f"unerwarteter Live-Abruf {sym}"))
+
+
+def test_fx_live_ok(monkeypatch, jetzt):
+    _setze_fx_live(monkeypatch, 1.11)
+    rate, _ = main._fx_live("EURUSD.FOREX", _fx_hist(), TODAY)
+    assert rate == 1.11
+
+
+def test_fx_live_wirft_wenn_veraltet(monkeypatch, jetzt):
+    _setze_fx_live(monkeypatch, 1.10, zeit=f"{TODAY}T13:00:00")   # 160 Minuten alt
+    with pytest.raises(main.EodhdDataError, match="Minuten alt"):
+        main._fx_live("EURUSD.FOREX", _fx_hist(), TODAY)
+
+
+def test_fx_live_wirft_bei_kurs_von_gestern(monkeypatch, jetzt):
+    _setze_fx_live(monkeypatch, 1.10, zeit="2026-09-06T23:50:00")
+    with pytest.raises(main.EodhdDataError, match="Minuten alt"):
+        main._fx_live("EURUSD.FOREX", _fx_hist(), TODAY)
+
+
+def test_fx_live_wirft_bei_sprung(monkeypatch, jetzt):
+    _setze_fx_live(monkeypatch, 1.20)                 # +9 % gegen 1,10
+    with pytest.raises(main.EodhdDataError, match="weicht"):
+        main._fx_live("EURUSD.FOREX", _fx_hist(), TODAY)
+
+
+@pytest.fixture
+def usd_umgebung(monkeypatch, firestore, jetzt):
+    """EUR-Tracker konstant 100, FX konstant 1,10 => USD-SMA exakt 110."""
+    gesendet, abrufe = [], []
+    basis = datetime.date.fromisoformat(TODAY)
+    hist = [((basis - datetime.timedelta(days=300 - i)).isoformat(), 100.0) for i in range(300)]
+    fx = _fx_hist()
+
+    def eod(sym, calendar_days=600):
+        abrufe.append(sym)
+        return list(fx) if sym == "EURUSD.FOREX" else list(hist)
+
+    monkeypatch.setattr(main, "fetch_eodhd_eod_series", eod)
+    monkeypatch.setattr(main, "send_telegram_message", lambda m: gesendet.append(m))
+    monkeypatch.setattr(main, "_heute_iso", lambda: TODAY)
+    return {"gesendet": gesendet, "abrufe": abrufe, "hist": hist}
+
+
+def _setze_live_beide(monkeypatch, eur, fx, eur_tag=TODAY):
+    ts_eur = datetime.datetime.fromisoformat(f"{eur_tag}T15:36:00")
+    ts_fx = datetime.datetime.fromisoformat(f"{TODAY}T15:38:00")
+    monkeypatch.setattr(main, "fetch_eodhd_realtime",
+                        lambda sym: (fx, ts_fx) if sym == "EURUSD.FOREX" else (eur, ts_eur))
+
+
+def _usd_lauf(role):
+    with main.app.app_context():
+        return main._handle_eodhd_sma_crossing(
+            "EUNL.XETRA", "MSCI World (USD-Signal)", 255, 1.0, "$", role, "paper",
+            fx_symbol="EURUSD.FOREX")
+
+
+def test_usd_signal_rechnet_in_usd(monkeypatch, usd_umgebung):
+    main.save_eodhd_sma_state("EUNL.XETRA_x_EURUSD.FOREX", 255, "above", 1, 1, env="paper")
+    _setze_live_beide(monkeypatch, eur=94.0, fx=1.10)    # USD 103,4 gegen SMA ~110 => below
+    resp, _ = _usd_lauf("decisive")
+    j = resp.get_json()
+    assert j["status"] == "crossover_below"
+    assert j["current_price"] == pytest.approx(103.4)
+    assert j["sma_value"] == pytest.approx((254 * 110.0 + 103.4) / 255)
+    msg = usd_umgebung["gesendet"][0]
+    assert "$" in msg and "Signal in USD: EUNL.XETRA 94.00 € x EURUSD.FOREX 1.1000" in msg
+
+
+def test_usd_signal_hat_eigenen_state(monkeypatch, usd_umgebung):
+    """Der alte EUR-Zustand darf nicht als Vorzustand des USD-Signals gelten:
+    sonst meldete die Umstellung ein Crossing, das nie stattgefunden hat."""
+    main.save_eodhd_sma_state("EUNL.XETRA", 255, "below", 1, 1, env="paper")
+    _setze_live_beide(monkeypatch, eur=106.0, fx=1.10)    # USD +6 % => above
+    resp, _ = _usd_lauf("decisive")
+    assert resp.get_json()["status"] == "initialised"
+    assert main.get_eodhd_sma_state("EUNL.XETRA", 255, env="paper") == "below"
+    assert main.get_eodhd_sma_state("EUNL.XETRA_x_EURUSD.FOREX", 255, env="paper") == "above"
+
+
+def test_usd_signal_am_xetra_feiertag_schweigt_ohne_fx_abruf(monkeypatch, usd_umgebung):
+    """XETRA-Kalender bleibt massgeblich: an einem deutschen Feiertag endet der
+    Lauf still, bevor FX ueberhaupt abgefragt wird."""
+    monkeypatch.setattr(main, "_xetra_trading_day", lambda d: False)
+    _setze_live_beide(monkeypatch, eur=100.0, fx=1.10, eur_tag="2026-09-04")
+    resp, code = _usd_lauf("decisive")
+    assert code == 200 and resp.get_json()["status"] == "no_trading_day"
+    assert "EURUSD.FOREX" not in usd_umgebung["abrufe"]
+    assert usd_umgebung["gesendet"] == []
+
+
+def test_usd_signal_wirft_bei_fx_ausfall_und_schreibt_keinen_state(monkeypatch, usd_umgebung):
+    main.save_eodhd_sma_state("EUNL.XETRA_x_EURUSD.FOREX", 255, "above", 1, 1, env="paper")
+
+    def live(sym):
+        if sym == "EURUSD.FOREX":
+            raise main.EodhdDataError("Live-Abruf fuer EURUSD.FOREX: HTTP 500")
+        return 90.0, datetime.datetime.fromisoformat(f"{TODAY}T15:36:00")
+    monkeypatch.setattr(main, "fetch_eodhd_realtime", live)
+    with pytest.raises(main.EodhdDataError, match="EURUSD"):
+        _usd_lauf("decisive")
+    assert main.get_eodhd_sma_state("EUNL.XETRA_x_EURUSD.FOREX", 255, env="paper") == "above"
+
+
+def test_usd_signal_reconcile_nimmt_schluss_mal_live_fx(monkeypatch, usd_umgebung):
+    hist = usd_umgebung["hist"] + [(TODAY, 100.0)]
+    fx = _fx_hist()
+    monkeypatch.setattr(main, "fetch_eodhd_eod_series",
+                        lambda sym, calendar_days=600: list(fx) if sym == "EURUSD.FOREX" else list(hist))
+    main.save_eodhd_sma_state("EUNL.XETRA_x_EURUSD.FOREX", 255, "above", 1, 1, env="paper")
+    _setze_live_beide(monkeypatch, eur=999.0, fx=1.10)    # EUR-Live darf im Reconcile nicht zaehlen
+    resp, _ = _usd_lauf("reconcile")
+    j = resp.get_json()
+    assert j["current_price"] == pytest.approx(110.0)
+    assert j["status"] == "reconciled"                    # 110 == SMA => neutral
+    assert main.get_eodhd_sma_state("EUNL.XETRA_x_EURUSD.FOREX", 255, env="paper") == "neutral"
+
+
+def test_ohne_fx_bleibt_alles_beim_alten(monkeypatch, handler_umgebung):
+    """Ohne fx_symbol: gleicher State-Schluessel und Euro-Kurs wie bisher."""
+    main.save_eodhd_sma_state("IUSQ.XETRA", 255, "above", 110.0, 100.0, env="paper")
+    _setze_live(monkeypatch, 94.0)
+    with main.app.app_context():
+        resp, _ = main._handle_eodhd_sma_crossing(
+            "IUSQ.XETRA", "ACWI", 255, 1.0, "€", "decisive", "paper")
+    assert resp.get_json()["current_price"] == 94.0
+    assert "Signal in USD" not in handler_umgebung["gesendet"][0]

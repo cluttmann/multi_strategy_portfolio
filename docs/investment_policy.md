@@ -540,7 +540,7 @@ Bootstrap-Pfade, nach Steuern ist es ein Gleichstand, weil sie 37 % mehr handelt
 255-Tage-SMA-Strategie.
 
 **Risk-on:** Amundi MSCI World (2x) Leveraged UCITS ETF Acc, `FR0014010HV4`.
-**Signal:** ungehebelter MSCI World in EUR, Referenz `EUNL.XETRA`, **255-Tage-SMA**.
+**Signal:** ungehebelter MSCI World **in USD**, gerechnet als `EUNL.XETRA` × EURUSD auf der XETRA-Zeitscheibe, **255-Tage-SMA** (seit 2026-10-06; vorher in EUR, siehe C1).
 **Risk-off:** DBX0AN, `LU0290358497`.
 
 **Altbestände.** Trade Republic enthält noch Positionen aus früheren Ansätzen
@@ -554,7 +554,38 @@ automatische −10-%-Handelsregel.** Zum Migrationszeitpunkt tritt das Kapital i
 den **aktuellen Zustand** des SMA-Systems ein: Risk-on → 2× World, Risk-off →
 zuerst DBX0AN. **Ein Crash bedeutet also nicht automatisch, 2× World zu kaufen.**
 
-### C1. EUR-SMA-Alerts laufen auf der XETRA-Zeitscheibe
+### C1. EUR-SMA-Alerts laufen auf der XETRA-Zeitscheibe, das Signal in USD
+
+**Seit 2026-10-06 ist das Signal in USD** (`fx_symbol: EURUSD.FOREX`): Kurs des
+XETRA-Trackers × USD je EUR, SMA ebenso. Zeitscheibe, XETRA-Kalender und alle drei
+Lauf-Rollen bleiben, der Alert läuft also weiter an jedem deutschen Handelstag.
+
+**Grund:** Der Amundi World 2× ist in USD gehebelt (tägliche Regression
+2,00 × EUNL − 1,00 × FX, R² 0,993). Der Euro-Index enthält zusätzlich den Wechselkurs,
+und der hält ihn in Abverkäufen mit starkem Dollar nahe an der SMA: 2018 hatte das
+EUR-Signal 13 Wechsel, das USD-Signal einen sauberen Ausstieg am 11.10. Gemessen auf
+17:30-Schlusskursen 2012–2026, SMA 1 %, nach deutscher Steuer: Amundi World 2× 11,3
+statt 7,3 %, Scalable ACWI 2× 12,3 statt 8,3 %, Max-Drawdown −36 statt −52 bzw. −47 %.
+Besser in jedem Fenster von 230 bis 280 Tagen, aber zu großen Teilen von 2018
+getragen; über 1972–2026 bleiben ~+2 pp/J bei p ≈ 0,15. Die Richtung ist also
+konsistent und erklärbar, aber nicht bewiesen. Studie:
+`output/world2x-sma-check-2026-10-06/`.
+
+**Warum nicht IWDA.LSE**, die USD-Linie desselben Fonds: London hat andere
+Feiertage (~6 Tage im Jahr ist die XETRA offen und die LSE zu). EUNL × EURUSD
+stimmt an 99,65 % der Tage mit dem IWDA-Signal überein und braucht keinen zweiten
+Kalender. URTH.US scheidet aus: Schluss um 22:00, also erst am Folgetag handelbar
+(−1,5 pp/J).
+
+**Die Umrechnung:** Für vergangene Tage dient der EODHD-FX-Tagesschluss
+(Mitternacht UTC; die Zeitdifferenz ist Rauschen, das die SMA wegmittelt). Der
+heutige Punkt nutzt den Live-FX zum selben Zeitpunkt, auch im 21:00-Reconcile.
+Ist FX älter als 60 Minuten, springt er um mehr als 5 % oder fehlt er in der
+Historie länger als 5 Tage, gilt das als Datenfehler. Der State hat einen eigenen
+Schlüssel (`<symbol>_x_EURUSD_FOREX`); der alte EUR-Zustand gilt nie als
+Vorzustand.
+
+#### Ursprüngliche Begründung der XETRA-Zeitscheibe (2026-09-07)
 
 Die Alerts für beide Euro-Produkte (`acwi_eur_sma_*`, `world_eur_sma_*`) laufen
 über **EODHD** auf dem **17:30-XETRA-Schluss** von `IUSQ.XETRA` (250 Tage) und
