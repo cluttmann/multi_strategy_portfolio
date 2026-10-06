@@ -508,8 +508,11 @@ unterschiedlich verhalten sollen.
 **Risk-on:** Scalable MSCI AC World Leveraged Daily Swap, ISIN `LU3386643970`
 (≈ 2× MSCI ACWI, €STR-finanziert, Net TR, TER 0,45 %).
 
-**Signal:** auf dem **ungehebelten MSCI ACWI in EUR**, nicht auf dem gehebelten
-ETF. **250-Tage-SMA** mit kleinem Rauschband.
+**Signal:** auf dem **ungehebelten MSCI ACWI in USD**, gerechnet als `IUSQ.XETRA`
+× EURUSD auf der XETRA-Zeitscheibe, nicht auf dem gehebelten ETF. **250-Tage-SMA**
+mit kleinem Rauschband. Bis 2026-10-06 lief das Signal in EUR. Umgestellt wurde
+trotz des EUR-gehebelten Produkts, weil das USD-Signal auch hier besser war:
+2013–2026 nach Steuer 12,3 statt 8,3 %. Begründung siehe C1.
 
 **Risk-off:** Xtrackers II EUR Overnight Rate Swap UCITS ETF 1C, `LU0290358497`
 (WKN DBX0AN).
