@@ -457,6 +457,24 @@ def get_alpaca_historical_bars(api, symbol, days=400, raw=False, adjustment="spl
     return [bar['c'] for bar in bars]
 
 
+def notify_execution_failure(error, env):
+    """All shared-account entry points use the same persisted incident gate."""
+    gate=None
+    try:
+        gate=FirestoreIncidentGate(get_firestore_client(),env)
+        notify=gate.failed(error)
+    except Exception as exc:
+        print(f"Warning: shared ETF alert state unavailable: {type(exc).__name__}")
+        notify=True
+    if not notify:return
+    try:delivered=send_telegram_message(failure_message(error))
+    except Exception:delivered=None
+    if delivered is not True and not (type(delivered) is int and delivered==200) and gate is not None:
+        try:gate.retry_notification(error)
+        except Exception as exc:
+            print(f"Warning: shared ETF alert retry unavailable: {type(exc).__name__}")
+
+
 def _managed_run(api, env, action, **kwargs):
     try:
         # Reconcile can briefly own the account when a scheduled strategy starts.
@@ -466,12 +484,12 @@ def _managed_run(api, env, action, **kwargs):
             try:
                 return get_controller(sys.modules[__name__], api, env).execute(action, **kwargs)
             except SafetyStop as exc:
-                if (not retry_lease or str(exc) != "Another executor owns this account"
-                        or attempt == 2):
+                if not retry_lease or str(exc) != "Another executor owns this account":
                     raise
+                if attempt==2:return {'status':'pending','reason':'account_busy'}
                 time.sleep(5)
     except Exception as exc:
-        send_telegram_message(f"❗ Shared ETF execution ({env}) stopped: {exc}")
+        notify_execution_failure(exc,env)
         raise
 
 
@@ -3757,20 +3775,7 @@ def shared_etf_reconcile_route(request):
         if result.get('status') == 'data_error':
             raise SafetyStop('; '.join(result.get('errors') or ['Monthly execution data error']))
     except Exception as exc:
-        gate = None
-        try:
-            gate = FirestoreIncidentGate(get_firestore_client(), alpaca_environment)
-            notify = gate.failed(exc)
-        except Exception as alert_error:
-            print(f"Warning: shared ETF alert state unavailable: {alert_error}")
-            notify = True
-        if notify:
-            delivered = send_telegram_message(failure_message(exc))
-            if delivered != 200 and gate is not None:
-                try:
-                    gate.retry_notification(exc)
-                except Exception as alert_error:
-                    print(f"Warning: could not reset failed shared ETF notification: {alert_error}")
+        notify_execution_failure(exc,alpaca_environment)
         raise
     try:
         gate = FirestoreIncidentGate(get_firestore_client(), alpaca_environment)

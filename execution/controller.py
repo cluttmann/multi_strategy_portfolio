@@ -266,13 +266,28 @@ class Controller:
             # Real executor runs queue atomically with archival; this also
             # accommodates injected adapters returning an already-archived run.
             self.store.mutate('execution_result_queued',lambda state:queue_result(state,result['run'],status))
+        if status!='data_error':
+            # Early exits or a completed daily interruption cannot clear an
+            # unresolved incident in the active/suspended monthly plan. Keep
+            # the financial result/archive intact and report the remaining error.
+            from .monthly import unresolved_errors
+            state=self.store.read()
+            errors=sorted(set(error for key in ('active','suspended_monthly')
+                              for error in unresolved_errors(state.get(key) or {})))
+            if errors:
+                result.update(status='data_error',execution_status=status,errors=errors)
+                status='data_error'
         if status=='data_error' and notify_data_errors:
-            try:self.bot.send_telegram_message('❗ Monthly execution data error ('+self.env+'): '+'; '.join(result.get('errors',[])))
+            try:
+                error=SafetyStop('; '.join(result.get('errors') or ['Monthly execution data error']))
+                if hasattr(self.bot,'notify_execution_failure'):
+                    self.bot.notify_execution_failure(error,self.env)
+                else:self.bot.send_telegram_message('❗ Monthly execution data error ('+self.env+'): '+str(error))
             except Exception:pass  # The structured result remains visible to HTTP/IncidentGate.
         errors=self.deliver_pending_notifications()
         if errors:
             result['notification_errors']=errors
-            result['execution_status']=status
+            result.setdefault('execution_status',status)
             result['status']='data_error'
             result.setdefault('errors',[]).extend(errors)
 

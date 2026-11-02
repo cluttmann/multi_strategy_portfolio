@@ -5,7 +5,7 @@ creates an immutable revision snapshot in the SAME Firestore transaction.
 Broker I/O never runs in a transaction callback.
 """
 from copy import deepcopy
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import datetime as dt
 import hashlib
 import time
@@ -65,11 +65,18 @@ def reconcile_state(state, positions, cash):
              if abs(actual.get(s, ZERO)-expected.get(s, ZERO)) > Decimal('0.000000001')}
     if diffs:
         raise SafetyStop(f'Unexplained broker quantities: {diffs}')
-    # Alpaca account cash is cent-rounded; fills use sub-cent average prices.
-    if abs(dec(cash)-expected_cash) > Decimal('0.02'):
-        raise SafetyStop(f'Unexplained broker cash: {dec(cash)-expected_cash}')
+    # Compare reported balances at the broker's cent precision. Keep the exact
+    # ledger untouched: normalizing the comparison is not a cash adjustment.
+    broker_cash=dec(cash)
+    if broker_cash!=broker_cash.quantize(Decimal('.01')):
+        raise SafetyStop('Broker cash is not cent-rounded')
+    reported_cash=expected_cash.quantize(Decimal('.01'),rounding=ROUND_HALF_UP)
+    difference=broker_cash-reported_cash
+    if abs(difference) > Decimal('0.02'):
+        raise SafetyStop(f'Unexplained broker cash: {broker_cash-expected_cash}')
     return {'positions': {s:text(q) for s,q in expected.items()},
-            'cash': text(expected_cash), 'cash_rounding':text(dec(cash)-expected_cash)}
+            'cash': text(expected_cash), 'cash_rounding':text(broker_cash-expected_cash),
+            'cash_reported':text(reported_cash),'cash_difference_cents':text(difference)}
 
 
 def apply_order(state, row, order):

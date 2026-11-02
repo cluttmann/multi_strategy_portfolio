@@ -9,6 +9,12 @@ from .timestamps import parse_timestamp
 
 POLICY='monthly-iex-v1'
 NY=ZoneInfo('America/New_York')
+FUNDING_WAITS={'awaiting_cash_or_margin_permission','awaiting_confirmed_transfer_proceeds'}
+
+
+def unresolved_errors(plan):
+    return [f"{i['symbol']}: {i.get('reason','execution data error')}"
+            for i in plan.get('intents',[]) if i.get('status')=='data_error']
 
 
 def remaining(plan,intent):
@@ -84,7 +90,6 @@ def finish(ex,token,status):
 
 
 def run_monthly(ex,token):
-    data_errors=[]
     try:
         plan=ex.ledger.store.read()['active']
         if plan.get('daily_interruption',{}).get('status')=='needs_recovery':
@@ -108,14 +113,27 @@ def run_monthly(ex,token):
         now=ex.now().astimezone(NY)
         entry_hours=dt.time(10,30)<=now.time().replace(tzinfo=None)<=dt.time(15,30)
         if not ex.broker.clock()['is_open'] or (not entry_hours and not any(i.get('risk_exit') for i in plan['intents'])):
-            return {'status':'pending','reason':'outside_retry_hours','run_id':plan['id']}
+            errors=unresolved_errors(plan)
+            return {'status':'data_error' if errors else 'pending','reason':'outside_retry_hours',
+                    'run_id':plan['id'],'errors':errors}
         if ex.quote_getter is None:raise SafetyStop('Monthly IEX quote getter unavailable')
+        sales_barrier=any(i['side']=='sell' for i in plan['intents'])
         for original in sorted(plan['intents'],key=lambda i:i['side']=='buy'):
+            if original['side']=='buy' and sales_barrier:
+                # Submission responses can precede fills. Book broker-confirmed
+                # proceeds before sizing buys, never merely submitted proceeds.
+                ex.recover(token)
+                sales_barrier=False
             plan=ex.ledger.store.read()['active'];intent=next(i for i in plan['intents'] if i['id']==original['id'])
             if intent.get('status') in ('invalidated','expired','complete'):continue
             if not entry_hours and not intent.get('risk_exit'):continue
             rows=[r for r in plan['orders'] if r.get('intent_id')==intent['id']]
-            if intent.get('next_attempt_at') and ex.now()<parse_timestamp(intent['next_attempt_at']) and not intent.get('risk_exit'):continue
+            if intent.get('status')=='data_error' and any(r['status'] not in TERMINAL for r in rows):
+                # Recovery has found the exact previously ambiguous order.
+                # Its open state is pending execution, not a lost acknowledgement.
+                defer(ex,token,intent['id'],'order_submitted')
+            if (intent.get('next_attempt_at') and ex.now()<parse_timestamp(intent['next_attempt_at'])
+                    and not intent.get('risk_exit') and intent.get('reason') not in FUNDING_WAITS):continue
             if any(r['status'] not in TERMINAL for r in rows):continue
             opposing=lambda row:row['symbol']==intent['symbol'] and row['side']!=intent['side'] and row['status'] not in TERMINAL
             if any(opposing(row) for row in plan['orders']):
@@ -223,7 +241,7 @@ def run_monthly(ex,token):
                 defer(ex,token,intent['id'],'order_submitted')
             except QuoteDeferred as exc:defer(ex,token,intent['id'],str(exc))
             except Exception as exc:
-                defer(ex,token,intent['id'],str(exc),'data_error');data_errors.append(f"{intent['symbol']}: {exc}")
+                defer(ex,token,intent['id'],str(exc),'data_error')
         ex.recover(token)
         plan=ex.ledger.store.read()['active']
         for intent in plan['intents']:
@@ -236,8 +254,9 @@ def run_monthly(ex,token):
             stopped=any(i.get('status') in ('invalidated','expired') for i in plan['intents'])
             if not stopped:ex.ledger.transfer(token)
             return finish(ex,token,'expired' if stopped else 'complete')
-        return {'status':'data_error' if data_errors else 'pending','run_id':plan['id'],
-                'errors':data_errors,'intents':deepcopy(plan['intents'])}
+        errors=unresolved_errors(plan)
+        return {'status':'data_error' if errors else 'pending','run_id':plan['id'],
+                'errors':errors,'intents':deepcopy(plan['intents'])}
     except Exception as exc:
         mutate(ex,token,'monthly_data_error',lambda state,active:active.update(last_error=str(exc)))
         return {'status':'data_error','run_id':plan['id'],'errors':[str(exc)]}

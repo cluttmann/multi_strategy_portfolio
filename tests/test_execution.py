@@ -48,6 +48,32 @@ def test_reconcile_fails_on_unknown_quantity_or_cash():
     with pytest.raises(SafetyStop): reconcile_state(s,[dict(symbol='UBT',qty='101')],'100')
     with pytest.raises(SafetyStop): reconcile_state(s,[dict(symbol='UBT',qty='100')],'101')
 
+
+@pytest.mark.parametrize('expected,actual,accepted', [
+    ('-1073.8629835556104','-1073.84',True),
+    ('1073.8629835556104','1073.84',True),
+    ('100.004','100.02',True), ('100.004','100.03',False),
+    ('100.005','99.99',True), ('100.005','99.98',False),
+    ('-100.005','-99.99',True), ('-100.005','-99.98',False),
+])
+def test_cash_reconciliation_uses_reported_cent_precision(expected,actual,accepted):
+    s=new_state('account','live',{}, {'reserve':expected}, {}, '2026-11-02T00:00:00Z')
+    before=copy.deepcopy(s)
+    if accepted:
+        result=reconcile_state(s,[],actual)
+        assert abs(Decimal(result['cash_difference_cents']))<=Decimal('.02')
+        assert Decimal(result['cash_rounding'])==Decimal(actual)-Decimal(expected)
+    else:
+        with pytest.raises(SafetyStop,match='Unexplained broker cash'):
+            reconcile_state(s,[],actual)
+    assert s==before
+
+
+def test_cash_reconciliation_rejects_subcent_broker_balance():
+    s=new_state('account','live',{}, {'reserve':'100'}, {}, '2026-11-02T00:00:00Z')
+    with pytest.raises(SafetyStop,match='Broker cash is not cent-rounded'):
+        reconcile_state(s,[],'100.001')
+
 def test_stale_worker_is_fenced_and_active_intent_survives_takeover():
     now=[100]; store=MemoryStore(seeded()); ledger=Ledger(store,clock=lambda:now[0])
     a=ledger.acquire(); ledger.start(a,dict(action='test',period='2026-09-25',orders=[dict(strategy='mix8',symbol='UBT',side='sell',qty='2',limit_price='10')]))

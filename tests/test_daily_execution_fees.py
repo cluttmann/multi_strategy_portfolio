@@ -265,12 +265,12 @@ def test_recover_ingests_real_fill_evidence_then_explains_october_cash_without_p
         def open_orders(self): return []
         def activities(self, after): return deepcopy(OCTOBER_FILLS)
         def positions(self): return [{'symbol': 'UBT', 'qty': '100', 'current_price': '10'}]
-        def account(self): return {'id': 'account', 'cash': '99.9521258121704'}
+        def account(self): return {'id': 'account', 'cash': '99.95'}
 
     executor = Executor(ledger, ReadOnlyBroker())
     result = executor.recover(token)
     assert result['cash'] == '99.95'
-    assert result['cash_rounding'] == '0.0021258121704'
+    assert Decimal(result['cash_rounding']) == 0
     executor.recover(token)
     assert store.read()['portfolios']['reserve']['cash'] == '99.95'
     assert len(day(store)['fills']) == 8

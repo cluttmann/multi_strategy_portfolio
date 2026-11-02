@@ -76,6 +76,67 @@ def test_wide_symbol_does_not_block_other_sleeve_or_repeat_funding():
     assert broker.submits==1 and store.read()['portfolios']['a']['cash']=='50'
     assert store.read()['active']['intents'][0]['reason']=='spread_above_hard_limit'
 
+
+@pytest.mark.parametrize('confirmed_qty',['0','.5','1'])
+def test_confirmed_sale_proceeds_fund_same_invocation_without_waiting(confirmed_qty):
+    ex,store,broker,p=fixture()
+    store.state['portfolios']['reserve']['cash']='0'
+    store.state['portfolios']['a']['positions']={'EET':'1'}
+    broker.cash=Decimal(0);broker.qty={'EET':Decimal(1)}
+    p.update(funding={},funding_debt={},intents=[
+        {'id':'sell','strategy':'a','symbol':'EET','side':'sell','qty':'1','fractionable':True,'full_liquidation':True},
+        {'id':'buy','strategy':'a','symbol':'UBT','side':'buy','budget':'99','fractionable':True,
+         'reason':'awaiting_cash_or_margin_permission','next_attempt_at':(NOW+dt.timedelta(minutes=5)).isoformat()}])
+    lookup=broker.by_client_id
+    def confirmed(cid):
+        order=lookup(cid)
+        if order and order['side']=='sell' and order['filled_qty']=='0' and Decimal(confirmed_qty):
+            order.update(filled_qty=confirmed_qty,filled_avg_price='100',
+                         status='filled' if confirmed_qty=='1' else 'partially_filled')
+            broker.qty['EET']-=Decimal(confirmed_qty)
+            broker.cash+=Decimal(confirmed_qty)*100
+        return order
+    broker.by_client_id=confirmed
+    ex.run(p)
+    buys=[o for o in broker.orders.values() if o['side']=='buy']
+    assert bool(buys)==bool(Decimal(confirmed_qty))
+    if buys:
+        assert Decimal(buys[0]['qty'])*Decimal(buys[0]['limit_price'])<=Decimal(confirmed_qty)*100
+    assert store.read()['portfolios']['b']['cash']=='0'
+
+
+def test_unretried_quote_error_remains_visible_until_a_successful_attempt():
+    ex,store,broker,p=fixture(lambda symbol:quote(stamp=(NOW-dt.timedelta(seconds=31)).isoformat()))
+    assert ex.run(p)['status']=='data_error'
+    # A worker arriving before the retry deadline must not announce recovery.
+    assert ex.run()['status']=='data_error'
+
+
+def test_cash_deferral_bypass_does_not_bypass_quote_retry_deadline():
+    calls=[]
+    ex,store,broker,p=fixture(lambda symbol:calls.append(symbol) or quote())
+    p['intents'][0].update(status='data_error',reason='IEX quote stale (31s)',
+                         next_attempt_at=(NOW+dt.timedelta(minutes=5)).isoformat())
+    result=ex.run(p)
+    assert 'EET' not in calls
+    assert result['status']=='data_error'
+    assert all(o['symbol']!='EET' for o in broker.orders.values())
+
+
+@pytest.mark.parametrize('location',['active','suspended_monthly'])
+@pytest.mark.parametrize('status',['pending','complete'])
+def test_early_or_completed_result_cannot_hide_durable_monthly_data_error(location,status):
+    from test_shared_integration import controller_fixture
+    c,store,broker=controller_fixture()
+    store.state[location]={'intents':[{'symbol':'SAA','status':'data_error','reason':'IEX quote stale (665s)'}]}
+    c.bot.send_telegram_message=lambda message:200
+    result={'status':status,'reason':'expiry_cancel_unconfirmed',
+            'run':{'id':'daily-complete','action':'daily','period':'2026-10-02','orders':[]}}
+    c.finalize_result(result)
+    assert result['status']=='data_error'
+    assert result['execution_status']==status
+    assert result['errors']==['SAA: IEX quote stale (665s)']
+
 def test_cancel_confirms_terminal_before_retry_id_and_reserves_cash():
     ex,store,broker,p=fixture();ex.run(p)
     original=[r['client_order_id'] for r in store.read()['active']['orders']]
@@ -416,7 +477,7 @@ def test_definitive_broker_rejection_tombstone_recovers_without_false_ambiguity(
     row=store.read()['active']['orders'][0]
     assert result['status']=='data_error' and row['status']=='rejected' and row['no_order_proven']
     assert row['rejection']['http_status']==403 and row['rejection']['code']==40310000
-    assert ex.run(p)['status']=='pending'
+    assert ex.run(p)['status']=='data_error'
     assert broker.submits==1
 
 

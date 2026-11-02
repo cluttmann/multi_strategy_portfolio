@@ -25,6 +25,58 @@ def test_cash_alert_formats_cents_without_losing_safety_stop():
     assert '-0.2425978659' not in message
 
 
+def test_quote_incident_does_not_change_when_only_age_or_error_order_changes():
+    state,notify=alerts.failure_transition({},main.SafetyStop('SAA: IEX quote stale (64s); DBC: IEX quote stale (31s)'))
+    assert notify
+    state,notify=alerts.failure_transition(state,main.SafetyStop('DBC: IEX quote stale (91s); SAA: IEX quote stale (665s)'))
+    assert not notify
+    assert state['count']==2
+
+
+def test_monthly_and_reconcile_failures_share_one_incident(monkeypatch):
+    from test_shared_integration import controller_fixture
+    controller,store,broker=controller_fixture();messages=[];state={}
+    class Gate:
+        def __init__(self,db,env):pass
+        def failed(self,error):
+            nonlocal state
+            state,notify=alerts.failure_transition(state,error)
+            return notify
+    class FailedController:
+        def execute(self,*args,**kwargs):raise main.SafetyStop('Unexplained broker cash: .033')
+        def reconcile(self):raise main.SafetyStop('Unexplained broker cash: .034')
+    send=lambda message:messages.append(message) or 200
+    monkeypatch.setattr(main,'FirestoreIncidentGate',Gate)
+    monkeypatch.setattr(main,'get_firestore_client',lambda:None)
+    monkeypatch.setattr(main,'get_controller',lambda *args:FailedController())
+    monkeypatch.setattr(main,'set_alpaca_environment',lambda **kwargs:{})
+    monkeypatch.setattr(main,'send_telegram_message',send)
+    controller.bot.send_telegram_message=send
+    controller.bot.notify_execution_failure=lambda error,env:main.notify_execution_failure(error,env)
+    controller.finalize_result({'status':'data_error','errors':['Unexplained broker cash: .032']},notify_data_errors=True)
+    with pytest.raises(main.SafetyStop):main._managed_run({},'paper','monthly')
+    with pytest.raises(main.SafetyStop):main.shared_etf_reconcile_route(None)
+    assert len(messages)==1
+    assert state['count']==3
+
+
+@pytest.mark.parametrize('result',[500,None,'exception'])
+def test_unconfirmed_failure_alert_is_retryable(monkeypatch,result):
+    calls=[];error=main.SafetyStop('Unexplained broker cash: .03')
+    class Gate:
+        def __init__(self,db,env):pass
+        def failed(self,exc):return True
+        def retry_notification(self,exc):calls.append(exc)
+    def send(message):
+        if result=='exception':raise RuntimeError('delivery unavailable')
+        return result
+    monkeypatch.setattr(main,'FirestoreIncidentGate',Gate)
+    monkeypatch.setattr(main,'get_firestore_client',lambda:None)
+    monkeypatch.setattr(main,'send_telegram_message',send)
+    main.notify_execution_failure(error,'paper')
+    assert calls==[error]
+
+
 def test_reconcile_route_sends_one_failure_and_one_recovery(monkeypatch,_no_outside_world):
     current={}
     class Gate:
@@ -141,7 +193,7 @@ def test_strategy_run_waits_for_short_reconcile_lease_without_alert(monkeypatch,
 
 
 @pytest.mark.parametrize('action', ['daily', 'monthly', 'monthly-funding'])
-def test_strategy_run_reports_lease_after_bounded_retries(monkeypatch,_no_outside_world,action):
+def test_strategy_run_returns_busy_after_bounded_retries_without_alert(monkeypatch,_no_outside_world,action):
     attempts=[]; waits=[]
     class Controller:
         def execute(self,action,**kwargs):
@@ -150,11 +202,10 @@ def test_strategy_run_reports_lease_after_bounded_retries(monkeypatch,_no_outsid
     monkeypatch.setattr(main,'get_controller',lambda *args:Controller())
     monkeypatch.setattr(main.time,'sleep',lambda seconds:waits.append(seconds))
 
-    with pytest.raises(main.SafetyStop,match='Another executor'):
-        main._managed_run({},'live',action)
+    assert main._managed_run({},'live',action)=={'status':'pending','reason':'account_busy'}
     assert attempts==[action]*3
     assert waits==[5,5]
-    assert len(_no_outside_world)==1
+    assert _no_outside_world==[]
 
 
 @pytest.mark.parametrize('action', ['daily', 'monthly', 'monthly-funding'])

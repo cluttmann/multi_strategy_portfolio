@@ -1,12 +1,16 @@
 """Persisted, transition-based alerts for the shared account executor."""
 from decimal import Decimal,ROUND_HALF_UP
+import re
 
 
 def incident_key(error):
     message=str(error)
     if message.startswith('Unexplained broker cash:'):
         return 'broker_cash_mismatch'
-    return f'{type(error).__name__}:{message}'
+    # Quote age and the iteration order are observations, not new incidents.
+    parts=sorted(set(re.sub(r'(IEX quote stale) \(-?\d+(?:\.\d+)?s\)',r'\1 (age)',part.strip())
+                     for part in message.split(';')))
+    return f'{type(error).__name__}:'+ '; '.join(parts)
 
 
 def failure_transition(previous,error):

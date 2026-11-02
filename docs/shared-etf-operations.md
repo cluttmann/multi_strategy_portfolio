@@ -62,6 +62,20 @@ using the already chosen monthly weights, without replaying rotation or funding.
 Annual transfers use net equity and a 1% proceeds buffer; rounding can leave a
 small residual rather than borrowing against unconfirmed proceeds.
 
+Cash reconciliation compares the broker's cent-rounded account balance with the
+ledger balance rounded once to cents (`ROUND_HALF_UP`). The permitted difference
+remains two reported cents. The exact ledger is never changed to force agreement;
+the recovery result exposes both `cash_rounding` (raw difference) and
+`cash_difference_cents` (difference at reported precision). Unexpected sub-cent
+broker account cash and a three-cent reported difference still stop execution.
+This establishes rounding-compatible agreement, not exact fee settlement.
+
+Before the first monthly buy, recovery refreshes all existing order IDs and books
+confirmed sell fills, including partial fills. Only those confirmed, sleeve-owned
+proceeds can fund buys in the same invocation. Cash-related waits are reconsidered
+without the quote retry delay; quote/spread waits, open reservations and all margin
+gates retain their existing constraints. No POST is retried by this refresh.
+
 Monthly funding rounds available cash and new margin down to microdollars,
 leaving smaller residuals unused. The debt split
 is bounded by that sleeve's funding and the cash/debt still available, so a
@@ -98,6 +112,13 @@ then one recovery alert when the broker and ledger agree again. It continues to
 return HTTP 500 on every failed run so Cloud Scheduler and logs retain the
 failure signal. A changed cash discrepancy remains the same alert incident;
 the full amount stays in Cloud Run logs.
+
+Monthly and managed strategy failures now share that incident gate. Changing quote
+ages or error ordering do not create new incidents. A deferred, unresolved data
+error remains a failed result until a successful attempt or confirmed order
+recovery resolves it; an early retry cannot falsely announce recovery. Normal
+account-lease contention returns `pending/account_busy` after bounded retries,
+preserving the lease and avoiding a spurious stop notification.
 
 ## Commands
 
