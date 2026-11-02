@@ -127,6 +127,12 @@ class Controller:
             outstanding_debt=sum(dec(p['debt']) for p in state['portfolios'].values())
             margin=max(ZERO,dec(account['equity'])*dec(gate.get('target_margin',0))-outstanding_debt)
             if gate.get('errors'): available=margin=ZERO
+            # Budget on the same microdollar grid as sleeve funding. Discard
+            # smaller capacity instead of rounding cash + high-precision debt
+            # upward; unused cash stays in reserve and margin is never exceeded.
+            quantum=Decimal('.000001')
+            available=available.quantize(quantum,rounding=ROUND_DOWN)
+            margin=margin.quantize(quantum,rounding=ROUND_DOWN)
             amount=available+margin
             # Reuse the existing tilt math against virtual holdings.
             allocation=bot.calculate_rebalanced_allocations(self.api)['adjusted_allocations']
@@ -134,10 +140,17 @@ class Controller:
             for i,k in enumerate(bot.SLEEVES):
                 v=(amount*dec(allocation[bot.SLEEVES[k][0]])).quantize(Decimal('.000001'),rounding=ROUND_DOWN) if i<len(bot.SLEEVES)-1 else remaining
                 funding[k]=text(v);remaining-=v
-            debt_rest=margin
+            debt_rest=margin;cash_rest=available
             for i,k in enumerate(bot.SLEEVES):
-                debt=(margin*dec(funding[k])/amount).quantize(Decimal('.000001'),rounding=ROUND_DOWN) if amount and i<len(bot.SLEEVES)-1 else debt_rest
+                funded=dec(funding[k])
+                debt=(margin*funded/amount).quantize(Decimal('.000001'),rounding=ROUND_DOWN) if amount and i<len(bot.SLEEVES)-1 else debt_rest
+                # Independently rounded funding and debt can demand cash that
+                # does not exist (even a fully borrowed budget can lose 1e-6).
+                # Bound each split by the actual remaining cash and debt; the
+                # ledger's strict funding checks remain unchanged.
+                debt=min(funded,debt_rest,max(ZERO,funded-cash_rest,debt))
                 funding_debt[k]=text(debt);debt_rest-=debt
+                cash_rest-=funded-debt
             if annual and action=='monthly':
                 # Transfer net equity; debt remains explicitly assigned.
                 total=sum(dec(values[k]['net_value']) for k in bot.SLEEVES)+available

@@ -2925,7 +2925,9 @@ def plan_rotator_weights(api, cfg):
         scale = min(1.0, cfg["target_vol"] / est_vol) if est_vol > 0 else 1.0
         for pos in picks:
             weights[pos] = raw[pos] * scale
-    cash_weight = 1.0 - sum(weights.values())
+    # Inverse-vol floats can sum to 1 + 2e-16 at full investment.
+    # A negative defensive target would stop the whole account plan.
+    cash_weight = max(0.0, 1.0 - sum(weights.values()))
     return {"scores": scores, "picks": picks, "weights": weights, "cash_weight": cash_weight,
             "scale": scale, "realized_vols": realized_vols}
 

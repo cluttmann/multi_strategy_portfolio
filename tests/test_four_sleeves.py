@@ -237,6 +237,17 @@ def test_rotator_single_positive_pick_gets_full_weight_before_scaling(monkeypatc
     assert plan["picks"] == ["UGL"] and plan["weights"]["UGL"] == pytest.approx(1.0)
 
 
+def test_rotator_float_roundoff_cannot_create_negative_cash_target(monkeypatch):
+    cfg=main.aaa_config
+    vols={'NTSD':.13,'SAA':.17,'EET':.23}
+    monkeypatch.setattr(main,'_rotator_momentum',lambda api,s,lbs,ws: .1 if s in ('SPY','IWM','EEM') else -.1)
+    monkeypatch.setattr(main,'_rotator_realized_vol',lambda api,s,window:vols[s])
+    plan=main.plan_rotator_weights({},cfg)
+    assert plan['scale']==1
+    assert plan['cash_weight']==0
+    assert sum(plan['weights'].values())==pytest.approx(1)
+
+
 def test_rotator_uses_dividend_adjusted_prices(monkeypatch):
     seen = []
 

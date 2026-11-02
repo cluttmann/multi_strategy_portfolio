@@ -160,6 +160,44 @@ def test_new_margin_is_not_counted_as_nav_contribution():
     # Mix8's starting net NAV is 4000. Borrowing buys assets AND adds debt.
     assert Decimal(p['metadata']['mix8']['peak_nav'])==4000
 
+
+@pytest.mark.parametrize('cash', ['0', '0.0000001', '0.01', '100'])
+def test_monthly_funding_preserves_cash_and_debt_with_subcent_residuals(cash):
+    c,store,broker=controller_fixture()
+    store.state['portfolios']['reserve']['cash']=cash
+    store.state['portfolios']['aaa']['debt']='828.1409999999999999999999998'
+    c.bot.check_margin_conditions=lambda api,env:{'errors':[],'target_margin':.1,'allowed':True}
+    broker.account=lambda:{'id':'account','cash':cash,'equity':'13522.16'}
+    c.bot.calculate_rebalanced_allocations=lambda api:{'adjusted_allocations':{
+        'aaa_allo':.19994521048217345,'world_trend_allo':.1975760163302812,
+        'mix8_allo':.45962555971835617,'spx_trend_allo':.14285321346918928}}
+    before=store.read()
+    plan=c.build(before,'monthly','2026-11')
+    token=c.ledger.acquire()
+    c.ledger.start(token,plan)
+    after=store.read()
+    assert Decimal(after['portfolios']['reserve']['cash'])==(Decimal('0.0000001') if cash=='0.0000001' else 0)
+    assert sum(Decimal(v) for v in plan['funding_debt'].values())==Decimal('524.075000')
+    for key in c.bot.SLEEVES:
+        assert 0<=Decimal(plan['funding_debt'][key])<=Decimal(plan['funding'][key])
+    from execution.ledger import totals
+    assert abs(totals(after)[1]-totals(before)[1])<Decimal('1e-23')
+
+
+def test_monthly_cash_plus_margin_rounding_cannot_overallocate_reserve():
+    c,store,broker=controller_fixture()
+    store.state['portfolios']['reserve']['cash']='8473.91'
+    store.state['portfolios']['aaa']['debt']='5749.469999999999999988414691'
+    c.bot.check_margin_conditions=lambda api,env:{'errors':[],'target_margin':.1,'allowed':True}
+    broker.account=lambda:{'id':'account','cash':'8473.91','equity':'100000'}
+    c.bot.calculate_rebalanced_allocations=lambda api:{'adjusted_allocations':dict(zip(
+        main.strategy_allocations,[.25726618694171135,.23002558040806693,.36703368068401804,.14567455196620368]))}
+    plan=c.build(store.read(),'monthly','2026-11')
+    token=c.ledger.acquire();c.ledger.start(token,plan)
+    assert Decimal(store.read()['portfolios']['reserve']['cash'])==0
+    assert sum(Decimal(v) for v in plan['funding'].values())==Decimal('12724.44')
+    assert sum(Decimal(v) for v in plan['funding_debt'].values())==Decimal('4250.53')
+
 from execution.migration import bootstrap_state
 
 

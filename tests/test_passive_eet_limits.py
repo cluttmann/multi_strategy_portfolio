@@ -6,7 +6,7 @@ import pytest
 
 from execution.monthly import remaining, reservations
 from execution.quotes import execution_limit, QuoteDeferred
-from test_monthly_execution import NOW, fixture, quote
+from test_monthly_execution import NOW, fixture, quote, monthly_ledger_clock
 from test_shared_integration import controller_fixture
 
 

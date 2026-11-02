@@ -62,6 +62,15 @@ using the already chosen monthly weights, without replaying rotation or funding.
 Annual transfers use net equity and a 1% proceeds buffer; rounding can leave a
 small residual rather than borrowing against unconfirmed proceeds.
 
+Monthly funding rounds available cash and new margin down to microdollars,
+leaving smaller residuals unused. The debt split
+is bounded by that sleeve's funding and the cash/debt still available, so a
+sub-microdollar division residual cannot invent a cash requirement when reserve
+cash is zero. The strict ledger funding checks remain in force. Fully invested
+rotator weights clamp their floating-point defensive residual to zero rather
+than emitting a tiny negative target. Regression tests cover zero reserve,
+sub-microdollar reserve, mixed cash/margin, and fully invested inverse-vol weights.
+
 ## Regulatory fees
 
 Live cash can withhold selling fees before the FEE activity exists. Confirmed

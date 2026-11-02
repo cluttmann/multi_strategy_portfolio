@@ -7,6 +7,14 @@ from execution.broker import Executor
 from test_execution import MemoryStore
 
 NOW=dt.datetime(2026,10,2,15,tzinfo=dt.timezone.utc)
+
+
+@pytest.fixture(autouse=True)
+def monthly_ledger_clock(monkeypatch):
+    # Persist plan creation on the same clock as the simulated executor.
+    monkeypatch.setattr('execution.ledger.utcnow',lambda:NOW.isoformat())
+
+
 def quote(bid='99.8',ask='100.2',source='iex',stamp=None):
     return {'bp':bid,'ap':ask,'bs':100,'as':100,'t':stamp or NOW.isoformat(),'source':source}
 
@@ -267,7 +275,9 @@ def test_crash_after_atomic_attempt_claim_never_leaves_planned_or_reposts():
 def test_reconcile_finalizes_monthly_completion_once():
     from test_shared_integration import controller_fixture
     c,store,broker=controller_fixture();messages=[];audit=[]
-    run={'id':'completed-run','action':'monthly','period':'2026-10','orders':[]}
+    from zoneinfo import ZoneInfo
+    period=dt.datetime.now(ZoneInfo('America/New_York')).strftime('%Y-%m')
+    run={'id':'completed-run','action':'monthly','period':period,'orders':[]}
     c.executor.run=lambda:{'status':'complete','run':run}
     c.publish=lambda:None
     c.bot.send_telegram_message=lambda message:messages.append(message) or True
