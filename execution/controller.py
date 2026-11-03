@@ -261,7 +261,7 @@ class Controller:
 
     def finalize_result(self,result,notify_data_errors=False):
         status=result['status']
-        if status in ('complete','expired'):
+        if status in ('complete','complete_with_shortfall','expired'):
             from .notifications import queue_result
             # Real executor runs queue atomically with archival; this also
             # accommodates injected adapters returning an already-archived run.
@@ -308,7 +308,7 @@ class Controller:
             try:
                 # Only this month's audit marker can use the legacy marker API,
                 # which derives its period from the current date.
-                if notice['status']=='complete' and notice['action'] in ('monthly','monthly-funding') and notice['period']==dt.datetime.now(ZoneInfo('America/New_York')).strftime('%Y-%m') and not notice.get('audit_marked'):
+                if notice['status'] in ('complete','complete_with_shortfall') and notice['action'] in ('monthly','monthly-funding') and notice['period']==dt.datetime.now(ZoneInfo('America/New_York')).strftime('%Y-%m') and not notice.get('audit_marked'):
                     self.bot.mark_monthly_run_complete(self.env,clean=notice['clean'])
                     audit_marked=True
                 delivered=self.bot.send_telegram_message(notice['message'])

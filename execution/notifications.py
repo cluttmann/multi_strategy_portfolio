@@ -7,9 +7,12 @@ def queue_result(state,run,status):
     if run_id in state.get('reported_runs',[]):return
     pending=state.setdefault('pending_notifications',{})
     if run_id in pending:return
-    if status=='complete':
+    if status in ('complete','complete_with_shortfall'):
         fills=[f"{r['strategy']}: {r['side']} {r.get('booked_qty','0')} {r['symbol']} (${dec(r.get('booked_value',0)):.2f})" for r in run['orders']]
         message='✅ Shared ETF execution ('+state['env']+'): '+run['action']+' '+run['period']+'\n'+'\n'.join(fills or ['Keine Trades nötig.'])+'\nBroker und Strategiebestände abgeglichen.'
+        if status=='complete_with_shortfall':
+            rest=[f"{r['strategy']} {r['symbol']}: ${dec(r['remaining_budget']):.2f} nicht finanziert" for r in run['shortfalls']]
+            message+='\nMonatslauf abgeschlossen mit nicht finanziertem Zielrest:\n'+'\n'.join(rest)+'\nKein weiteres Warten auf Geld; ursprüngliche Zielbudgets bleiben dokumentiert.'
     else:
         from .monthly import remaining
         remainder=[]
@@ -20,4 +23,4 @@ def queue_result(state,run,status):
                 remainder.append(f"{intent['strategy']}: {intent['side']} {intent['symbol']} {amount} ({intent.get('reason','expired')})")
         message='⚠️ Monthly execution remainder expired ('+state['env']+'): '+run['period']+'\n'+'\n'.join(remainder or ['Unfilled monthly remainder stopped.'])+'\nConfirmed holdings and sleeve cash preserved; month not marked clean.'
     pending[run_id]={'run_id':run_id,'action':run['action'],'period':run['period'],'status':status,
-                     'clean':not run.get('margin_retry'), 'message':message,'attempts':0}
+                     'clean':status=='complete' and not run.get('margin_retry'), 'message':message,'attempts':0}

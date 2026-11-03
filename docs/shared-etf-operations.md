@@ -153,3 +153,22 @@ then resume jobs. Index-alert jobs are independent.
 After shared positions exist, deploying the old exclusive-ownership code is not
 a safe rollback. Pause execution and recover the journal; reversal trades require
 a separate investment decision. Never delete the new ledger as rollback.
+
+### Exhausted monthly funding
+
+A monthly allocation now terminates as `complete_with_shortfall` when all orders
+are broker-confirmed terminal, all sale intents are complete, transfers have been
+booked, and every remaining buy has less than $1 of owned sleeve cash. Funding
+waits and recovered submitted orders are eligible; quote errors, spread deferrals,
+unfinished sales, unresolved transfers and usable cash behind a temporary broker
+or margin gate remain pending/error outcomes.
+
+The original buy budget is unchanged. The archived run and
+`last_monthly_outcome[action]` retain each intent's exact `remaining_budget` and
+`available_cash`; the intent is `unfunded` with reason
+`confirmed_funding_exhausted`. Archival, the terminal month marker, shortfall
+record and result outbox are committed atomically. No cash or debt is added.
+The month cannot restart or request funding again. Telegram and the ledger audit
+explicitly report completion with an unfunded target remainder, rather than full
+target attainment. Closure needs no quote or open market once recovery has
+confirmed the final broker state.

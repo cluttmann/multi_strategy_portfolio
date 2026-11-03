@@ -626,3 +626,105 @@ def test_rejection_evidence_redacts_any_echoed_request_credentials():
     error.response.request.headers['APCA-API-KEY-ID']='TOPSECRET'
     evidence=definitive_order_rejection(error)
     assert 'TOPSECRET' not in evidence['message'] and '[redacted]' in evidence['message']
+
+
+def exhausted_monthly():
+    ex,store,broker,p=fixture(lambda symbol:quote('100','100'))
+    p.update(funding={'a':'100'},funding_debt={'a':'0'},intents=[
+        {'id':'buy','strategy':'a','symbol':'UBT','side':'buy','budget':'101.86','fractionable':True}])
+    ex.run(p)
+    order=next(iter(broker.orders.values()))
+    order.update(filled_qty='1',filled_avg_price='100',status='filled')
+    broker.cash=Decimal(0);broker.qty={'UBT':Decimal(1)}
+    return ex,store,broker,p
+
+
+def test_exhausted_confirmed_funding_closes_with_auditable_shortfall_and_no_restart():
+    ex,store,broker,p=exhausted_monthly()
+    result=ex.run()
+    assert result['status']=='complete_with_shortfall'
+    assert store.read()['active'] is None
+    assert store.read()['last_completed']['monthly']=='2026-10'
+    assert result['run']['shortfalls']==[{'intent_id':'buy','strategy':'a','symbol':'UBT',
+                                       'remaining_budget':'1.86','available_cash':'0'}]
+    assert result['run']['intents'][0]['budget']=='101.86'
+    assert result['run']['intents'][0]['status']=='unfunded'
+    assert Decimal(store.read()['portfolios']['a']['positions']['UBT'])==1
+    assert store.read()['portfolios']['a']['cash']=='0'
+    assert store.read()['pending_notifications'][result['run']['id']]['status']=='complete_with_shortfall'
+    assert ex.run(p)['status']=='already_complete' and broker.submits==1
+
+
+def test_exhausted_funding_can_close_outside_market_hours_without_a_quote():
+    ex,store,broker,p=exhausted_monthly()
+    store.state['active']['intents'][0].update(status='pending',reason='awaiting_cash_or_margin_permission')
+    ex.now=lambda:NOW.replace(hour=23)
+    broker.clock=lambda:{'is_open':False}
+    ex.quote_getter=lambda symbol:(_ for _ in ()).throw(AssertionError('no quote required'))
+    assert ex.run()['status']=='complete_with_shortfall'
+
+
+@pytest.mark.parametrize('blocker',['sale','open_order','transfer','quote_error','owned_cash','margin_gate'])
+def test_unfunded_completion_never_hides_unfinished_execution_or_usable_cash(blocker):
+    ex,store,broker,p=exhausted_monthly()
+    intent=store.state['active']['intents'][0]
+    intent.update(status='pending',reason='awaiting_cash_or_margin_permission')
+    if blocker=='sale':
+        store.state['active']['intents'].append({'id':'sell','strategy':'a','symbol':'UBT',
+                                               'side':'sell','qty':'1','fractionable':True,'status':'pending'})
+    elif blocker=='open_order':
+        order=next(iter(broker.orders.values()));order.update(status='partially_filled')
+    elif blocker=='transfer':
+        store.state['active'].update(transfers={'a':'2','b':'-2'},transfers_done=False)
+    elif blocker=='quote_error':
+        intent.update(status='data_error',reason='IEX quote stale (31s)')
+    else:
+        store.state['portfolios']['a']['cash']='2';broker.cash=Decimal(2)
+        if blocker=='margin_gate':
+            ex.margin_validator=lambda state:False
+            store.state['portfolios']['a']['debt']='2'
+            broker.cash=Decimal(0)
+    ex.now=lambda:NOW.replace(hour=23);broker.clock=lambda:{'is_open':False}
+    assert ex.run()['status'] in ('pending','data_error')
+    assert store.read()['active'] is not None
+    assert not store.read()['last_completed']
+
+
+def test_shortfall_notification_reports_terminal_result_once_without_full_target_claim():
+    from test_shared_integration import controller_fixture
+    ex,store,broker,p=exhausted_monthly();result=ex.run()
+    c,_,_=controller_fixture();c.store=store;messages=[]
+    c.bot.send_telegram_message=lambda message:messages.append(message) or True
+    c.finalize_result(result);c.finalize_result(result)
+    assert len(messages)==1
+    assert '$1.86' in messages[0] and 'UBT' in messages[0]
+    assert 'nicht finanziert' in messages[0]
+
+
+def test_shortfall_closure_clears_funding_retry_and_queues_result_atomically():
+    ex,store,broker,p=exhausted_monthly()
+    store.state['active']['margin_retry']=True
+    store.state['monthly_retry']={'period':'2026-10','after':'2026-10-03'}
+    result=ex.run()
+    archived=next(state for kind,state in store.events if kind=='complete')
+    assert archived['active'] is None
+    assert archived['last_monthly_outcome']['monthly']['status']=='complete_with_shortfall'
+    assert result['run']['id'] in archived['pending_notifications']
+    assert not archived.get('monthly_retry')
+
+
+@pytest.mark.parametrize('action',['monthly','monthly-funding'])
+def test_monthly_audit_reports_closed_shortfall_instead_of_pending_or_full_target(monkeypatch,action):
+    import main
+    from test_shared_integration import controller_fixture
+    c,store,broker=controller_fixture()
+    store.state['last_completed']['monthly']='2026-11'
+    store.state['last_monthly_outcome']={action:{'period':'2026-11','status':'complete_with_shortfall',
+        'shortfalls':[{'strategy':'aaa','symbol':'DBC','remaining_budget':'1.8611660778'}]}}
+    monkeypatch.setattr(main,'get_controller',lambda *args:c)
+    monkeypatch.setattr(main,'current_month_id',lambda:'2026-11')
+    monkeypatch.setattr(main,'send_telegram_message',lambda message:True)
+    message=main.audit_monthly_run({'EXECUTION_V2':True},env='paper')
+    assert 'completed with unfunded target remainder' in message
+    assert 'aaa DBC: $1.86 nicht finanziert; abgeschlossen' in message
+    assert 'Active plan: none' in message

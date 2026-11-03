@@ -3798,10 +3798,16 @@ def audit_monthly_run(api, env="live", lookback_days=14):
         done = state['last_completed'].get('monthly') == month
         expired = state.get('last_expired', {}).get('monthly') == month
         active = state.get('active') or state.get('suspended_monthly') or {}
+        outcomes = state.get('last_monthly_outcome', {})
+        shortfalls = [row for action in ('monthly', 'monthly-funding')
+                      for outcome in [outcomes.get(action, {})] if outcome.get('period') == month
+                      for row in outcome.get('shortfalls', [])]
         lines = [f"🛎 Monthly Run Audit — {month}",
-                 "✅ Ledger run completed" if done else (
+                 ("✅ Ledger run completed with unfunded target remainder" if shortfalls else "✅ Ledger run completed") if done else (
                      "⚠️ Monthly remainder expired" if expired else "❌ No completed ledger run this month"),
                  f"Active plan: {active.get('id', 'none')}"]
+        for row in shortfalls:
+            lines.append(f"{row['strategy']} {row['symbol']}: ${float(row['remaining_budget']):.2f} nicht finanziert; abgeschlossen")
         for intent in active.get('intents', []):
             if intent.get('status') != 'complete':
                 lines.append(f"{intent['strategy']} {intent['symbol']}: "

@@ -70,17 +70,28 @@ def expiry_reason(ex,plan):
     return 'three_trading_day_expiry' if count>3 else None
 
 
-def finish(ex,token,status):
+def finish(ex,token,status,shortfall_ids=()):
     def archive(state,plan):
         plan['execution_status']=status;plan['completed_at']=ex.now().isoformat()
+        if shortfall_ids:
+            plan['shortfalls']=[]
+            for intent in plan['intents']:
+                if intent['id'] not in shortfall_ids:continue
+                plan['shortfalls'].append({'intent_id':intent['id'],'strategy':intent['strategy'],
+                    'symbol':intent['symbol'],'remaining_budget':text(remaining(plan,intent)),
+                    'available_cash':state['portfolios'][intent['strategy']]['cash']})
+                intent.update(status='unfunded',reason='confirmed_funding_exhausted')
+                intent.pop('next_attempt_at',None)
         for key,updates in plan.get('metadata',{}).items():state['portfolios'][key]['metadata'].update(updates)
-        if status=='complete':
+        if status in ('complete','complete_with_shortfall'):
             state['last_completed'][plan['action']]=plan['period']
-            if plan.get('margin_retry'):
+            if status=='complete' and plan.get('margin_retry'):
                 tomorrow=ex.now().astimezone(NY).date()+dt.timedelta(days=1)
                 state['monthly_retry']={'period':plan['period'],'after':tomorrow.isoformat()}
             else:state.pop('monthly_retry',None)
         else:state.setdefault('last_expired',{})[plan['action']]=plan['period']
+        state.setdefault('last_monthly_outcome',{})[plan['action']]={'period':plan['period'],'status':status,
+            'shortfalls':deepcopy(plan.get('shortfalls',[]))}
         from .notifications import queue_result
         queue_result(state,plan,status)
         state['active']=None
@@ -89,11 +100,38 @@ def finish(ex,token,status):
     return {'status':status,'run':run}
 
 
+
+def finish_unfunded(ex,token):
+    """Close an exhausted allocation, preserving its unachieved target budget."""
+    state=ex.ledger.store.read();plan=state['active']
+    if plan.get('daily_interruption',{}).get('status')=='needs_recovery':return None
+    if any(r['status'] not in TERMINAL for r in plan['orders']):return None
+    candidates=[]
+    for intent in plan['intents']:
+        if intent.get('status')=='complete':continue
+        if (intent['side']!='buy' or intent.get('status')=='data_error'
+                or intent.get('reason') not in FUNDING_WAITS | {'order_submitted'}):return None
+        if remaining(plan,intent)<1:return None
+        candidates.append(intent)
+    if not candidates:return None
+    # A transfer still awaiting sale proceeds is a funding source, not a loss
+    # of funding. Complete feasible transfers before assessing owned cash.
+    if not plan.get('transfers_done'):
+        if any(dec(state['portfolios'][k]['cash'])+dec(v)<0 for k,v in plan.get('transfers',{}).items()):return None
+        ex.ledger.transfer(token);state=ex.ledger.store.read();plan=state['active']
+    # Test owned cash without the current broker/margin gate: a temporary gate
+    # must never turn funded work into a terminal shortfall.
+    if any(dec(state['portfolios'][i['strategy']]['cash'])>=1 for i in candidates):return None
+    return finish(ex,token,'complete_with_shortfall',tuple(i['id'] for i in candidates))
+
+
 def run_monthly(ex,token):
     try:
         plan=ex.ledger.store.read()['active']
         if plan.get('daily_interruption',{}).get('status')=='needs_recovery':
             return {'status':'pending','reason':'daily_recovery_required','run_id':plan['id']}
+        closed=finish_unfunded(ex,token)
+        if closed:return closed
         expiry=expiry_reason(ex,plan)
         if expiry:
             if not cancel_open(ex,token,lambda row:not row.get('risk_exit')):
@@ -254,6 +292,8 @@ def run_monthly(ex,token):
             stopped=any(i.get('status') in ('invalidated','expired') for i in plan['intents'])
             if not stopped:ex.ledger.transfer(token)
             return finish(ex,token,'expired' if stopped else 'complete')
+        closed=finish_unfunded(ex,token)
+        if closed:return closed
         errors=unresolved_errors(plan)
         return {'status':'data_error' if errors else 'pending','run_id':plan['id'],
                 'errors':errors,'intents':deepcopy(plan['intents'])}
