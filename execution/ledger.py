@@ -139,13 +139,38 @@ class FirestoreStore:
         create(self.db.transaction())
 
     def mutate(self, kind, fn):
+        from google.api_core import exceptions
+        seen={}
+        for attempt in (1,2):
+            try:
+                return self._mutate_once(kind,fn,seen)
+            except exceptions.InvalidArgument as exc:
+                # The commit RPC retry resends the same transaction id; if the
+                # server already ended it, Firestore answers "expired or no longer
+                # valid" (2026-11-11 16:05 UTC, lease acquire). Every commit bumps
+                # the revision, so an unchanged revision proves nothing landed and
+                # the transaction may run once more. Anything else stays a stop.
+                message=str(exc).lower()
+                if attempt==2 or 'revision' not in seen or 'transaction' not in message \
+                        or not ('expired' in message or 'no longer valid' in message):
+                    raise
+                snap=self.ref.get()
+                if not snap.exists or snap.to_dict().get('revision',0)!=seen['revision']:
+                    raise
+
+    def _mutate_once(self, kind, fn, seen):
         from google.cloud import firestore
         @firestore.transactional
         def update(tx):
+            # Only a callback that ran to completion leaves a revision behind:
+            # an "expired" from the rollback after a stop is no commit failure.
+            seen.clear()
             snap=self.ref.get(transaction=tx)
             if not snap.exists: raise SafetyStop('Missing ledger')
             state=snap.to_dict()
+            read=state.get('revision',0)
             result=fn(state)
+            seen['revision']=read
             state['revision']=state.get('revision',0)+1
             state['updated_at']=utcnow()
             tx.set(self.ref,state)
