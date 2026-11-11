@@ -1897,6 +1897,28 @@ def _xetra_trading_day(date_iso):
         return True
 
 
+def _xetra_reconcile_session(now_utc):
+    """Juengste XETRA-Sitzung, deren Schluss vor `now_utc` liegt (ISO-Datum).
+
+    Morgens ist das die gestrige Sitzung, nach 17:30 die heutige: der Abgleich
+    haengt damit nicht an seiner Uhrzeit. Anders als _xetra_trading_day gibt es
+    keinen Fallback - ohne Kalender ist unklar, welcher Schluss gemeint ist,
+    und ein geratener Tag koennte einen veralteten Bar als aktuell nehmen.
+    """
+    day = now_utc.date()
+    try:
+        schedule = mcal.get_calendar("XETR").schedule(
+            start_date=(day - datetime.timedelta(days=14)).isoformat(),
+            end_date=day.isoformat())
+    except Exception as e:
+        raise EodhdDataError(f"XETR-Kalender nicht lesbar ({e})")
+    closed = schedule[schedule["market_close"] <= pd.Timestamp(now_utc, tz="UTC")]
+    if closed.empty:
+        raise EodhdDataError(
+            f"XETR-Kalender kennt keine Sitzung in den 14 Tagen vor {day}")
+    return closed.index[-1].date().isoformat()
+
+
 def _stale_data(index_name, run_role, was_fehlt, today_iso):
     """Veraltete Datenlage einordnen: an einem Handelstag ein echter Fehler,
     an einem Feiertag oder Wochenende ein stiller, korrekter Nichtlauf."""
@@ -2078,6 +2100,20 @@ def _hist_in_usd(hist, fx_hist, today_iso, fx_today):
     return out
 
 
+def _eodhd_state_field(index_symbol, field, env):
+    try:
+        doc = (get_firestore_client()
+               .collection(f"index-alert-state-{env}")
+               .document(normalize_symbol(index_symbol))
+               .get())
+        if not doc.exists:
+            return None
+        return doc.to_dict().get(field)
+    except Exception as e:
+        print(f"Warning: could not load EODHD {field} for {index_symbol}: {e}")
+        return None
+
+
 def get_eodhd_sma_state(index_symbol, sma_period, env="live"):
     """Letzter bekannter Crossing-Zustand eines EODHD-Index, oder None.
 
@@ -2087,34 +2123,33 @@ def get_eodhd_sma_state(index_symbol, sma_period, env="live"):
     an - der Zustand wuerde also nie persistieren, previous_state waere immer
     None und es gaebe nie einen Crossover-Alert.
     """
-    try:
-        doc = (get_firestore_client()
-               .collection(f"index-alert-state-{env}")
-               .document(normalize_symbol(index_symbol))
-               .get())
-        if not doc.exists:
-            return None
-        return doc.to_dict().get(f"sma{sma_period}_state")
-    except Exception as e:
-        print(f"Warning: could not load EODHD SMA state for {index_symbol}: {e}")
-        return None
+    return _eodhd_state_field(index_symbol, f"sma{sma_period}_state", env)
+
+
+def get_eodhd_sma_session(index_symbol, sma_period, env="live"):
+    """XETRA-Sitzung (ISO-Datum), auf die sich der gespeicherte Zustand bezieht.
+    None bei Zustaenden, die vor 2026-11-12 geschrieben wurden."""
+    return _eodhd_state_field(index_symbol, f"sma{sma_period}_session", env)
 
 
 def save_eodhd_sma_state(index_symbol, sma_period, state, price, sma_value,
-                         env="live"):
+                         env="live", session=None):
     """Crossing-Zustand schreiben. Legt das Dokument an, falls noetig.
 
     Faengt bewusst keine Exception ab: schlaegt das Schreiben fehl, sieht der
     naechste Lauf noch den alten Zustand und wuerde denselben Alert erneut
     senden. Das soll auffallen, nicht in einem Log versickern.
     """
+    data = {f"sma{sma_period}_state": state,
+            f"sma{sma_period}_value": sma_value,
+            "price": price,
+            "timestamp": datetime.datetime.utcnow()}
+    if session:
+        data[f"sma{sma_period}_session"] = session
     (get_firestore_client()
      .collection(f"index-alert-state-{env}")
      .document(normalize_symbol(index_symbol))
-     .set({f"sma{sma_period}_state": state,
-           f"sma{sma_period}_value": sma_value,
-           "price": price,
-           "timestamp": datetime.datetime.utcnow()}, merge=True))
+     .set(data, merge=True))
 
 
 def _handle_eodhd_sma_crossing(index_symbol, index_name, sma_period,
@@ -2125,7 +2160,7 @@ def _handle_eodhd_sma_crossing(index_symbol, index_name, sma_period,
     Drei Rollen statt der US-Handelszeiten-Logik des Alpaca-Pfads:
       advisory  - Vorwarnung 15:00-17:00, schreibt bewusst KEINEN State
       decisive  - Handelsalarm 17:20, schreibt den State
-      reconcile - Abgleich 21:00 nach EODHD-Publikation auf den echten Schluss, korrigiert den State
+      reconcile - Abgleich 07:30 auf den echten Schluss der juengsten Sitzung, korrigiert den State
 
     Mit `fx_symbol` (EURUSD.FOREX = USD je EUR) laeuft das Signal in USD:
     Tracker x Wechselkurs, weiter auf XETRA-Zeitscheibe und XETRA-Kalender, also
@@ -2137,30 +2172,55 @@ def _handle_eodhd_sma_crossing(index_symbol, index_name, sma_period,
     state_key = f"{index_symbol}_x_{fx_symbol}" if fx_symbol else index_symbol
     fx_line = ""
 
-    def in_usd(eur_price):
-        """Historie und heutigen Kurs in USD umrechnen; FX-Fehler sind laut."""
+    def in_usd(eur_price, day=today_iso):
+        """Historie und den Kurs von `day` in USD umrechnen; FX-Fehler sind laut.
+
+        Heute zaehlt der Live-FX. Eine vergangene Sitzung nimmt ihren
+        FX-Tagesschluss - genau so steht sie ab dann in jedem SMA-Fenster.
+        Fehlt der, gilt nie der Bar vom Vortag.
+        """
         nonlocal hist, fx_line
         fx_hist = fetch_eodhd_eod_series(fx_symbol, calendar_days=630)
-        fx_today, fx_ts = _fx_live(fx_symbol, fx_hist, today_iso)
-        hist = _hist_in_usd(hist, fx_hist, today_iso, fx_today)
+        if day == today_iso:
+            fx, fx_ts = _fx_live(fx_symbol, fx_hist, today_iso)
+            herkunft = f"{fx_ts:%H:%M} UTC"
+        else:
+            fx = dict(fx_hist).get(day)
+            if fx is None:
+                neuester = fx_hist[-1][0] if fx_hist else "keiner"
+                raise EodhdDataError(
+                    f"{fx_symbol}: kein Tagesschluss fuer {day} "
+                    f"(neuester: {neuester})")
+            herkunft = f"Tagesschluss {day}"
+        hist = _hist_in_usd(hist, fx_hist, day, fx)
         fx_line = (f"\nSignal in USD: {index_symbol} {eur_price:.2f} € x "
-                   f"{fx_symbol} {fx_today:.4f} ({fx_ts:%H:%M} UTC)")
-        return eur_price * fx_today
+                   f"{fx_symbol} {fx:.4f} ({herkunft})")
+        return eur_price * fx
 
     if run_role == "reconcile":
-        if not hist or hist[-1][0] != today_iso:
-            neuester = hist[-1][0] if hist else "keiner"
-            _stale_data(index_name, run_role,
-                        f"kein Schlusskurs fuer {today_iso} (neuester: "
-                        f"{neuester})", today_iso)
-            return jsonify({"message": f"{index_name}: kein XETRA-Handelstag",
-                            "status": "no_trading_day",
+        # Die juengste Sitzung mit Schluss, nicht "heute": EODHD liefert den
+        # Bar von IUSQ/EUNL seit 2026-11-06 erst nach 21:00, der Lauf steht
+        # deshalb morgens um 07:30 und gleicht die Sitzung vom Vortag ab.
+        session = _xetra_reconcile_session(_jetzt_utc())
+        stored_session = get_eodhd_sma_session(state_key, sma_period, env=env)
+        if stored_session and stored_session > session:
+            # decisive hat zwischen 17:20 und 17:30 schon die laufende Sitzung
+            # geschrieben; ein Abgleich auf die davor wuerde ihn zurueckdrehen.
+            return jsonify({"message": f"{index_name}: State bezieht sich "
+                                       f"schon auf {stored_session}",
+                            "status": "superseded",
                             "run_role": run_role}), 200
+        hist = [(d, c) for d, c in hist if d <= session]
+        if not hist or hist[-1][0] != session:
+            neuester = hist[-1][0] if hist else "keiner"
+            raise EodhdDataError(
+                f"kein Schlusskurs fuer die XETRA-Sitzung {session} "
+                f"(neuester: {neuester})")
         if fx_symbol:
-            in_usd(hist[-1][1])
-        series = _eodhd_close_series(hist, sma_period, today_iso)
+            in_usd(hist[-1][1], day=session)
+        series = _eodhd_close_series(hist, sma_period, session)
         current_price = series[-1]
-        price_source = f"XETRA-Schluss {today_iso}"
+        price_source = f"XETRA-Schluss {session}"
     elif run_role in ("advisory", "decisive"):
         current_price, live_ts = fetch_eodhd_realtime(index_symbol)
         if live_ts.date().isoformat() != today_iso:
@@ -2220,7 +2280,8 @@ def _handle_eodhd_sma_crossing(index_symbol, index_name, sma_period,
                            f"- noch bis 17:30 CET handelbar")
             status = f"crossover_{current_state}"
         save_eodhd_sma_state(state_key, sma_period, current_state,
-                             current_price, sma_value, env=env)
+                             current_price, sma_value, env=env,
+                             session=today_iso)
 
     else:  # reconcile
         if previous_state != current_state:
@@ -2228,7 +2289,8 @@ def _handle_eodhd_sma_crossing(index_symbol, index_name, sma_period,
                            f"(SMA{sma_period}) - {previous_state} -> {current_state}")
             status = "reconciled"
         save_eodhd_sma_state(state_key, sma_period, current_state,
-                             current_price, sma_value, env=env)
+                             current_price, sma_value, env=env,
+                             session=session)
 
     if message:
         send_telegram_message(message)

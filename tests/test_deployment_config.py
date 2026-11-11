@@ -72,3 +72,16 @@ def test_literal_cron_accepts_lists_ranges_and_positive_steps():
     validate_literal_schedule('5,35 10-15 1-7 * *')
     validate_literal_schedule('*/5 9-16 * * 1-5')
     validate_literal_schedule('0 12 * * 7')
+
+
+@pytest.mark.parametrize('job',['acwi_eur_sma_reconcile','world_eur_sma_reconcile'])
+def test_eodhd_reconcile_runs_berlin_morning_before_xetra_open(job):
+    """Since 2026-11-06 EODHD publishes IUSQ/EUNL after 21:00 Berlin; the
+    reconcile checks the previous session's close the next morning instead."""
+    config=(ROOT/'cloudbuild.yaml').read_text()
+    blocks=[b for b in config.split("- name: 'gcr.io/cloud-builders/gcloud'") if f'http {job} ' in b]
+    assert len(blocks)==1
+    found=[value for value,_ in schedules(blocks[0])]
+    assert found and set(found)=={'30 7 * * 1-5'}
+    assert blocks[0].count("--time-zone='Europe/Berlin'")==2
+    assert '"run_role": "reconcile"' in blocks[0]

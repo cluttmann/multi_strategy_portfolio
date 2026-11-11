@@ -603,7 +603,9 @@ Zeitscheibe wie die Ausführung.
 **Drei Lauf-Rollen:** `advisory` (15:00–17:00, Vorwarnung, schreibt bewusst
 **keinen** State — sonst erzeugt ein am Band zitternder Intraday-Kurs
 Whipsaw-Alerts, die der Backtest nie hatte), `decisive` (17:20, Handelsalarm,
-schreibt State), `reconcile` (21:00, Abgleich auf den echten Schluss).
+schreibt State), `reconcile` (07:30 am Folgetag, Abgleich auf den echten Schluss
+der Vortagssitzung; bis 2026-11-11 um 21:00, als EODHD den Bar von IUSQ/EUNL dann
+noch nicht geliefert hatte).
 `reconcile` ist zugleich der tägliche Lebendtest — beide Signale stehen ~10 %
 über der Linie, der Alert schweigt also auf Monate, und ein schweigender Alert
 ist von einem kaputten nicht zu unterscheiden.

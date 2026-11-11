@@ -258,6 +258,9 @@ def handler_umgebung(monkeypatch, firestore):
     monkeypatch.setattr(main, "fetch_eodhd_eod_series", lambda *a, **k: list(hist))
     monkeypatch.setattr(main, "send_telegram_message", lambda m: gesendet.append(m))
     monkeypatch.setattr(main, "_heute_iso", lambda: TODAY)
+    # 18:00 CEST: die heutige XETRA-Sitzung (Schluss 15:30 UTC) ist vorbei.
+    monkeypatch.setattr(main, "_jetzt_utc",
+                        lambda: datetime.datetime.fromisoformat(f"{TODAY}T16:00:00"))
     return {"gesendet": gesendet, "hist": hist, "firestore": firestore}
 
 
@@ -394,20 +397,93 @@ def test_advisory_am_feiertag_schweigt(monkeypatch, handler_umgebung):
     assert handler_umgebung["gesendet"] == []
 
 
-def test_reconcile_am_feiertag_schweigt(monkeypatch, handler_umgebung):
-    monkeypatch.setattr(main, "_xetra_trading_day", lambda d: False)
+# ── reconcile: juengste abgeschlossene XETRA-Sitzung ───────────────────────
+#
+# Seit 2026-11-06 liefert EODHD den Tagesbar von IUSQ/EUNL erst nach 21:00
+# Berlin (andere XETRA-Titel lagen da schon vor). Der Lauf ist deshalb auf den
+# naechsten Morgen gewandert und gleicht die letzte Sitzung ab, deren Schluss
+# vorbei ist - nicht "heute".
+
+def _reconcile_um(monkeypatch, hist, jetzt_utc):
+    monkeypatch.setattr(main, "fetch_eodhd_eod_series", lambda *a, **k: list(hist))
+    monkeypatch.setattr(main, "_heute_iso", lambda: jetzt_utc[:10])
+    monkeypatch.setattr(main, "_jetzt_utc",
+                        lambda: datetime.datetime.fromisoformat(jetzt_utc))
     with main.app.app_context():
-        resp, _ = main._handle_eodhd_sma_crossing(
+        return main._handle_eodhd_sma_crossing(
             "IUSQ.XETRA", "ACWI", 255, 1.0, "€", "reconcile", "paper")
-    assert resp.get_json()["status"] == "no_trading_day"
+
+
+def _bis(tag, schluss=100.0):
+    """300 Kalendertage-Bars zu 100, der letzte (`tag`) zu `schluss`."""
+    ende = datetime.date.fromisoformat(tag)
+    return [((ende - datetime.timedelta(days=299 - i)).isoformat(),
+             schluss if i == 299 else 100.0) for i in range(300)]
+
+
+def test_reconcile_morgens_nimmt_die_sitzung_von_gestern(monkeypatch, handler_umgebung):
+    main.save_eodhd_sma_state("IUSQ.XETRA", 255, "above", 110.0, 100.0, env="paper")
+    resp, code = _reconcile_um(monkeypatch, _bis("2026-09-07"), "2026-09-08T05:30:00")
+    j = resp.get_json()
+    assert code == 200 and j["status"] == "reconciled"
+    assert "XETRA-Schluss 2026-09-07" in handler_umgebung["gesendet"][0]
+    assert main.get_eodhd_sma_state("IUSQ.XETRA", 255, env="paper") == "neutral"
+    assert main.get_eodhd_sma_session("IUSQ.XETRA", 255, env="paper") == "2026-09-07"
+
+
+def test_reconcile_montags_nimmt_freitag(monkeypatch, handler_umgebung):
+    resp, _ = _reconcile_um(monkeypatch, _bis("2026-09-04", 120.0), "2026-09-07T05:30:00")
+    assert resp.get_json()["current_price"] == 120.0
+    assert main.get_eodhd_sma_session("IUSQ.XETRA", 255, env="paper") == "2026-09-04"
+
+
+def test_reconcile_nach_feiertagen_nimmt_die_letzte_sitzung(monkeypatch, handler_umgebung):
+    """XETRA ist am 24., 25. und 31.12. zu: am 28.12. gilt der 23.12."""
+    resp, _ = _reconcile_um(monkeypatch, _bis("2026-12-23", 120.0), "2026-12-28T06:30:00")
+    assert resp.get_json()["current_price"] == 120.0
+
+
+def test_reconcile_wirft_wenn_der_schluss_der_sitzung_fehlt(monkeypatch, handler_umgebung):
+    """Ein Bar von vorgestern ist nie der Schluss von gestern."""
+    main.save_eodhd_sma_state("IUSQ.XETRA", 255, "above", 110.0, 100.0, env="paper")
+    with pytest.raises(main.EodhdDataError,
+                       match=r"kein Schlusskurs fuer die XETRA-Sitzung 2026-09-07 \(neuester: 2026-09-04\)"):
+        _reconcile_um(monkeypatch, _bis("2026-09-04"), "2026-09-08T05:30:00")
+    assert main.get_eodhd_sma_state("IUSQ.XETRA", 255, env="paper") == "above"
+
+
+def test_reconcile_abends_vor_der_publikation_wirft(monkeypatch, handler_umgebung):
+    """Nach 17:30 ist die heutige Sitzung gemeint; ihr Bar fehlt noch => laut."""
+    with pytest.raises(main.EodhdDataError, match="Sitzung 2026-09-07"):
+        _reconcile_um(monkeypatch, _bis("2026-09-04"), "2026-09-07T19:00:00")
+
+
+def test_reconcile_ueberschreibt_keinen_neueren_decisive_state(monkeypatch, handler_umgebung):
+    """17:25: decisive hat die heutige Sitzung geschrieben, deren Schluss steht
+    noch aus. Ein Abgleich auf gestern darf den State nicht zurueckdrehen."""
+    main.save_eodhd_sma_state("IUSQ.XETRA", 255, "below", 90.0, 100.0, env="paper",
+                              session="2026-09-08")
+    resp, code = _reconcile_um(monkeypatch, _bis("2026-09-07", 120.0), "2026-09-08T15:25:00")
+    assert code == 200 and resp.get_json()["status"] == "superseded"
     assert handler_umgebung["gesendet"] == []
+    assert main.get_eodhd_sma_state("IUSQ.XETRA", 255, env="paper") == "below"
 
 
-def test_reconcile_am_handelstag_wirft_ohne_schluss(monkeypatch, handler_umgebung):
-    monkeypatch.setattr(main, "_xetra_trading_day", lambda d: True)
-    with pytest.raises(main.EodhdDataError, match="XETRA-Handelstag"):
+def test_reconcile_ohne_kalender_wirft(monkeypatch, handler_umgebung):
+    """Ohne Kalender ist unklar, welcher Schluss gemeint ist: laut statt raten."""
+    def kaputt(*a, **k):
+        raise RuntimeError("Kalender weg")
+    monkeypatch.setattr(main.mcal, "get_calendar", kaputt)
+    with pytest.raises(main.EodhdDataError, match="XETR-Kalender"):
+        _reconcile_um(monkeypatch, _bis("2026-09-07"), "2026-09-08T05:30:00")
+
+
+def test_decisive_merkt_sich_die_sitzung(monkeypatch, handler_umgebung):
+    _setze_live(monkeypatch, 100.0)
+    with main.app.app_context():
         main._handle_eodhd_sma_crossing(
-            "IUSQ.XETRA", "ACWI", 255, 1.0, "€", "reconcile", "paper")
+            "IUSQ.XETRA", "ACWI", 255, 1.0, "€", "decisive", "paper")
+    assert main.get_eodhd_sma_session("IUSQ.XETRA", 255, env="paper") == TODAY
 
 
 def test_kaputter_kalender_nimmt_handelstag_an(monkeypatch, handler_umgebung):
@@ -677,6 +753,41 @@ def test_usd_signal_reconcile_nimmt_schluss_mal_live_fx(monkeypatch, usd_umgebun
     assert j["current_price"] == pytest.approx(110.0)
     assert j["status"] == "reconciled"                    # 110 == SMA => neutral
     assert main.get_eodhd_sma_state("EUNL.XETRA_x_EURUSD.FOREX", 255, env="paper") == "neutral"
+
+
+def _usd_reconcile_morgens(monkeypatch, fx):
+    """Dienstag 07:30 CEST: gleicht den Montag (TODAY) ab, EUR-Schluss 100."""
+    hist = [((datetime.date.fromisoformat(TODAY) - datetime.timedelta(days=299 - i)).isoformat(), 100.0)
+            for i in range(300)]
+    monkeypatch.setattr(main, "fetch_eodhd_eod_series",
+                        lambda sym, calendar_days=600: list(fx) if sym == "EURUSD.FOREX" else list(hist))
+    monkeypatch.setattr(main, "fetch_eodhd_realtime",
+                        lambda sym: pytest.fail(f"Live-Abruf {sym}: der Abgleich einer "
+                                                f"vergangenen Sitzung nimmt den FX-Tagesschluss"))
+    monkeypatch.setattr(main, "_heute_iso", lambda: "2026-09-08")
+    monkeypatch.setattr(main, "_jetzt_utc",
+                        lambda: datetime.datetime.fromisoformat("2026-09-08T05:30:00"))
+    return _usd_lauf("reconcile")
+
+
+def test_usd_signal_reconcile_morgens_nimmt_fx_tagesschluss(monkeypatch, usd_umgebung):
+    """Die Sitzung wird so umgerechnet, wie sie ab morgen in jedem SMA-Fenster
+    steht: mit dem EODHD-FX-Tagesschluss desselben Tages."""
+    fx = _fx_hist() + [(TODAY, 1.21)]
+    resp, _ = _usd_reconcile_morgens(monkeypatch, fx)
+    j = resp.get_json()
+    assert j["current_price"] == pytest.approx(121.0)
+    assert j["current_state"] == "above"
+    assert "Tagesschluss 2026-09-07" in usd_umgebung["gesendet"][0]
+    assert main.get_eodhd_sma_session("EUNL.XETRA_x_EURUSD.FOREX", 255, env="paper") == TODAY
+
+
+def test_usd_signal_reconcile_morgens_wirft_ohne_fx_tagesschluss(monkeypatch, usd_umgebung):
+    """Fehlt der FX-Bar der Sitzung, gilt nie der vom Vortag - Datenproblem."""
+    main.save_eodhd_sma_state("EUNL.XETRA_x_EURUSD.FOREX", 255, "above", 1, 1, env="paper")
+    with pytest.raises(main.EodhdDataError, match=r"EURUSD.FOREX.*2026-09-07"):
+        _usd_reconcile_morgens(monkeypatch, _fx_hist())
+    assert main.get_eodhd_sma_state("EUNL.XETRA_x_EURUSD.FOREX", 255, env="paper") == "above"
 
 
 def test_ohne_fx_bleibt_alles_beim_alten(monkeypatch, handler_umgebung):

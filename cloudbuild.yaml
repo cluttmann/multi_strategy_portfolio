@@ -510,8 +510,16 @@ steps:
   # Drei Rollen pro Symbol:
   #   advisory  0 15-17  Vorwarnung, schreibt bewusst keinen State
   #   decisive  20 17    Handelsalarm, 10 Min vor Handelsschluss
-  #   reconcile 0 21     Abgleich auf den echten Schluss + taeglicher Lebendtest
-  # EODHD publiziert EOD-Daten 2-3h nach Boersenschluss; 21:00 Berlin gibt Puffer.
+  #   reconcile 30 7     Abgleich auf den Schluss der Vortagssitzung + taeglicher
+  #                      Lebendtest, vor der XETRA-Eroeffnung um 9:00
+  # EODHD verspricht EOD-Daten 2-3h nach Boersenschluss. Bis 2026-11-05 lagen
+  # IUSQ/EUNL um 21:00 vor; seit 2026-11-06 fehlten sie um 21:00 an jedem
+  # Handelstag, waehrend SAP, SXR8, EXS1 & Co. schon da waren - vier falsche
+  # Datenfehler-Alarme. Morgens ist der Bar sicher da, und der FX-Tagesschluss
+  # derselben Sitzung (Mitternacht UTC) auch: die Sitzung wird so umgerechnet,
+  # wie sie ab dann in jedem SMA-Fenster steht. Der Handler gleicht die
+  # juengste Sitzung mit Schluss ab, nicht "heute" - ein Lauf nach 17:30
+  # meint die laufende Sitzung und ist laut, solange ihr Bar fehlt.
   # Quelle: https://eodhd.com/financial-apis/api-for-historical-data-and-volumes
   #
   # Fenster: ACWI 250d, World 255d. 250d ist fuer den ACWI die gemessene Zahl -
@@ -595,7 +603,7 @@ steps:
       - '-c'
       - |
         gcloud scheduler jobs update http acwi_eur_sma_reconcile \
-          --schedule='0 21 * * 1-5' \
+          --schedule='30 7 * * 1-5' \
           --uri='https://europe-west3-trading-436516.cloudfunctions.net/index_alert' \
           --http-method='POST' \
           --time-zone='Europe/Berlin' \
@@ -603,7 +611,7 @@ steps:
           --oidc-service-account-email='1098661711782-compute@developer.gserviceaccount.com' \
           --message-body='{"index_symbol": "IUSQ.XETRA", "fx_symbol": "EURUSD.FOREX", "index_name": "MSCI ACWI (USD-Signal)", "alert_type": "sma_crossing", "source": "eodhd", "run_role": "reconcile", "sma_period": 250, "noise_threshold": 1.0, "currency_symbol": "$"}' \
         || gcloud scheduler jobs create http acwi_eur_sma_reconcile \
-          --schedule='0 21 * * 1-5' \
+          --schedule='30 7 * * 1-5' \
           --uri='https://europe-west3-trading-436516.cloudfunctions.net/index_alert' \
           --http-method='POST' \
           --time-zone='Europe/Berlin' \
@@ -673,7 +681,7 @@ steps:
       - '-c'
       - |
         gcloud scheduler jobs update http world_eur_sma_reconcile \
-          --schedule='0 21 * * 1-5' \
+          --schedule='30 7 * * 1-5' \
           --uri='https://europe-west3-trading-436516.cloudfunctions.net/index_alert' \
           --http-method='POST' \
           --time-zone='Europe/Berlin' \
@@ -681,7 +689,7 @@ steps:
           --oidc-service-account-email='1098661711782-compute@developer.gserviceaccount.com' \
           --message-body='{"index_symbol": "EUNL.XETRA", "fx_symbol": "EURUSD.FOREX", "index_name": "MSCI World (USD-Signal)", "alert_type": "sma_crossing", "source": "eodhd", "run_role": "reconcile", "sma_period": 255, "noise_threshold": 1.0, "currency_symbol": "$"}' \
         || gcloud scheduler jobs create http world_eur_sma_reconcile \
-          --schedule='0 21 * * 1-5' \
+          --schedule='30 7 * * 1-5' \
           --uri='https://europe-west3-trading-436516.cloudfunctions.net/index_alert' \
           --http-method='POST' \
           --time-zone='Europe/Berlin' \
