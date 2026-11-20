@@ -44,7 +44,11 @@ another order. Partial and late cancel fills update cumulative deltas once.
 The plan does not complete until all orders are filled and the broker reconciles.
 
 Orders use day limits, 0.5% around an IEX bid/ask midpoint, with a maximum 0.9%
-quoted spread and a five-minute source timestamp limit. Quotes are in the same
+quoted spread and a five-minute source timestamp limit. That limit is
+`PLANNING_QUOTE_MAX_AGE` for daily trend plans; monthly attempts revalidate at
+30 seconds. IEX re-stamps only on a book change, so quiet USFR/BIL quotes are
+often minutes old; the 30-second limit blocked confirmed exits on 18–20 Nov 2026.
+Quotes are in the same
 market-data collection with independent timestamps; refreshing quotes does not
 refresh SMA data. Position NAV uses the broker valuation multiplied by owned
 ledger quantity. Missing prices/volatility, unexplained holdings, unknown manual

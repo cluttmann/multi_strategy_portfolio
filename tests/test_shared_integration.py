@@ -129,6 +129,52 @@ def test_daily_gold_exit_cannot_touch_mix8_gold():
     assert len(sells)==1 and sells[0]['qty']=='20' and sells[0]['strategy']=='world_trend'
 
 
+def test_daily_exit_plans_through_real_quote_path_with_quiet_defensive_etf(monkeypatch):
+    """Live 2026-11-18 to 11-20: a confirmed WLDU exit never became an order.
+
+    At 15:52 ET USFR's newest IEX quote was 137 s old (BIL 34 s on 11-20):
+    an unchanged T-bill ETF market, not a broken one. The daily plan runs the
+    real main.get_execution_price path here, not a fixed-price stub.
+    """
+    import datetime as dt
+    import requests
+    quotes={'WLDU':('15.06','15.19',1),'USFR':('50.51','50.52',137)}
+    def latest(url,**kwargs):
+        symbol=url.split('/')[-3];bid,ask,age=quotes[symbol]
+        stamp=(dt.datetime.now(dt.timezone.utc)-dt.timedelta(seconds=age)).isoformat()
+        class Response:
+            def raise_for_status(self):pass
+            def json(self):return {'quote':{'bp':bid,'ap':ask,'bs':300,'as':300,'t':stamp}}
+        return Response()
+    class Database:
+        def collection(self,name):return self
+        def document(self,symbol):return self
+        def set(self,data,merge=False):pass
+    monkeypatch.setattr(requests,'get',latest)
+    monkeypatch.setattr(main,'get_all_market_data',lambda symbol,env='live':{})
+    monkeypatch.setattr(main,'get_auth_headers',lambda api:{})
+    monkeypatch.setattr(main,'get_firestore_client',lambda:Database())
+
+    class LiveQuoteBot(Bot):
+        get_execution_price=staticmethod(main.get_execution_price)
+        def trend_signals(self,cfg):return {s:{'on':False} for _,s in cfg['legs']}
+    class ExitBroker(PlanningBroker):
+        def positions(self):
+            return [dict(symbol='WLDU',qty='93',current_price='15.12'),
+                    dict(symbol='USFR',qty='33.45243',current_price='50.515')]
+        def asset(self,s):return {'tradable':True,'fractionable':s!='WLDU','status':'active'}
+    s=new_state('account','live',{'world_trend':{'WLDU':'93','USFR':'33.45243'}},
+                {k:'0' for k in list(main.SLEEVES)+['reserve']},{},'2026-11-18T19:00:00Z',
+                metadata={'world_trend':{'leg_states':{'WLDU':True,'UGLD':False}},
+                          'spx_trend':{'leg_states':{'SPXL':False}}})
+    store=MemoryStore(s);c=Controller(LiveQuoteBot(),{},'live',store,ExitBroker())
+    p=c.build(store.read(),'daily','2026-11-18')
+    sells=[r for r in p['orders'] if r['side']=='sell']
+    assert [(r['strategy'],r['symbol'],r['qty']) for r in sells]==[('world_trend','WLDU','93')]
+    assert any(r['symbol']=='USFR' and r['side']=='buy' for r in p['orders'])
+    assert p['metadata']['world_trend']['leg_states']=={'WLDU':False,'UGLD':False}
+
+
 def test_annual_rebalance_transfers_conserve_cash_and_buy_within_floor():
     c,store,broker=controller_fixture()
     p=c.build(store.read(),'monthly','2027-01',annual=True)

@@ -21,9 +21,16 @@ def quote_price(quote,now,require_fresh):
     return mid
 
 
+# Daily/upgrade plans: five-minute source timestamp limit (shared-etf-operations).
+# IEX re-stamps a quote only when its top of book changes, so a quiet T-bill ETF
+# (USFR/BIL) is often 1-4 minutes "old" while still current. 30 s here blocked
+# the confirmed WLDU/SPXL exits on 2026-11-18..20. Monthly attempts keep 30 s.
+PLANNING_QUOTE_MAX_AGE=300
+
+
 def get_price(bot,api,symbol,env,require_fresh=False):
-    quote=get_quote(bot,api,symbol,env)
-    mid=validate_quote(quote)
+    quote=get_quote(bot,api,symbol,env,max_age=PLANNING_QUOTE_MAX_AGE)
+    mid=validate_quote(quote,max_age=PLANNING_QUOTE_MAX_AGE)
     if require_fresh and (dec(quote['ap'])-dec(quote['bp']))/mid>dec('.009'):
         raise SafetyStop(f'{symbol}: quote spread exceeds 0.9%')
     return mid
@@ -43,7 +50,7 @@ class QuoteDeferred(RuntimeError):
     """A valid market whose spread is temporarily outside the entry policy."""
 
 
-def validate_quote(quote,now=None):
+def validate_quote(quote,now=None,max_age=30):
     now=now or dt.datetime.now(dt.timezone.utc)
     if quote.get('source')!='iex':raise SafetyStop('Execution quote source must be IEX')
     bid,ask=dec(quote.get('bp',0)),dec(quote.get('ap',0))
@@ -51,7 +58,7 @@ def validate_quote(quote,now=None):
         raise SafetyStop('Missing, crossed or zero-depth IEX market')
     try:age=(now-parse_timestamp(quote['t'])).total_seconds()
     except (KeyError,ValueError,TypeError) as exc:raise SafetyStop('Malformed IEX quote timestamp') from exc
-    if age< -5 or age>30:raise SafetyStop(f'IEX quote stale ({age:.0f}s)')
+    if age< -5 or age>max_age:raise SafetyStop(f'IEX quote stale ({age:.0f}s)')
     return (bid+ask)/2
 
 
@@ -87,11 +94,12 @@ def execution_limit(quote,symbol,side,attempt=0,now=None,risk_exit=False,eet_buy
     raise SafetyStop('Invalid execution side')
 
 
-def get_quote(bot,api,symbol,env='live',use_cache=True,persist=True,now=None):
+def get_quote(bot,api,symbol,env='live',use_cache=True,persist=True,now=None,max_age=30):
     """Read an actual fresh IEX market; persist=False is a read-only preflight.
 
     Quote source and source timestamp are independent of the valuation/SMA cache.
     A cached SIP quote never satisfies an IEX request. No provider fallback exists.
+    A cached quote is reused only within 30 s; max_age applies to a new download.
     """
     injected_now=now
     now=now or dt.datetime.now(dt.timezone.utc)
@@ -106,7 +114,7 @@ def get_quote(bot,api,symbol,env='live',use_cache=True,persist=True,now=None):
     try:quote={**response.json()['quote'],'source':'iex'}
     except (KeyError,TypeError,ValueError) as exc:raise SafetyStop(f'{symbol}: malformed IEX response') from exc
     downloaded_at=injected_now or dt.datetime.now(dt.timezone.utc)
-    validate_quote(quote,downloaded_at)
+    validate_quote(quote,downloaded_at,max_age=max_age)
     if persist:
         bot.get_firestore_client().collection(f'market-data-{env}').document(bot.normalize_symbol(symbol)).set(
             {'execution_quote':quote,'execution_quote_source':'iex','execution_quote_downloaded_at':downloaded_at},merge=True)
