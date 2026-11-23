@@ -20,8 +20,15 @@ def position_value(state,key,prices):
             'cash':float(dec(p['cash'])),'debt':float(dec(p['debt'])),'by_symbol':by}
 
 
-def target_orders(state,targets,prices,assets,funding=None,transfers=None):
-    """Worst-case limit proceeds bound all buys. No margin is implicitly added."""
+RISK_EXIT_SELL_DISCOUNT=Decimal('0.97')
+
+
+def target_orders(state,targets,prices,assets,funding=None,transfers=None,sell_discount=None):
+    """Worst-case limit proceeds bound all buys. No margin is implicitly added.
+
+    sell_discount maps a symbol to a wider limit factor for a risk exit priced
+    off the broker mark; a sell limit below the market still fills at the bid."""
+    sell_discount=sell_discount or {}
     cash={k:dec(p['cash'])+dec((funding or {}).get(k,0)) for k,p in state['portfolios'].items()}
     sells,buys=[],[]
     for key,tgt in targets.items():
@@ -37,7 +44,7 @@ def target_orders(state,targets,prices,assets,funding=None,transfers=None):
             if delta < -5 or (want==0 and have>0):
                 # Full liquidation preserves the exact broker-supported fraction.
                 qty=have if want==0 else min(have,(-delta/price).quantize(quantum,rounding=ROUND_DOWN))
-                limit=(price*Decimal('0.995')).quantize(Decimal('.01'),rounding=ROUND_DOWN)
+                limit=(price*sell_discount.get(sym,Decimal('0.995'))).quantize(Decimal('.01'),rounding=ROUND_DOWN)
                 if qty>0:
                     row={'strategy':key,'symbol':sym,'side':'sell','qty':text(qty),'limit_price':text(limit)}
                     sells.append(row);cash[key]+=qty*limit
@@ -79,6 +86,44 @@ class Controller:
                 raise SafetyStop('Broker valuation missing for owned position')
             return {s:marks[s] for s in symbols}
         return {s:dec(self.bot.get_execution_price(self.api,s,self.env,require_fresh=trading)) for s in sorted(set(extra))}
+
+    def daily_prices(self,state,targets,symbols):
+        """Strict IEX prices, except that a bad quote never blocks a risk exit.
+
+        Daily 2026-11-18..20: one stale quote aborted the whole plan and the
+        confirmed WLDU/SPXL exits sat for three days. Not trading out of a 2-3x
+        ETF costs far more than a wide spread. So, per symbol, when the strict
+        quote fails:
+          - a full liquidation (target 0, held) is priced off the broker mark
+            and sold with a wide limit (RISK_EXIT_SELL_DISCOUNT);
+          - anything else (a defensive buy, a re-entry, a partial) is frozen:
+            no trade in that symbol today, proceeds stay as sleeve cash.
+        """
+        prices={};degraded={'frozen':[],'exit_symbols':set(),'reasons':{}}
+        marks=None
+        for sym in sorted(symbols):
+            try:
+                prices[sym]=dec(self.bot.get_execution_price(self.api,sym,self.env,require_fresh=True))
+                continue
+            except SafetyStop as exc:
+                reason=str(exc)
+            if marks is None:
+                marks={p['symbol']:dec(p['current_price']) for p in self.broker.positions() if p.get('current_price')}
+            exits=[k for k,tgt in targets.items()
+                   if dec(tgt.get(sym,0))==0 and dec(state['portfolios'][k]['positions'].get(sym,0))>0]
+            if exits and marks.get(sym,0)>0:
+                prices[sym]=marks[sym];degraded['exit_symbols'].add(sym)
+                degraded['reasons'][sym]=f'risk exit at broker mark: {reason}'
+                continue
+            held=[k for k,p in state['portfolios'].items() if dec(p['positions'].get(sym,0))>0]
+            if held and marks.get(sym,0)<=0:
+                raise SafetyStop(f'{sym}: no quote and no broker mark ({reason})')
+            if held:prices[sym]=marks[sym]
+            for k in targets:
+                if sym in targets[k]:degraded['frozen'].append((k,sym,'frozen'))
+            degraded['reasons'][sym]=f'frozen: {reason}'
+        degraded['exit_symbols']=sorted(degraded['exit_symbols'])
+        return prices,degraded
 
     def valuation_prices(self,state,symbols):
         marks={p['symbol']:dec(p['current_price']) for p in self.broker.positions() if p.get('current_price')}
@@ -210,14 +255,27 @@ class Controller:
             meta['last_signal_check_date']=period;metadata[k]=meta
         symbols={s for tgt in targets.values() for s,v in tgt.items() if dec(v)>0}
         symbols|={s for k in targets for s,q in state['portfolios'][k]['positions'].items() if dec(q)>0}
-        prices.update(self.valuation_prices(state,symbols) if monthly else self.prices(state,symbols,trading=True))
+        degraded={}
+        if monthly:
+            prices.update(self.valuation_prices(state,symbols))
+        else:
+            daily_prices,degraded=self.daily_prices(state,targets,symbols)
+            prices.update(daily_prices)
+            for k,sym,mode in degraded.get('frozen',[]):
+                # No executable quote: hold this line exactly where it is.
+                have=dec(state['portfolios'][k]['positions'].get(sym,0))
+                if have>0:targets[k][sym]=text(have*prices[sym])
+                else:targets[k].pop(sym,None)
+            symbols={s for s in symbols if s in prices}
         assets={s:self.broker.asset(s) for s in symbols}
         # Zero target entries with no holdings do not require an asset/price.
         targets={k:{s:v for s,v in tgt.items() if s in symbols} for k,tgt in targets.items()}
-        orders=target_orders(state,targets,prices,assets,funding,transfers)
+        orders=target_orders(state,targets,prices,assets,funding,transfers,
+                             sell_discount={s:RISK_EXIT_SELL_DISCOUNT for s in degraded.get('exit_symbols',())})
         for row in orders:
             metadata[row['strategy']]['last_trade_date']=dt.datetime.now(ZoneInfo('America/New_York')).date().isoformat()
         result={'action':action,'period':period,'version':VERSION,'orders':orders,'funding':funding,
+                'degraded_quotes':degraded.get('reasons',{}),
                 'margin_budget':text(margin),'funding_debt':funding_debt,'transfers':transfers,'metadata':metadata,
                 'margin_retry':bool((gate or {}).get('errors')),
                 'targets':targets,'prices':{s:text(prices[s]) for s in symbols},'margin_gate':gate,

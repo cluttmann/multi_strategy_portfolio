@@ -405,6 +405,39 @@ steps:
       - 'deploy-index-alert'
       - 'deploy-audit'
 
+  # Zweiter Daily-Versuch 15:56 ET (seit 2026-11-23). Ist der 15:52-Plan fertig,
+  # ist dieser Lauf ein No-op (ein Plan je Tag); scheiterte er vor dem Plan, holt
+  # dieser den faelligen Ausstieg vor Handelsschluss nach und meldet 🚨, falls
+  # die Position danach noch liegt.
+  - name: 'gcr.io/cloud-builders/gcloud'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        if gcloud scheduler jobs describe daily_trend_sleeves_retry --location=europe-west3 >/dev/null 2>&1; then
+          gcloud scheduler jobs update http daily_trend_sleeves_retry \
+            --schedule='56 15 * * 1-5' \
+            --max-retry-attempts=1 --min-backoff=15s --max-backoff=30s \
+            --uri='https://europe-west3-trading-436516.cloudfunctions.net/daily_trend_sleeves' \
+            --http-method='POST' \
+            --time-zone='America/New_York' \
+            --location='europe-west3' \
+            --oidc-service-account-email='1098661711782-compute@developer.gserviceaccount.com'
+        else
+          gcloud scheduler jobs create http daily_trend_sleeves_retry \
+            --schedule='56 15 * * 1-5' \
+            --max-retry-attempts=1 --min-backoff=15s --max-backoff=30s \
+            --uri='https://europe-west3-trading-436516.cloudfunctions.net/daily_trend_sleeves' \
+            --http-method='POST' \
+            --time-zone='America/New_York' \
+            --location='europe-west3' \
+            --oidc-service-account-email='1098661711782-compute@developer.gserviceaccount.com'
+        fi
+    waitFor:
+      - 'deploy-aaa'
+      - 'deploy-index-alert'
+      - 'deploy-audit'
+
   # daily_world_trend (angelegt 2026-09-22) ersetzt durch daily_trend_sleeves, das
   # World-Trend und S&P-Trend in einem Lauf prueft. Erst Scheduler, dann Function.
   - name: 'gcr.io/cloud-builders/gcloud'

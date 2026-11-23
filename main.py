@@ -3450,9 +3450,53 @@ def daily_world_trend(api, env="live", force=False, skip_order_wait=False):
     return daily_trend_sleeve(api, world_trend_config, env, force, skip_order_wait)
 
 
+UNEXECUTED_EXIT_MIN_VALUE = 50.0
+
+
+def _alert_unexecuted_exits(api, env):
+    """Nach jedem Daily-Lauf: Signal aus, Hebel-ETF noch im Depot -> laut melden.
+
+    18.-20.11.2026 lief der Ausstieg drei Tage nicht, gemeldet wurde nur ein
+    technisches "executor stopped" und danach "✅ recovered". Ein faelliger, nicht
+    ausgefuehrter Risiko-Ausstieg ist die Meldung, nicht der Stacktrace."""
+    try:
+        from execution.broker import AlpacaBroker
+        held = {p["symbol"]: float(p.get("market_value") or 0)
+                for p in AlpacaBroker(api).positions()}
+    except Exception as exc:
+        print(f"Warning: exit check could not read positions: {type(exc).__name__}: {exc}")
+        return []
+    open_exits = []
+    for cfg in TREND_SLEEVES:
+        try:
+            signals = trend_signals(cfg)
+        except Exception as exc:
+            print(f"Warning: exit check could not read {cfg['display_name']} signals: {exc}")
+            continue
+        for index_symbol, product in cfg["legs"]:
+            value = held.get(product, 0.0)
+            sig = signals.get(product, {})
+            if not sig.get("on", True) and value > UNEXECUTED_EXIT_MIN_VALUE:
+                open_exits.append(
+                    f"• {product} {value:,.0f} $ ({cfg['display_name']}: {index_symbol} "
+                    f"{sig.get('diff_pct', 0):+.1f} % zur SMA{cfg['sma_period']})")
+    if open_exits:
+        try:
+            send_telegram_message(
+                f"🚨 AUSSTIEG FÄLLIG, ABER NICHT AUSGEFÜHRT ({env})\n" + "\n".join(open_exits) +
+                "\n\nSignal ist aus, die Position liegt noch im Depot. Zweiter Versuch "
+                "15:56 ET; sonst vor 16:00 ET manuell verkaufen.")
+        except Exception as exc:
+            print(f"Warning: unexecuted-exit alert failed: {exc}")
+    return open_exits
+
+
 def daily_trend_sleeves(api, env="live", force=False, skip_order_wait=False):
     if api.get("EXECUTION_V2"):
-        return _managed_run(api, env, "daily", force=force)
+        try:
+            return _managed_run(api, env, "daily", force=force)
+        finally:
+            _alert_unexecuted_exits(api, env)
     """Alle Trend-Sleeves nacheinander. Ein Datenfehler in einer blockiert die
     andere nicht; das Gesamtergebnis ist ❌, sobald eine gescheitert ist."""
     results = []

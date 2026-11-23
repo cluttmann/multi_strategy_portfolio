@@ -311,3 +311,100 @@ def test_earmarked_sleeve_cash_is_not_counted_again_as_new_margin():
     broker.account=lambda:{'id':'account','cash':'-900','equity':'10000'}
     p=c.build(store.read(),'monthly','2026-10')
     assert Decimal(p['margin_budget'])==0
+
+
+# --- Risk exits never wait on quote quality (2026-11-23) ----------------------
+
+class _BadQuoteBot(Bot):
+    """Every symbol in `bad` fails the strict IEX check (stale or wide spread)."""
+    def __init__(self,bad,on=None):self.bad=set(bad);self.on=on or {}
+    def get_execution_price(self,api,s,env,require_fresh=False):
+        if s in self.bad:raise SafetyStop(f'{s}: quote spread exceeds 0.9%')
+        return {'WLDU':Decimal('15'),'USFR':Decimal('50'),'SPXL':Decimal('230'),'BIL':Decimal('91.6')}.get(s,Decimal('100'))
+    def trend_signals(self,cfg):return {s:{'on':self.on.get(s,False)} for _,s in cfg['legs']}
+
+
+class _LiveLikeBroker(PlanningBroker):
+    def positions(self):
+        return [dict(symbol='WLDU',qty='93',current_price='14.80'),dict(symbol='USFR',qty='33.45243',current_price='50.52'),
+                dict(symbol='SPXL',qty='8.201427',current_price='228.70')]
+    def asset(self,s):return {'tradable':True,'fractionable':s!='WLDU','status':'active'}
+
+
+def _live_like_state():
+    return new_state('account','live',{'world_trend':{'WLDU':'93','USFR':'33.45243'},'spx_trend':{'SPXL':'8.201427'}},
+                     {k:'0' for k in list(main.SLEEVES)+['reserve']},{},'2026-11-23T19:00:00Z',
+                     metadata={'world_trend':{'leg_states':{'WLDU':True,'UGLD':False}},'spx_trend':{'leg_states':{'SPXL':True}}})
+
+
+def _plan(bot):
+    from test_execution import MemoryStore
+    store=MemoryStore(_live_like_state());c=Controller(bot,{},'live',store,_LiveLikeBroker())
+    return c.build(store.read(),'daily','2026-11-23')
+
+
+def test_bad_quote_on_exiting_leg_still_sells_at_broker_mark_with_wide_limit():
+    p=_plan(_BadQuoteBot({'WLDU','SPXL'}))
+    sells={r['symbol']:r for r in p['orders'] if r['side']=='sell'}
+    assert sells['WLDU']['qty']=='93' and sells['WLDU']['limit_price']==str((Decimal('14.80')*Decimal('0.97')).quantize(Decimal('.01'),rounding='ROUND_DOWN'))
+    assert sells['SPXL']['qty']=='8.201427'
+    assert set(p['degraded_quotes'])=={'WLDU','SPXL'}
+
+
+def test_stale_defensive_quote_never_blocks_the_exit_and_buys_nothing():
+    p=_plan(_BadQuoteBot({'USFR','BIL'}))
+    sells=[(r['symbol'],r['qty']) for r in p['orders'] if r['side']=='sell']
+    assert ('WLDU','93') in sells and ('SPXL','8.201427') in sells
+    assert not any(r['side']=='buy' for r in p['orders'])
+    assert not any(r['symbol']=='USFR' for r in p['orders'])
+
+
+def test_everything_stale_still_exits():
+    p=_plan(_BadQuoteBot({'WLDU','SPXL','USFR','BIL'}))
+    assert {r['symbol'] for r in p['orders'] if r['side']=='sell'}=={'WLDU','SPXL'}
+    assert not any(r['side']=='buy' for r in p['orders'])
+
+
+def test_good_quotes_keep_tight_limits_and_buy_defensive():
+    p=_plan(_BadQuoteBot(set()))
+    wldu=[r for r in p['orders'] if r['symbol']=='WLDU'][0]
+    assert wldu['limit_price']==str((Decimal('15')*Decimal('0.995')).quantize(Decimal('.01'),rounding='ROUND_DOWN'))
+    assert {r['symbol'] for r in p['orders'] if r['side']=='buy'}=={'USFR','BIL'}
+    assert p['degraded_quotes']=={}
+
+
+def test_bad_quote_on_reentry_buy_does_not_buy_blind():
+    from test_execution import MemoryStore
+    s=new_state('account','live',{'world_trend':{'USFR':'60'}},{k:'0' for k in list(main.SLEEVES)+['reserve']},{},
+                '2026-11-23T19:00:00Z',metadata={'world_trend':{'leg_states':{'WLDU':False,'UGLD':False}}})
+    class B(_LiveLikeBroker):
+        def positions(self):return [dict(symbol='USFR',qty='60',current_price='50.52')]
+    bot=_BadQuoteBot({'WLDU'},on={'WLDU':True})
+    store=MemoryStore(s);c=Controller(bot,{},'live',store,B())
+    p=c.build(store.read(),'daily','2026-11-23')
+    assert not any(r['symbol']=='WLDU' for r in p['orders'])
+
+
+def test_unexecuted_exit_alert_names_the_open_position(monkeypatch):
+    sent=[]
+    class Pos:
+        def __init__(self,api):pass
+        def positions(self):return [{'symbol':'WLDU','market_value':'1376'},{'symbol':'SPXL','market_value':'12'}]
+    import execution.broker
+    monkeypatch.setattr(execution.broker,'AlpacaBroker',Pos)
+    monkeypatch.setattr(main,'trend_signals',lambda cfg:{p:{'on':False,'diff_pct':-4.3} for _,p in cfg['legs']})
+    monkeypatch.setattr(main,'send_telegram_message',lambda m:sent.append(m))
+    out=main._alert_unexecuted_exits({},'live')
+    assert len(out)==1 and 'WLDU' in out[0] and sent and '🚨' in sent[0]
+
+
+def test_unexecuted_exit_alert_silent_when_signal_on(monkeypatch):
+    sent=[]
+    class Pos:
+        def __init__(self,api):pass
+        def positions(self):return [{'symbol':'WLDU','market_value':'1376'}]
+    import execution.broker
+    monkeypatch.setattr(execution.broker,'AlpacaBroker',Pos)
+    monkeypatch.setattr(main,'trend_signals',lambda cfg:{p:{'on':True} for _,p in cfg['legs']})
+    monkeypatch.setattr(main,'send_telegram_message',lambda m:sent.append(m))
+    assert main._alert_unexecuted_exits({},'live')==[] and sent==[]

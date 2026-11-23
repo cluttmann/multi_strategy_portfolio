@@ -50,6 +50,15 @@ quoted spread and a five-minute source timestamp limit. That limit is
 often minutes old; the 30-second limit blocked confirmed exits on 18–20 Nov 2026.
 USFR and BIL get 15 minutes (`TBILL_PLANNING_QUOTE_MAX_AGE`): BIL's quote was
 401 s old midday on 23 Nov 2026, and one stale leg aborts the whole daily plan.
+
+Since 23 Nov 2026 a bad quote never blocks a daily risk exit
+(`Controller.daily_prices`): a full liquidation whose strict quote fails is priced
+off the broker mark and sold with a 3 % limit floor (a marketable sell fills at
+the bid). Any other symbol with a bad quote is frozen for the day; proceeds stay
+as sleeve cash. `degraded_quotes` in the plan records why. A second scheduler
+(`daily_trend_sleeves_retry`, 15:56 ET) reruns the daily job; after every daily
+run `_alert_unexecuted_exits` sends 🚨 when a leg's signal is off but the ETF is
+still held.
 Quotes are in the same
 market-data collection with independent timestamps; refreshing quotes does not
 refresh SMA data. Position NAV uses the broker valuation multiplied by owned
