@@ -60,7 +60,31 @@ def test_daily_planning_price_still_rejects_quote_older_than_five_minutes(monkey
     from execution.quotes import get_price
     _serve_iex_quote(monkeypatch,301)
     with pytest.raises(SafetyStop,match='IEX quote stale'):
-        get_price(_QuoteBot(),{},'USFR','live',require_fresh=True)
+        get_price(_QuoteBot(),{},'WLDU','live',require_fresh=True)
+
+
+@pytest.mark.parametrize('symbol',['USFR','BIL'])
+@pytest.mark.parametrize('age',[401,899])
+def test_daily_planning_accepts_tbill_quote_within_fifteen_minutes(monkeypatch,symbol,age):
+    """BIL was 401 s old at 13:20 ET on 2026-11-23."""
+    from execution.quotes import get_price
+    _serve_iex_quote(monkeypatch,age)
+    assert str(get_price(_QuoteBot(),{},symbol,'live',require_fresh=True))=='50.515'
+
+
+@pytest.mark.parametrize('symbol',['USFR','BIL'])
+def test_daily_planning_rejects_tbill_quote_older_than_fifteen_minutes(monkeypatch,symbol):
+    from execution.quotes import get_price
+    _serve_iex_quote(monkeypatch,901)
+    with pytest.raises(SafetyStop,match='IEX quote stale'):
+        get_price(_QuoteBot(),{},symbol,'live',require_fresh=True)
+
+
+def test_monthly_attempt_quote_contract_stays_thirty_seconds_for_tbills(monkeypatch):
+    from execution.quotes import get_quote
+    _serve_iex_quote(monkeypatch,31)
+    with pytest.raises(SafetyStop,match='IEX quote stale'):
+        get_quote(_QuoteBot(),{},'BIL','live')
 
 
 def test_daily_planning_refetches_instead_of_reusing_cache_older_than_30s(monkeypatch):

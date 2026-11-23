@@ -26,11 +26,21 @@ def quote_price(quote,now,require_fresh):
 # (USFR/BIL) is often 1-4 minutes "old" while still current. 30 s here blocked
 # the confirmed WLDU/SPXL exits on 2026-11-18..20. Monthly attempts keep 30 s.
 PLANNING_QUOTE_MAX_AGE=300
+# The trend sleeves' T-bill parking ETFs move ~0.01 %/day. BIL's newest IEX quote
+# was 401 s old at 13:20 ET on 2026-11-23; one stale defensive leg aborts the whole
+# daily plan, exits included. The spread check still applies to them.
+TBILL_PLANNING_SYMBOLS=frozenset({'USFR','BIL'})
+TBILL_PLANNING_QUOTE_MAX_AGE=900
+
+
+def planning_max_age(symbol):
+    return TBILL_PLANNING_QUOTE_MAX_AGE if symbol in TBILL_PLANNING_SYMBOLS else PLANNING_QUOTE_MAX_AGE
 
 
 def get_price(bot,api,symbol,env,require_fresh=False):
-    quote=get_quote(bot,api,symbol,env,max_age=PLANNING_QUOTE_MAX_AGE)
-    mid=validate_quote(quote,max_age=PLANNING_QUOTE_MAX_AGE)
+    max_age=planning_max_age(symbol)
+    quote=get_quote(bot,api,symbol,env,max_age=max_age)
+    mid=validate_quote(quote,max_age=max_age)
     if require_fresh and (dec(quote['ap'])-dec(quote['bp']))/mid>dec('.009'):
         raise SafetyStop(f'{symbol}: quote spread exceeds 0.9%')
     return mid

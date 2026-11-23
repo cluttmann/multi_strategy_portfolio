@@ -48,6 +48,8 @@ quoted spread and a five-minute source timestamp limit. That limit is
 `PLANNING_QUOTE_MAX_AGE` for daily trend plans; monthly attempts revalidate at
 30 seconds. IEX re-stamps only on a book change, so quiet USFR/BIL quotes are
 often minutes old; the 30-second limit blocked confirmed exits on 18–20 Nov 2026.
+USFR and BIL get 15 minutes (`TBILL_PLANNING_QUOTE_MAX_AGE`): BIL's quote was
+401 s old midday on 23 Nov 2026, and one stale leg aborts the whole daily plan.
 Quotes are in the same
 market-data collection with independent timestamps; refreshing quotes does not
 refresh SMA data. Position NAV uses the broker valuation multiplied by owned
