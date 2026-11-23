@@ -218,6 +218,16 @@ class Executor:
                     self.ledger.store.mutate('monthly_suspend_for_daily',suspend)
                     plan=daily;builder=None
             state=self.ledger.store.read()
+            stale=state.get('active')
+            if (stale and stale.get('execution_policy')!='monthly-iex-v1'
+                    and any(r['status']!='filled' for r in stale['orders'])
+                    and all(r['status'] in ('filled','planned') for r in stale['orders'])
+                    and stale.get('planned_at')
+                    and (self.now()-parse_timestamp(stale['planned_at'])).total_seconds()>300):
+                # Never-submitted rows priced minutes ago must not trade, and must
+                # not block every later run either: drop them and replan below.
+                self.ledger.abandon_unsubmitted(t,'stale_unsubmitted_rows')
+                state=self.ledger.store.read()
             if not state['active']:
                 if builder: plan=builder(state,self.broker)
                 if plan is None: return {'status':'reconciled'}

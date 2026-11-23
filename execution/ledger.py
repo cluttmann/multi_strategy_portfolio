@@ -58,6 +58,15 @@ def totals(state):
     return positions, cash
 
 
+def pending_regulatory_fees(state):
+    """Modeled daily REG/TAF/CAT not yet charged against the ledger (>= 0)."""
+    total=ZERO
+    for row in (state.get('regulatory_fee_days') or {}).values():
+        for typ,target in (row.get('target') or {}).items():
+            total+=max(ZERO,dec(target)-dec((row.get('charged') or {}).get(typ,0)))
+    return total
+
+
 def reconcile_state(state, positions, cash):
     expected, expected_cash = totals(state)
     actual = {p['symbol']: dec(p['qty']) for p in positions}
@@ -72,7 +81,13 @@ def reconcile_state(state, positions, cash):
         raise SafetyStop('Broker cash is not cent-rounded')
     reported_cash=expected_cash.quantize(Decimal('.01'),rounding=ROUND_HALF_UP)
     difference=broker_cash-reported_cash
-    if abs(difference) > Decimal('0.02'):
+    # Alpaca withholds REG/TAF/CAT intraday by its own rounding; the documented
+    # daily model can miss it by cents (2026-11-23: 93 WLDU sold, model 0.06,
+    # withheld ~0.04, so the fee accrual did not match and the run stopped
+    # before the SPXL exit). A broker shortfall up to the still-unbooked modeled
+    # fee is that withholding; the receipt books it when it arrives.
+    pending=pending_regulatory_fees(state)
+    if difference > Decimal('0.02') or difference < -(Decimal('0.02')+pending):
         raise SafetyStop(f'Unexplained broker cash: {broker_cash-expected_cash}')
     return {'positions': {s:text(q) for s,q in expected.items()},
             'cash': text(expected_cash), 'cash_rounding':text(broker_cash-expected_cash),
@@ -216,7 +231,12 @@ class Ledger:
                 return
             if max(s['last_completed'].get(plan['action'],''),s.get('last_expired',{}).get(plan['action'],''))>=plan['period']: return
             p=deepcopy(plan)
-            p['id']=hashlib.sha256(f"{s['account_id']}|{s['env']}|{p['action']}|{p['period']}".encode()).hexdigest()[:32]
+            seed=f"{s['account_id']}|{s['env']}|{p['action']}|{p['period']}"
+            # A plan abandoned earlier the same period already owns the base
+            # client_order_ids; a rebuilt plan must not reuse them.
+            attempt=s.get('abandoned_periods',{}).get(f"{p['action']}|{p['period']}",0)
+            if attempt:seed+=f"|retry{attempt}"
+            p['id']=hashlib.sha256(seed.encode()).hexdigest()[:32]
             p['created_at']=utcnow()
             if p.get('execution_policy')=='monthly-iex-v1':
                 p['valuation_order_preview']=p['orders']
@@ -246,6 +266,33 @@ class Ledger:
                 port['net_contributions']=text(dec(port['net_contributions'])+amt-borrow)
             s['active']=p
         return self.store.mutate('start',start)
+
+    def abandon_unsubmitted(self,token,reason):
+        """Close a non-monthly plan whose remaining rows were never submitted.
+
+        Filled rows stay booked exactly as they are (positions and cash already
+        carry them). Unsubmitted rows are dropped, plan metadata is NOT applied:
+        the next daily build sees the real holdings and replans from scratch.
+        2026-11-23: a 4-cent fee mismatch stopped the plan after the WLDU fill;
+        the planned SPXL exit then went stale and would have blocked every later
+        run of every sleeve."""
+        def abandon(s):
+            self.check(s,token);p=s['active']
+            if not p or p.get('execution_policy')=='monthly-iex-v1':
+                raise SafetyStop('Only a daily-style plan can be abandoned')
+            rest=[r for r in p['orders'] if r['status']!='filled']
+            if any(r['status']!='planned' for r in rest):
+                raise SafetyStop('Plan has submitted or terminal orders; cannot abandon')
+            key=f"{p['action']}|{p['period']}"
+            periods=s.setdefault('abandoned_periods',{});periods[key]=periods.get(key,0)+1
+            log=s.setdefault('abandoned_plans',[])
+            log.append({'id':p['id'],'action':p['action'],'period':p['period'],'reason':reason,
+                        'abandoned_at':utcnow(),'filled':[r['client_order_id'] for r in p['orders'] if r['status']=='filled'],
+                        'dropped':[{k:r[k] for k in ('strategy','symbol','side','qty')} for r in rest]})
+            del log[:-20]
+            s['active']=None
+            return deepcopy(log[-1])
+        return self.store.mutate('abandon_unsubmitted',abandon)
 
     def mark_submitting(self,token,index,submitted_at=None):
         def mark(s):

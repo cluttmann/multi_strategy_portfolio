@@ -188,8 +188,54 @@ def test_stale_persisted_plan_cannot_submit_new_orders():
     store=MemoryStore(seeded());broker=FakeBroker();l=Ledger(store)
     t=l.acquire();l.start(t,dict(action='old',period='2026-09-24',planned_at='2026-09-24T12:00:00Z',orders=[dict(strategy='mix8',symbol='UBT',side='sell',qty='2',limit_price='9')]))
     l.release(t)
-    with pytest.raises(SafetyStop,match='stale'):Executor(l,broker).run()
+    # Since 2026-11-23 the stale rows are dropped (never submitted) instead of
+    # blocking every later run.
+    assert Executor(l,broker).run()=={'status':'reconciled'}
     assert broker.submits==0
+    s=store.read()
+    assert s['active'] is None and s['abandoned_plans'][-1]['dropped'][0]['symbol']=='UBT'
+
+
+def test_partly_filled_stale_daily_plan_is_abandoned_and_rebuilt_with_new_order_ids():
+    store=MemoryStore(seeded());broker=FakeBroker();l=Ledger(store)
+    t=l.acquire()
+    l.start(t,dict(action='daily',period='2026-11-23',planned_at='2026-11-23T20:52:00Z',
+                   orders=[dict(strategy='mix8',symbol='UBT',side='sell',qty='1',limit_price='9'),
+                           dict(strategy='aaa',symbol='UBT',side='sell',qty='2',limit_price='9')]))
+    def fill_first(s):
+        s['active']['orders'][0]['status']='filled'
+    store.mutate('test_fill',fill_first)
+    old_id=store.read()['active']['id']
+    log=l.abandon_unsubmitted(t,'test')
+    assert log['dropped']==[{'strategy':'aaa','symbol':'UBT','side':'sell','qty':'2'}]
+    assert store.read()['active'] is None
+    l.start(t,dict(action='daily',period='2026-11-23',planned_at='2026-11-23T20:56:00Z',
+                   orders=[dict(strategy='aaa',symbol='UBT',side='sell',qty='2',limit_price='9')]))
+    new=store.read()['active']
+    assert new['id']!=old_id and new['orders'][0]['client_order_id'].startswith(f"se-{new['id']}")
+
+
+def test_abandon_refuses_plan_with_submitted_orders():
+    store=MemoryStore(seeded());l=Ledger(store);t=l.acquire()
+    l.start(t,dict(action='daily',period='2026-11-23',orders=[dict(strategy='mix8',symbol='UBT',side='sell',qty='1',limit_price='9')]))
+    l.mark_submitting(t,0)
+    with pytest.raises(SafetyStop,match='submitted'):l.abandon_unsubmitted(t,'test')
+
+
+def test_reconcile_tolerates_cash_shortfall_up_to_pending_regulatory_fee():
+    from execution.ledger import reconcile_state
+    s=seeded();s['portfolios']['reserve']['cash']='42.4573'
+    s['regulatory_fee_days']={'2026-11-23':{'target':{'REG':'0.03','TAF':'0.02','CAT':'0.01'},
+                                            'charged':{'REG':'0','TAF':'0','CAT':'0'}}}
+    pos=[{'symbol':'UBT','qty':'100'}]
+    reconcile_state(s,pos,'42.42')           # 2026-11-23 live: -0.037 with 0.06 pending
+    with pytest.raises(SafetyStop,match='Unexplained broker cash'):
+        reconcile_state(s,pos,'42.37')       # beyond pending + 2 cents
+    with pytest.raises(SafetyStop,match='Unexplained broker cash'):
+        reconcile_state(s,pos,'42.49')       # surplus is never a fee
+    s['regulatory_fee_days']['2026-11-23']['charged']={'REG':'0.03','TAF':'0.02','CAT':'0.01'}
+    with pytest.raises(SafetyStop,match='Unexplained broker cash'):
+        reconcile_state(s,pos,'42.42')       # nothing pending: old 2-cent rule
 
 
 def test_broker_nanosecond_migration_timestamp_replays_utc_midnight_fees():
