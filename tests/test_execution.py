@@ -260,3 +260,27 @@ def test_live_recover_reconciles_daily_accrued_fee_without_order():
     assert executor.run()=={'status':'reconciled'}
     assert store.read()['portfolios']['reserve']['cash']=='99.76'
     assert broker.submits==0
+
+
+def test_account_interest_matches_despite_cent_drift_from_fee_model():
+    """2026-11-24 live: broker debited 0.71 interest (accrual +0.7125); the
+    ledger sat 1.7 cents below broker cash, saw 0.69, and every run stopped."""
+    from execution.ledger import totals
+    state=seeded();state['env']='live'
+    state['portfolios']['reserve']['cash']='1924.3428'
+    state['account_fee_tracker']={'accrued_fees':'4.5586','pending':'4.54'}
+    broker=FakeBroker()
+    broker.account=lambda:{'id':'account','cash':'1923.65','accrued_fees':'5.2711'}
+    store=MemoryStore(state);executor=Executor(Ledger(store),broker)
+    assert executor.run()=={'status':'reconciled'}
+    assert abs(totals(store.read())[1]-Decimal('1923.65'))<Decimal('0.01')
+
+
+def test_account_interest_gap_beyond_three_cents_still_stops():
+    state=seeded();state['env']='live'
+    state['portfolios']['reserve']['cash']='1924.3428'
+    state['account_fee_tracker']={'accrued_fees':'4.5586','pending':'4.54'}
+    broker=FakeBroker()
+    broker.account=lambda:{'id':'account','cash':'1923.55','accrued_fees':'5.2711'}
+    with pytest.raises(SafetyStop,match='Unexplained broker cash'):
+        Executor(Ledger(MemoryStore(state)),broker).run()

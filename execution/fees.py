@@ -151,7 +151,11 @@ def accrue_account_fees(ledger,token,account):
     delta=current-previous
     if delta<=0 or difference>=-dec('.02'):return False
     charge=(-difference).quantize(dec('.01'),rounding=ROUND_HALF_UP)
-    if charge<=0 or abs(charge-delta)>dec('.02') or abs(difference+charge)>dec('.02'):
+    # 3 cents, not 2: the ledger can sit a sub-cent to ~2 cents off the broker
+    # after a modeled regulatory-fee accrual (2026-11-23: 0.10 modeled, 0.083
+    # withheld). On 2026-11-24 the broker debited 0.71 interest for a 0.7125
+    # accrual, the ledger saw 0.69, and every run stopped on a 2.25-cent gap.
+    if charge<=0 or abs(charge-delta)>dec('.03') or abs(difference+charge)>dec('.02'):
         return False
     def accrue(s):
         ledger.check(s,token)
